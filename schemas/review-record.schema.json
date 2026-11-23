@@ -80,6 +80,69 @@
       "type": "string",
       "pattern": "^[a-f0-9]{64}$"
     },
+    "planDigest": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "counted": {
+      "type": "boolean"
+    },
+    "changes": {
+      "type": "object",
+      "properties": {
+        "plan": {
+          "type": "boolean"
+        },
+        "policy": {
+          "type": "boolean"
+        },
+        "reviewer": {
+          "type": "boolean"
+        },
+        "context": {
+          "type": "object",
+          "properties": {
+            "added": {
+              "maxItems": 30,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 200
+              }
+            },
+            "removed": {
+              "maxItems": 30,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 200
+              }
+            },
+            "changed": {
+              "maxItems": 30,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "maxLength": 200
+              }
+            }
+          },
+          "required": [
+            "added",
+            "removed",
+            "changed"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "required": [
+        "plan",
+        "policy",
+        "reviewer",
+        "context"
+      ],
+      "additionalProperties": false
+    },
     "findings": {
       "type": "array",
       "items": {

@@ -124,7 +124,17 @@ export const reviewSubjectViewSchema = z.strictObject({
   subject: id,
   workId: id.optional(),
   approved: z.boolean(),
-  rounds: z.strictObject({ used: count, max: z.number().int().positive().nullable() }),
+  /**
+   * Раунды предмета: `used` — засчитанные в текущей эпохе (с 0.1.0-alpha.68),
+   * `remaining` — до предела, `free` — повторные ревью неизменённого плана,
+   * не тратившие предел (необязательные, ревизия 8).
+   */
+  rounds: z.strictObject({
+    used: count,
+    max: z.number().int().positive().nullable(),
+    remaining: count.nullable().optional(),
+    free: count.optional(),
+  }),
   open: z.strictObject({ blocking: count, notes: count }),
   accepted: count,
   reviewer: bindingSchema.optional(),

@@ -6,7 +6,11 @@ import {
   HarnessError,
   REVIEW_ITEMS_LIMIT,
   WORKSPACE_OWNER,
+  contextChanges,
+  contextChangeText,
   contextDigest,
+  contextDigestMatches,
+  roundBudget,
   digestOf,
   findingId,
   mcpEnvironment,
@@ -97,6 +101,16 @@ export interface TechnicalReviewInput {
   /** Предел раундов предмета; нет — без предела. */
   maxRounds?: number;
   /**
+   * Digest содержания плана (`planContentDigest`): тот же план после
+   * одобренного раунда — повторное ревью без траты предела (0.1.0-alpha.68).
+   */
+  planDigest?: string;
+  /**
+   * Начало эпохи раундов: последняя доработка принятой работы графа со своим
+   * пределом попыток. Раунды до неё предел не тратят (0.1.0-alpha.68).
+   */
+  roundEpoch?: string;
+  /**
    * Раунды предмета, которые хост провёл до harness и хранит сам. Учитываются,
    * только пока у предмета нет раундов в движке: нумерация продолжается после
    * них, а находки последнего из них — прежние открытые находки, состояние
@@ -160,7 +174,7 @@ export async function technicalReview(
     last.authorRuntime === input.author &&
     last.approved &&
     last.reviewerBinding === binding &&
-    last.contextDigest === contextKey &&
+    contextDigestMatches(last.contextDigest, context) &&
     // Прежний раунд подтверждает предмет только под той же политикой: после её
     // правки — новый раунд, а не сохранённая запись.
     last.policyDigest === executionDigest(policy)
@@ -197,10 +211,48 @@ export async function technicalReview(
   // оплаченный раунд: вызова нет, пока решения нет.
   const waiting = escalatedFindings(decided, before);
   if (waiting.length) throw escalationError(kind, subject, waiting, before);
-  if (input.maxRounds !== undefined && before >= input.maxRounds)
+  // Почему нужен новый раунд и тратит ли он предел (0.1.0-alpha.68): тот же
+  // план, политика, reviewer и автор после одобренного раунда — повторное
+  // ревью (ответ на вопрос, документы, ревизия источника), без траты предела.
+  const changes = last
+    ? (() => {
+        const lastSnapshot = last.contextDigest
+          ? engine.read((v) => v.local('context-snapshots', WORKSPACE_OWNER, last.contextDigest!))
+          : undefined;
+        const ctx = contextChanges(lastSnapshot, context);
+        return {
+          plan:
+            last.planDigest && input.planDigest
+              ? last.planDigest !== input.planDigest
+              : last.digest !== digest,
+          policy: last.policyDigest !== executionDigest(policy),
+          reviewer: last.reviewerBinding !== binding || last.authorRuntime !== input.author,
+          context: {
+            added: ctx.added.slice(0, 30),
+            removed: ctx.removed.slice(0, 30),
+            changed: ctx.changed.slice(0, 30),
+          },
+        };
+      })()
+    : undefined;
+  const budget = roundBudget(rounds, input.maxRounds ?? null, {
+    since: input.roundEpoch,
+    history: prior?.rounds ?? 0,
+  });
+  const free =
+    !!last &&
+    last.approved &&
+    !!changes &&
+    !changes.plan &&
+    !changes.policy &&
+    !changes.reviewer &&
+    (input.maxRounds === undefined || budget.free < input.maxRounds);
+  if (input.maxRounds !== undefined && !free && budget.used >= input.maxRounds)
     throw new HarnessError(
       'ATTEMPTS_EXHAUSTED',
-      `Исчерпаны раунды ревью ${kind} ${subject}: ${before} из ${input.maxRounds}`,
+      `Исчерпаны раунды ревью ${kind} ${subject}: ${budget.used} из ${input.maxRounds}` +
+        (budget.since ? ` с доработки ${budget.since}` : '') +
+        (changes ? `; новый раунд нужен: ${roundReason(changes)}` : ''),
     );
   const adapter = adapters[choice.reviewer.runtime];
   if (!adapter)
@@ -354,6 +406,9 @@ export async function technicalReview(
     ...(contextKey ? { contextDigest: contextKey } : {}),
     policyDigest: executionDigest(policy),
     isolationDigest: isolationDigest(policy),
+    ...(input.planDigest ? { planDigest: input.planDigest } : {}),
+    counted: !free,
+    ...(changes ? { changes } : {}),
     findings,
     artifact: join(dir, 'review.json'),
   };
@@ -694,6 +749,38 @@ export function mergeTechnicalRound(
   if (result.approved && merged.some((f) => f.status === 'open' && f.severity === 'blocking'))
     issues.push('approved при блокирующей находке');
   return { findings: merged, issues, notes };
+}
+
+/** Почему понадобился новый раунд: что изменилось против прежнего (текст отказа и ответа). */
+export function roundReason(changes: NonNullable<ReviewRecord['changes']>) {
+  const parts = [
+    changes.plan ? 'изменился план' : '',
+    changes.policy ? 'изменилась политика' : '',
+    changes.reviewer ? 'другой reviewer или автор' : '',
+    changes.context.added.length + changes.context.removed.length + changes.context.changed.length
+      ? 'контекст: ' + contextChangeText({ ...changes.context, kinds: [] })
+      : '',
+  ].filter(Boolean);
+  return parts.join('; ') || 'прежний раунд не одобрил предмет';
+}
+
+/** Начало эпохи раундов графа: последняя доработка принятой работы со своим пределом попыток. */
+export function planRoundEpoch(
+  view: {
+    works(
+      graphId?: string,
+    ): readonly { rework?: { fresh: boolean; resumed?: true; reopenedAt: string } | undefined }[];
+  },
+  graphId: string,
+) {
+  let since: string | undefined;
+  // Представление без работ (сводка из записей ревью) — без эпохи.
+  if (typeof view.works !== 'function') return since;
+  for (const w of view.works(graphId) ?? []) {
+    const r = w.rework;
+    if (r?.fresh && !r.resumed && (!since || r.reopenedAt > since)) since = r.reopenedAt;
+  }
+  return since;
 }
 
 /** Предел раундов ревью плана и контракта по политике (`Harness.review`). */

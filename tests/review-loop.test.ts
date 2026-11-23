@@ -184,7 +184,7 @@ test('H14: reviewer переформулирует ту же находку — 
   const status = statusDataSchema.parse(h.status());
   const row = status.reviews![0]!;
   reviewSubjectSummarySchema.parse(row);
-  assert.deepEqual(row.rounds, { used: 3, max: policy.maxAttempts * 2 });
+  assert.deepEqual(row.rounds, { used: 3, max: policy.maxAttempts * 2, remaining: 3, free: 0 });
   assert.deepEqual(row.open, { blocking: 1, notes: 0 });
   assert.equal(row.spend.calls, 3);
   assert.equal(row.spend.knownUsd, 0.75);
@@ -198,7 +198,7 @@ test('H14: reviewer переформулирует ту же находку — 
   );
   assert.match(
     row.line,
-    /не одобрено, открытых блокирующих 1; раундов 3\/6; ревью \$0\.75, вызовов 3; ждёт решения оператора/,
+    /не одобрено, открытых блокирующих 1; раундов 3\/6, осталось 3; ревью \$0\.75, вызовов 3; ждёт решения оператора/,
   );
   assert.match(statusText(status), /Ревью:\n {2}план g: не одобрено/);
 
@@ -263,7 +263,7 @@ test('H14: одобрено с открытой заметкой — «одоб�
   assert.deepEqual(row.open, { blocking: 0, notes: 1 });
   assert.match(
     row.line,
-    /^план g: одобрено, открытых заметок 1; раундов 1\/6; ревью \$0\.25, вызовов 1$/,
+    /^план g: одобрено, открытых заметок 1; раундов 1\/6, осталось 5; ревью \$0\.25, вызовов 1$/,
   );
   const reviews = h.engine.read((v) => v.locals('reviews').map((r) => r.value));
   const calls = h.engine.read((v) => v.locals('usage').map((r) => r.value));

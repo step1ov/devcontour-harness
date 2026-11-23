@@ -7,9 +7,13 @@ import {
   HarnessError,
   WORKSPACE_OWNER,
   contextDigest,
+  contextDigestMatches,
+  contextChanges,
+  contextChangeText,
   contextIssues,
   digestOf,
   workGraphDigest,
+  planContentDigest,
   type Author,
   type ContextSnapshot,
   type ContractDocument,
@@ -48,7 +52,7 @@ import {
   verificationRows,
 } from '../report/verification.ts';
 import { acceptedTargets } from './target.ts';
-import { reviewRoundCap, technicalReview } from './review.ts';
+import { planRoundEpoch, reviewRoundCap, technicalReview } from './review.ts';
 import { reviewCode, type CodeReviewInput } from './review-code.ts';
 import { lifecyclePreflight } from './preflight.ts';
 import { policySourceChanged, type PolicySource } from './provenance.ts';
@@ -355,6 +359,14 @@ export class Harness {
           : {}),
       },
       maxRounds: reviewRoundCap(this.policy),
+      // Тот же план после одобренного раунда и доработка принятой работы —
+      // не новые траты предела раундов (0.1.0-alpha.68).
+      ...(input.kind === 'plan'
+        ? ((since) => ({
+            planDigest: planContentDigest(input.graph),
+            ...(since ? { roundEpoch: since } : {}),
+          }))(this.engine.read((v) => planRoundEpoch(v, subject)))
+        : {}),
       ...(input.dispositions?.length ? { dispositions: input.dispositions } : {}),
       ...(this.options.environment ? { environment: this.options.environment } : {}),
     });
@@ -666,7 +678,7 @@ export class Harness {
     digest: string,
     author: Author | undefined,
   ) {
-    const covered = this.engine.planRoundCovers(graphId, digest);
+    const covered = this.engine.planRoundCovers(graphId, digest, snapshot);
     if ('round' in covered) return { round: covered.round, reviewed: 'reused' as const };
     if (!author)
       throw new HarnessError(
@@ -1009,8 +1021,9 @@ export class Harness {
         ...(this.options.environment ? { environment: this.options.environment } : {}),
       });
     }
-    const contextKey = context ? contextDigest(context) : null;
-    const contextChanged = (graph.approval?.context?.digest ?? null) !== contextKey;
+    // Снимок сверяется по канонической форме и по digest прежних версий:
+    // тот же контекст в другом порядке — не смена контекста.
+    const contextChanged = !contextDigestMatches(graph.approval?.context?.digest ?? null, context);
     if (
       !graph.approval ||
       graph.approval.digest !== graph.digest ||
@@ -1034,7 +1047,9 @@ export class Harness {
         throw new HarnessError(
           'APPROVAL_REQUIRED',
           'approvalMode: operator — выполните review-plan и approve' +
-            (contextChanged ? ' (контекст изменился после ревью плана)' : ''),
+            (contextChanged
+              ? ` (контекст изменился после ревью плана — ${contextChangeText(contextChanges(this.contextOf(graph.id), context))})`
+              : ''),
         );
     }
     await this.runner.init();

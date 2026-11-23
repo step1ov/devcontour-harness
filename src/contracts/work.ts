@@ -143,6 +143,15 @@ export type WorkGraphInput = z.input<typeof workGraphSchema>;
 export const workOrderDigest = (order: WorkOrder) => digestOf(order);
 /** Digest графа закрепляет согласование: смена состава или поручения — новый digest. */
 export const workGraphDigest = (graph: WorkGraph) => digestOf(graph);
+/**
+ * Digest содержания плана (0.1.0-alpha.68): граф без ревизии источника
+ * набора. Поручения, их ревизии источника (постановки задач), зависимости и
+ * предпосылки входят; ревизия набора, которую меняют одни необязательные
+ * документы, — нет. Тот же digest после одобренного раунда — тот же план:
+ * его повторное ревью не тратит предел раундов (`ReviewRecord.counted`).
+ */
+export const planContentDigest = (graph: WorkGraph) =>
+  digestOf({ ...graph, source: { connector: graph.source.connector, ref: graph.source.ref } });
 
 /**
  * Структурная проверка графа до любой записи: повтор ID, неизвестная

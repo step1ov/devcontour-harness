@@ -112,7 +112,7 @@ export interface ReviewSubjectView {
   subject: string;
   workId?: string;
   approved: boolean;
-  rounds: { used: number; max: number | null };
+  rounds: { used: number; max: number | null; remaining?: number | null; free?: number };
   open: { blocking: number; notes: number };
   accepted: number;
   reviewer?: ViewBinding;
@@ -896,7 +896,7 @@ export interface OperatorReviewInput {
   workId?: string;
   at: string;
   approved: boolean;
-  rounds: { used: number; max: number | null };
+  rounds: { used: number; max: number | null; remaining?: number | null; free?: number };
   open: { blocking: number; notes: number };
   accepted: number;
   reviewer?: { runtime: string; model?: string };
@@ -1812,7 +1812,12 @@ function reviewView(
     subject: r.subject,
     ...(r.workId ? { workId: r.workId } : {}),
     approved: r.approved,
-    rounds: { ...r.rounds },
+    rounds: {
+      used: r.rounds.used,
+      max: r.rounds.max,
+      ...(r.rounds.remaining !== undefined ? { remaining: r.rounds.remaining } : {}),
+      ...(r.rounds.free !== undefined ? { free: r.rounds.free } : {}),
+    },
     open: { ...r.open },
     accepted: r.accepted,
     ...(r.reviewer ? { reviewer: bindingOf(r.reviewer as RuntimeBinding, c.mask) } : {}),

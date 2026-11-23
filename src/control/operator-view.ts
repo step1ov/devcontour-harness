@@ -82,7 +82,7 @@ import { carriedInput, statusOf } from './status.ts';
 import { acceptedTargets } from './target.ts';
 import { WorkflowQueue } from './workflow.ts';
 import { reviewRoundCap } from './review.ts';
-import { reviewSubjectSummary } from './review-summary.ts';
+import { reviewSubjectSummary, subjectRoundBudget } from './review-summary.ts';
 import { stageOfStep } from './stage.ts';
 import { setupProgress } from './setup-progress.ts';
 import { cachedUpdates, installedHarness, loadUpdatesConfig } from '../update/check.ts';
@@ -374,7 +374,18 @@ export function reviewsOf(
   const max = reviewRoundCap(policy);
   const plans: OperatorReviewInput[] = [...records.entries()].map(([key, r]) => {
     const spent = spend.get(key) ?? none;
-    const s = reviewSubjectSummary(r, max, spent);
+    const s = reviewSubjectSummary(
+      r,
+      max,
+      spent,
+      subjectRoundBudget(
+        v,
+        r.kind,
+        r.subject,
+        rows.filter((x) => x.kind === r.kind && x.subject === r.subject),
+        max,
+      ),
+    );
     const counts = findingCounts(r.findings);
     const waiting = escalatedFindings(r.findings, r.round);
     return {
@@ -382,7 +393,12 @@ export function reviewsOf(
       subject: s.subject,
       at: r.at,
       approved: s.approved,
-      rounds: s.rounds,
+      rounds: {
+        used: s.rounds.used,
+        max: s.rounds.max,
+        ...(s.rounds.remaining !== undefined ? { remaining: s.rounds.remaining } : {}),
+        ...(s.rounds.free !== undefined ? { free: s.rounds.free } : {}),
+      },
       open: s.open,
       accepted: s.accepted,
       reviewer: {

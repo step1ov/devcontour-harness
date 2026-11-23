@@ -96,7 +96,78 @@ export const sourceDigest = (entry: Omit<ContextSourceEntry, 'digest'>) =>
     references: (entry.references ?? []).map((f) => [f.path, f.digest]),
   });
 
-export const contextDigest = (snapshot: ContextSnapshot) => digestOf(snapshot);
+/**
+ * Каноническая форма снимка (0.1.0-alpha.68): источники и отсутствующие — по
+ * ID. Порядок, в котором их собрал ведущий или источник, не меняет снимок:
+ * те же источники в другом порядке — тот же digest и то же согласование.
+ * Порядок файлов внутри источника — часть его digest (`sourceDigest`) и не
+ * меняется.
+ */
+export const canonicalContext = (snapshot: ContextSnapshot): ContextSnapshot => ({
+  ...snapshot,
+  sources: [...snapshot.sources].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
+  missing: [...snapshot.missing].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
+});
+
+/** Digest снимка контекста — по канонической форме (порядок источников не важен). */
+export const contextDigest = (snapshot: ContextSnapshot) => digestOf(canonicalContext(snapshot));
+
+/**
+ * Digest снимка по правилу до 0.1.0-alpha.68 (байты в переданном порядке).
+ * Им записаны раунды и согласования прежних версий: сверка с ними
+ * (`contextDigestMatches`) не требует нового раунда после обновления.
+ */
+export const legacyContextDigest = (snapshot: ContextSnapshot) => digestOf(snapshot);
+
+/** Относится ли записанный digest к этому снимку (канонический или прежний). */
+export const contextDigestMatches = (
+  digest: string | null | undefined,
+  snapshot: ContextSnapshot | undefined,
+) =>
+  snapshot === undefined
+    ? digest === undefined || digest === null
+    : digest === contextDigest(snapshot) || digest === legacyContextDigest(snapshot);
+
+/**
+ * Что изменилось в снимке против прежнего: добавленные, убранные и
+ * изменённые (другой digest источника) источники по ID и их виды. Пустые
+ * списки — снимки те же по содержанию.
+ */
+export function contextChanges(
+  before: ContextSnapshot | undefined,
+  after: ContextSnapshot | undefined,
+) {
+  const of = (s: ContextSnapshot | undefined) =>
+    new Map((s?.sources ?? []).map((x) => [x.id, x] as const));
+  const a = of(before);
+  const b = of(after);
+  const added = [...b.keys()].filter((id) => !a.has(id)).sort();
+  const removed = [...a.keys()].filter((id) => !b.has(id)).sort();
+  const changed = [...b.keys()]
+    .filter((id) => a.has(id) && a.get(id)!.digest !== b.get(id)!.digest)
+    .sort();
+  const kinds = [...new Set([...added, ...removed, ...changed])]
+    .map((id) => (b.get(id) ?? a.get(id))!.kind)
+    .sort();
+  return { added, removed, changed, kinds: [...new Set(kinds)] };
+}
+
+/** Строка изменений снимка для отказа или ответа: какие источники изменились. */
+export function contextChangeText(changes: ReturnType<typeof contextChanges>) {
+  const part = (label: string, ids: string[]) =>
+    ids.length
+      ? `${label}: ${ids.slice(0, 10).join(', ')}${ids.length > 10 ? ` (+${ids.length - 10})` : ''}`
+      : '';
+  return (
+    [
+      part('добавлены', changes.added),
+      part('убраны', changes.removed),
+      part('изменены', changes.changed),
+    ]
+      .filter(Boolean)
+      .join('; ') || 'источники те же'
+  );
+}
 
 /**
  * Проверка снимка: digest каждого файла равен SHA-256 его байтов, `bytes`

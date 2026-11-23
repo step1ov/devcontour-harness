@@ -278,11 +278,66 @@ export const reviewRecordSchema = z.strictObject({
    * Согласование после их изменения требует нового раунда.
    */
   isolationDigest: digestSchema.optional(),
+  /**
+   * Digest содержания плана (`planContentDigest`, 0.1.0-alpha.68): граф без
+   * ревизии источника набора. Только у раундов плана новых версий.
+   */
+  planDigest: digestSchema.optional(),
+  /**
+   * Тратит ли раунд предел раундов предмета (0.1.0-alpha.68). `false` —
+   * повторное ревью неизменённого плана после одобренного раунда: те же
+   * поручения, политика, reviewer и автор, другой только контекст (ответ на
+   * вопрос, документы) или ревизия источника. Нет поля — раунд засчитан.
+   */
+  counted: z.boolean().optional(),
+  /** Что изменилось против прежнего раунда предмета: почему понадобился этот раунд. */
+  changes: z
+    .strictObject({
+      plan: z.boolean(),
+      policy: z.boolean(),
+      reviewer: z.boolean(),
+      context: z.strictObject({
+        added: z.array(z.string().max(200)).max(30),
+        removed: z.array(z.string().max(200)).max(30),
+        changed: z.array(z.string().max(200)).max(30),
+      }),
+    })
+    .optional(),
   /** Все находки предмета на момент раунда: новые и прежние с их статусами. */
   findings: z.array(reviewFindingSchema),
   artifact: z.string().max(1000),
 });
 export type ReviewRecord = z.infer<typeof reviewRecordSchema>;
+
+/**
+ * Предел раундов предмета (0.1.0-alpha.68): засчитанные раунды текущей эпохи
+ * и бесплатные повторные ревью неизменённого плана. Эпоха начинается с
+ * последней доработки принятой работы графа со своим пределом попыток
+ * (`since`): у доработки свой счёт раундов. Без эпохи счёт включает раунды
+ * хоста до harness (`history`). `remaining` — сколько засчитанных раундов
+ * ещё можно провести; бесплатных — не больше предела.
+ */
+export function roundBudget(
+  records: readonly Pick<ReviewRecord, 'round' | 'at' | 'counted'>[],
+  max: number | null,
+  options: { since?: string | undefined; history?: number } = {},
+) {
+  const sorted = [...records].sort((a, b) => a.round - b.round);
+  const since = options.since;
+  const epoch = since ? sorted.filter((r) => r.at > since) : sorted;
+  // Номер первого раунда движка сдвинут раундами хоста: они засчитаны.
+  const offset = since ? 0 : sorted.length ? sorted[0]!.round - 1 : (options.history ?? 0);
+  const used = offset + epoch.filter((r) => r.counted !== false).length;
+  const free = epoch.filter((r) => r.counted === false).length;
+  return {
+    used,
+    free,
+    max,
+    remaining: max === null ? null : Math.max(0, max - used),
+    ...(since ? { since } : {}),
+  };
+}
+export type RoundBudget = ReturnType<typeof roundBudget>;
 
 /**
  * Сводка истории ревью предмета (плана или контракта) для `status`, `explain`
@@ -297,8 +352,19 @@ export const reviewSubjectSummarySchema = z.strictObject({
   approved: z.boolean(),
   /** Раундов проведено (номер последнего) и предел раундов; `null` — без предела. */
   rounds: z.strictObject({
-    used: z.number().int().positive(),
+    /**
+     * Засчитанные раунды текущей эпохи (с 0.1.0-alpha.68; до неё — номер
+     * последнего раунда). После доработки принятой работы — `0`, пока нового
+     * раунда не было.
+     */
+    used: z.number().int().min(0),
     max: z.number().int().positive().nullable(),
+    /** Сколько засчитанных раундов осталось до предела (`null` — без предела). */
+    remaining: z.number().int().min(0).nullable().optional(),
+    /** Бесплатные повторные ревью неизменённого плана в эпохе. */
+    free: z.number().int().min(0).optional(),
+    /** Начало эпохи: доработка принятой работы со своим пределом. */
+    since: isoTimeSchema.optional(),
   }),
   open: z.strictObject({ blocking: z.number().int().min(0), notes: z.number().int().min(0) }),
   accepted: z.number().int().min(0),

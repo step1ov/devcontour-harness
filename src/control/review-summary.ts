@@ -6,13 +6,15 @@ import {
   findingCounts,
   openRounds,
   reviewVerdictText,
+  roundBudget,
+  type RoundBudget,
   type ExecutionPolicy,
   type ExecutionView,
   type ReviewRecord,
   type ReviewSubjectSummary,
 } from '../contracts/index.ts';
 import { callRecords, knownCost } from '../engine/usage.ts';
-import { reviewRoundCap } from './review.ts';
+import { planRoundEpoch, reviewRoundCap } from './review.ts';
 import { spendText } from './stage.ts';
 
 /** Предел предметов в сводке ревью `status` и `explain`: последние по времени раунда. */
@@ -41,12 +43,14 @@ export function reviewSummaryRows(
   options: { graphId?: string } = {},
 ): { reviews: ReviewSubjectSummary[]; reviewsTruncated: number } {
   const last = new Map<string, ReviewRecord>();
+  const all = new Map<string, ReviewRecord[]>();
   for (const { value: r } of view.locals('reviews', WORKSPACE_OWNER)) {
     if (options.graphId !== undefined && !(r.kind === 'plan' && r.subject === options.graphId))
       continue;
     const key = `${r.kind}\u0000${r.subject}`;
     const prev = last.get(key);
     if (!prev || r.round > prev.round) last.set(key, r);
+    all.set(key, [...(all.get(key) ?? []), r]);
   }
   if (!last.size) return { reviews: [], reviewsTruncated: 0 };
   const spend = new Map<string, { calls: number; knownUsd: number; unknownCalls: number }>();
@@ -63,7 +67,14 @@ export function reviewSummaryRows(
   const reviews = [...last.entries()]
     .sort((a, b) => b[1].at.localeCompare(a[1].at) || a[0].localeCompare(b[0]))
     .slice(0, REVIEW_SUMMARY_ROWS)
-    .map(([key, r]) => reviewSubjectSummary(r, max, spend.get(key)));
+    .map(([key, r]) =>
+      reviewSubjectSummary(
+        r,
+        max,
+        spend.get(key),
+        subjectRoundBudget(view, r.kind, r.subject, all.get(key) ?? [r], max),
+      ),
+    );
   return { reviews, reviewsTruncated: Math.max(0, last.size - REVIEW_SUMMARY_ROWS) };
 }
 
@@ -76,6 +87,8 @@ export function reviewSubjectSummary(
     knownUsd: 0,
     unknownCalls: 0,
   },
+  /** Предел раундов по всем раундам предмета (0.1.0-alpha.68); нет — по номеру последнего. */
+  budget?: RoundBudget,
 ): ReviewSubjectSummary {
   const counts = findingCounts(r.findings);
   const waiting = escalatedFindings(r.findings, r.round);
@@ -94,7 +107,16 @@ export function reviewSubjectSummary(
   const spend = { ...spent, knownUsd: Math.round(spent.knownUsd * 1e6) / 1e6 };
   const line = [
     `${r.kind === 'plan' ? 'план' : 'контракт'} ${r.subject}: ${reviewVerdictText(r.approved, counts, 'ru')}`,
-    `раундов ${r.round}${max === null ? '' : '/' + max}`,
+    budget
+      ? `раундов ${budget.used}${max === null ? '' : '/' + max}` +
+        (budget.remaining !== null
+          ? budget.remaining === 0
+            ? ', осталось 0: раунд изменённого плана — после решения о пределе'
+            : `, осталось ${budget.remaining}`
+          : '') +
+        (budget.free ? `, без траты предела ${budget.free}` : '') +
+        (budget.since ? ' (с доработки)' : '')
+      : `раундов ${r.round}${max === null ? '' : '/' + max}`,
     `ревью ${spendText(spend, 'ru')}`,
     ...(escalation
       ? [
@@ -107,7 +129,15 @@ export function reviewSubjectSummary(
     subject: r.subject,
     digest: r.digest,
     approved: r.approved,
-    rounds: { used: r.round, max },
+    rounds: budget
+      ? {
+          used: budget.used,
+          max,
+          remaining: budget.remaining,
+          free: budget.free,
+          ...(budget.since ? { since: budget.since } : {}),
+        }
+      : { used: r.round, max },
     open: { blocking: counts.blocking, notes: counts.notes },
     accepted: counts.accepted,
     spend,
@@ -132,4 +162,20 @@ export function reviewsText(
   ]
     .join('\n')
     .concat('\n');
+}
+
+/**
+ * Предел раундов предмета по всем его раундам (0.1.0-alpha.68): у плана —
+ * с эпохи доработки принятой работы графа.
+ */
+export function subjectRoundBudget(
+  view: ExecutionView,
+  kind: 'plan' | 'contract',
+  subject: string,
+  records: readonly ReviewRecord[],
+  max: number | null,
+) {
+  return roundBudget(records, max, {
+    since: kind === 'plan' ? planRoundEpoch(view, subject) : undefined,
+  });
 }
