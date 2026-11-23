@@ -14,6 +14,7 @@ import { join } from 'node:path';
 import {
   HarnessError,
   WORKSPACE_OWNER,
+  canonicalContext,
   contextDigest,
   digestOf,
   executionPolicySchema,
@@ -2368,5 +2369,35 @@ test('A68-r2: заменённое уточнение в держащейся о
   assert.equal(work.status, 'done', work.failure);
   const last = h.engine.read((v) => v.attempts(a.workId).at(-1)!);
   assert.equal(last.input?.requestId, id, 'ответ связан с попыткой');
+  h.close();
+});
+
+test('A68-r2: снимок с ответом записан в обоих порядках (input-context прежней версии и ревью отсортированной копии) — input-resolve применяет без нового раунда', async () => {
+  const ctx = hsetup({ scenario: { writer: implement(), reviewer: approve() } });
+  const { h, graphId } = legacyApproved(ctx);
+  h.engine.lead('controller');
+  h.engine.resume();
+  const a = h.engine.claim('controller')!;
+  h.engine.fail(a.id, a.token, 'вопрос', { kind: 'needs-input', input: outcome() });
+  const id = h.inputRequests({ workId: a.workId })[0]!.id;
+  h.answerInput(id, { text: 'Hello, <name>!', actor: { kind: 'operator' } }, 1);
+  const request = h.inputRequest(id);
+  const base = h.engine.read((v) => {
+    const d = v.graph(graphId)!.approval!.context!.digest!;
+    return v.local('context-snapshots', WORKSPACE_OWNER, d)!;
+  });
+  // input-context прежней версии записал снимок «как пришло» (X)…
+  const unsorted = withInput(base, inputContextSource(request, latestAnswer(request)!));
+  // …а ревью прошла отсортированная копия того же содержания (C).
+  const sorted = canonicalContext(unsorted);
+  for (const s of [unsorted, sorted])
+    h.engine.host.store.transact('run.context', (tx) =>
+      tx.putLocal('context-snapshots', WORKSPACE_OWNER, digestOf(s), s),
+    );
+  const g = h.engine.read((v) => v.graph(graphId)!);
+  h.engine.recordReview({ ...planReview(h.engine, g, 2), contextDigest: digestOf(sorted) });
+  const result = await h.resolveInput(id, { author: 'claude' });
+  assert.equal('reviewed' in result && result.reviewed, 'reused');
+  assert.equal(result.applied, true);
   h.close();
 });

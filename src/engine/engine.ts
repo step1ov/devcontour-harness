@@ -1,6 +1,7 @@
 import { RU, ruCount } from '../contracts/plural.ts';
 import { randomUUID } from 'node:crypto';
 import {
+  canonicalContextDigest,
   contextDigestMatches,
   STAGE_NAME_LIMIT,
   noRetryEnvironmentCauses,
@@ -3693,7 +3694,17 @@ export class Engine {
     if (this.host.input)
       return { review: this.host.input.review(work, contextDigest, actor, tx, request) };
     const checked = this.approvalRules(tx, work.graphId, actor);
-    if ((checked.last.contextDigest ?? null) !== contextDigest)
+    // Снимок раунда и снимок ответа сверяются по содержанию: тот же снимок
+    // в другом порядке источников (записанный прежней версией) — тот же
+    // контекст (0.1.0-alpha.68).
+    const same = (a: string | null, b: string | null) => {
+      if (a === b) return true;
+      if (!a || !b) return false;
+      const x = tx.local('context-snapshots', WORKSPACE_OWNER, a);
+      const y = tx.local('context-snapshots', WORKSPACE_OWNER, b);
+      return !!x && !!y && canonicalContextDigest(x) === canonicalContextDigest(y);
+    };
+    if (!same(checked.last.contextDigest ?? null, contextDigest))
       throw new HarnessError(
         'APPROVAL_REQUIRED',
         'Последний раунд ревью плана рассматривал другой снимок контекста: проведите review-plan со снимком ответа',

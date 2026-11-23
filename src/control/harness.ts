@@ -314,16 +314,18 @@ export class Harness {
       digest
         ? this.engine.read((v) => v.local('context-snapshots', WORKSPACE_OWNER, digest))
         : undefined;
-    if (stored(contextDigest(snapshot))) return snapshot;
+    // Сначала — снимок последнего раунда ревью плана и действующего
+    // согласования: с ними сверяются продолжение и выдача (ревью r2).
     const canonical = canonicalContextDigest(snapshot);
     const candidates = [
-      this.engine.read((v) => v.graph(graphId)?.approval?.context?.digest),
       this.engine.reviews('plan', graphId).at(-1)?.contextDigest,
+      this.engine.read((v) => v.graph(graphId)?.approval?.context?.digest),
     ];
     for (const digest of candidates) {
       const known = stored(digest);
       if (known && canonicalContextDigest(known) === canonical) return known;
     }
+    if (stored(contextDigest(snapshot))) return snapshot;
     return canonicalContext(snapshot);
   }
 
