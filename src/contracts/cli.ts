@@ -610,7 +610,7 @@ export const cliCommands = {
   },
   cleanup: {
     description:
-      'Довести незавершённую очистку закончившейся попытки: повторить teardown по сохранённым receipt окружений и убрать её рабочие деревья; с ID smoke (LS-…) — повторить teardown его окружения или сверить запись cleanup-failed, у которой рабочего дерева и ресурсов Docker с меткой прогона уже нет, в cleaned (событие environment.reconciled); модели, gates и Git-приёмка не вызываются',
+      'Довести незавершённую очистку закончившейся попытки: повторить teardown по сохранённым receipt окружений и убрать её рабочие деревья; с ID smoke (LS-…) — повторить teardown его окружения или сверить запись cleanup-failed без рабочего дерева в cleaned (событие environment.reconciled), только когда шаги вызывают docker/podman сами, демон тот же, что у фазы, и ресурсов с меткой прогона нет; иначе NOT_READY; модели, gates и Git-приёмка не вызываются',
     writes: true,
     idempotency: 'Повтор после успешной очистки отвечает nothing-pending и ничего не меняет',
     args: [
