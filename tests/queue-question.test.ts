@@ -283,7 +283,7 @@ test('alpha.67 P5-4: записанный бюджетный блок устар
     const w = tx.work('b-ready')!;
     tx.putWork({
       ...w,
-      budgetBlock: { reason: 'прежний предел', at: new Date(0).toISOString() } as any,
+      budgetBlock: { reason: 'прежний предел', at: new Date(0).toISOString() },
     });
   });
   assert.equal(runnerOfStatus(ctx)?.ready, 1);
