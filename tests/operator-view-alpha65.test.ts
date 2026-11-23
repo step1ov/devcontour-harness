@@ -248,6 +248,8 @@ test('alpha.65: прогноз — объём всего выпуска, «пр�
         percent: 60,
         attempt: { n: 2, max: 3 },
         retry: 'repair',
+        // alpha.68: этап идущей попытки к приёмке (исполнитель — 0,2 → 0,4).
+        stageProgress: { stage: 'code', from: 0.2, to: 0.4 },
         line: 'WEB-3: ~60 %, попытка 2 из 3, исправляет замечания',
       },
     ]);
@@ -313,10 +315,17 @@ test('alpha.65: прогноз — объём всего выпуска, «пр�
     assert.equal(finished.time.finishedAt, at(10));
     assert.equal(finished.time.elapsedMs, 110 * 60_000);
     assert.equal(finished.time.estimate, 'nothing');
-    // Ревизия 6: код принят, но ведущему осталось — его доля отдельно.
+    // alpha.68: код принят, ведущий завершает уже 1 ч 10 мин — дольше своей
+    // обычной доли (~40 мин): её оценка не показывается, только сколько идёт.
+    assert.equal(finished.time.lead?.ms, 40 * 60_000);
+    assert.deepEqual(finished.time.finishing, {
+      since: at(10),
+      elapsedMs: 70 * 60_000,
+      exceeded: true,
+    });
     assert.equal(
       finished.time.line,
-      'прошло 1 ч 50 мин · осталось: ничего + работа ведущего ~40 мин',
+      'прошло 1 ч 50 мин · код принят · осталось немного: ведущий завершает (идёт 1 ч 10 мин)',
     );
     assert.equal(reported.time.line, 'прошло 1 ч 50 мин · осталось: ничего');
   } finally {

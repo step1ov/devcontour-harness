@@ -898,6 +898,9 @@ export function collectOperatorViewInput(
         title: w.order.title,
         ...(planned ? { planned: true as const } : {}),
         ...(w.order.kind === 'infra' ? { kind: 'infra' as const } : {}),
+        ...((seen) => (seen ? { seenAt: seen.at } : {}))(
+          v.local('work-seen', WORKSPACE_OWNER, sw.id),
+        ),
         ...(sw.resultSha ? { resultSha: sw.resultSha } : {}),
         ...(w.order.dependsOn.length ? { dependsOn: w.order.dependsOn } : {}),
         stage: {
@@ -1131,6 +1134,9 @@ export function collectOperatorViewInput(
               },
             }
           : {})(v.local('lead', WORKSPACE_OWNER, 'log')),
+      ...((outline) => (outline ? { outline } : {}))(
+        v.local('release-outline', WORKSPACE_OWNER, 'outline'),
+      ),
       ...((r) => (r ? { resources: r } : {}))(
         resourcesInputOf(policy, h.stateDir, view.baseDir, {
           // Попытка закончилась по снимку хранилища: квитанция окружения
