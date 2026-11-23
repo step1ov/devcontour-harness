@@ -1,6 +1,7 @@
 import { RU, ruCount } from '../contracts/plural.ts';
 import { randomUUID } from 'node:crypto';
 import {
+  contextDigestMatches,
   STAGE_NAME_LIMIT,
   noRetryEnvironmentCauses,
   type NoRetryEnvironmentCause,
@@ -999,14 +1000,19 @@ export class Engine {
    * причина. Только чтение; им `Harness.resolveInput` и `carryInputOf`
    * решают, нужен ли новый раунд.
    */
-  planRoundCovers(graphId: string, contextDigest: string | null) {
+  planRoundCovers(graphId: string, contextDigest: string | null, snapshot?: ContextSnapshot) {
     return this.read((v): { round: number } | { reason: string } => {
       try {
         const { last } = this.approvalRules(v, graphId, this.policy.approvalMode);
         // Отклонённый раунд не переиспользуется ни в каком режиме: новый раунд
         // с отказом — тоже отказ (REVIEW_REJECTED).
         if (!last.approved) return { reason: `раунд ${last.round} не одобрил граф` };
-        if ((last.contextDigest ?? null) !== contextDigest)
+        // Тот же снимок в другом порядке источников или записанный digest
+        // прежней версии — тот же контекст (0.1.0-alpha.68).
+        if (
+          (last.contextDigest ?? null) !== contextDigest &&
+          !(snapshot && contextDigestMatches(last.contextDigest, snapshot))
+        )
           return { reason: `раунд ${last.round} рассматривал другой снимок контекста` };
         return { round: last.round };
       } catch (error) {
@@ -3587,7 +3593,7 @@ export class Engine {
         // остановка уже не держится; иначе продолжение — только applyInput.
         // Сведение для истории: решает перенос его чтение (`carryAllowed`).
         ...(lifecycle === 'superseded'
-          ? { carry: this.carryAllowed(tx, { ...request, lifecycle: 'superseded' }) }
+          ? { carry: this.carryMovedOn(tx, { ...request, lifecycle: 'superseded' }) }
           : {}),
         // Снятие устаревшего переноса не стирает запись замены (преемник,
         // перенос, причина): она остаётся прежним закрытием.
@@ -3731,6 +3737,20 @@ export class Engine {
       : this.host.basis.orderDigest(work, view) !== basis.orderDigest;
   }
 
+  /**
+   * Сведение для истории замены (`closed.carry`): работа уже ушла из
+   * исходной остановки (или изменилась постановка) — правило переноса до
+   * 0.1.0-alpha.68. Решает перенос `carryAllowed`.
+   */
+  private carryMovedOn(view: ExecutionView, request: InputRequest) {
+    if (request.lifecycle !== 'superseded') return false;
+    const answer = latestAnswer(request);
+    if (!answer) return false;
+    const orderChanged = this.orderMoved(view, view.work(request.workId), request.originBasis);
+    if (answer.kind === 'requirement-change') return orderChanged;
+    return orderChanged || !this.originHolds(view, request);
+  }
+
   carryAllowed(view: ExecutionView, request: InputRequest) {
     if (request.lifecycle !== 'superseded') return false;
     const answer = latestAnswer(request);
@@ -3740,7 +3760,13 @@ export class Engine {
     // трекера одной ревизией перенос не открывает.
     const orderChanged = this.orderMoved(view, work, request.originBasis);
     if (answer.kind === 'requirement-change') return orderChanged;
-    return orderChanged || !this.originHolds(view, request);
+    // Уточнение заменённого запроса переносится всегда (0.1.0-alpha.68):
+    // `applyInput` берёт только `answered`, и заменённый вопрос, чья
+    // остановка снова держится (новая редакция вернула работу в готовую с той
+    // же постановкой и попыткой вопроса), иначе не имел бы публичного пути к
+    // работе, ради которой его задали. Перенос в держащуюся остановку — то же
+    // продолжение: ревью снимка с ответом, основание и обычный повтор.
+    return true;
   }
 
   /** Неприменённые источники ответов снимка с правилом переноса этого движка. */
@@ -4002,7 +4028,12 @@ export class Engine {
       if (request.lifecycle === 'pending')
         throw new HarnessError('INPUT_REQUIRED', `На вопрос ${id} ещё нет ответа`);
       if (request.lifecycle !== 'answered')
-        throw new HarnessError('NOT_READY', `Запрос ${id} ${request.lifecycle}`);
+        throw new HarnessError(
+          'NOT_READY',
+          request.lifecycle === 'superseded'
+            ? `Запрос ${id} superseded: ответ заменённого вопроса доводится до работы переносом — harness input-carry --request ${id} --reason <почему> --author <runtime ведущего>`
+            : `Запрос ${id} ${request.lifecycle}`,
+        );
       this.expectVersion(request, options.expectedVersion);
       if (!answer || answer.digest !== options.answerDigest)
         throw new HarnessError(

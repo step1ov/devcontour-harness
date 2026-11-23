@@ -2193,3 +2193,48 @@ test('R7-3: отказ из-за потерянного снимка объяс�
   await ctx.runner.drain();
   assert.equal(ctx.engine.read((v) => v.attempts('add-greeting')).length, 1);
 });
+
+test('A68-1d: заменённое уточнение при держащейся остановке переносится — публичный путь к работе вопроса есть', () => {
+  // Тупик alpha.67: вопрос заменили, пока работа ушла из остановки (новая
+  // редакция вернула её в draft), затем согласование вернуло её в готовую
+  // с той же постановкой и попыткой вопроса — остановка снова держится.
+  // input-apply берёт только answered, а перенос отказывал «остановка
+  // держится». Теперь перенос — путь продолжения.
+  const env = stopped();
+  const answered = env.engine.answerInput(
+    env.request.id,
+    { text: 'Hello', actor: { kind: 'operator' } },
+    1,
+  ).request;
+  const closed = env.engine.supersedeInput(
+    env.request.id,
+    { by: 'lead', reason: 'перенос после новой редакции', successor: 'w' },
+    answered.version,
+  ).request;
+  assert.equal(closed.lifecycle, 'superseded');
+  assert.equal(
+    env.engine.read((v) => env.engine.originHolds(v, closed)),
+    true,
+    'исходная остановка держится',
+  );
+  assert.equal(
+    env.engine.read((v) => env.engine.carryAllowed(v, closed)),
+    true,
+    'заменённое уточнение переносится',
+  );
+  const digest = reviewSnapshot(env, env.graph);
+  const proposal = env.engine.proposeCarry(env.request.id, digest);
+  assert.deepEqual(proposal.problems, []);
+  const carried = env.engine.carryInput(env.request.id, {
+    contextDigest: digest,
+    actor: 'agent',
+    expectedVersion: closed.version,
+    targetDigest: proposal.target!.digest,
+  });
+  assert.equal(carried.carried, true);
+  env.clock.now += 1000;
+  const next = env.engine.claim('c1')!;
+  assert.equal(next.workId, 'w');
+  assert.equal(next.pinned?.contextDigest, digest);
+  assert.equal(next.input?.requestId, env.request.id, 'ответ связан с попыткой');
+});
