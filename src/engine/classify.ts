@@ -5,6 +5,7 @@ import {
   type EnvironmentCause,
   type ErrorCode,
   type FailureKind,
+  withoutStepOutput,
 } from '../contracts/index.ts';
 
 import { CleanupFailure } from '../environment/lifecycle.ts';
@@ -55,11 +56,13 @@ const byCode: Partial<Record<ErrorCode, FailureKind>> = {
   BUDGET_EXHAUSTED: 'budget',
 };
 
-export function classifyFailure(error: unknown, message: string): FailureKind {
+export function classifyFailure(error: unknown, full: string): FailureKind {
+  // Хвост вывода шага окружения — пояснение, а не признак класса.
+  const message = withoutStepOutput(full);
   // Незавершённая очистка не меняет класс отказа работы; без него это отказ
   // окружения — ресурсы попытки не освобождены.
   if (error instanceof CleanupFailure)
-    return error.original ? classifyFailure(error.original, message) : 'environment';
+    return error.original ? classifyFailure(error.original, full) : 'environment';
   if (error instanceof TaskFailure) return error.kind;
   // Приёмка отказала по правилу (нет доказательства, ревью, область): класс —
   // это правило, а не «неизвестно».
@@ -98,9 +101,10 @@ const providerLimit = (message: string) =>
  */
 export function environmentCauseOf(
   error: unknown,
-  message: string,
+  full: string,
   kind: FailureKind,
 ): EnvironmentCause {
+  const message = withoutStepOutput(full);
   if (kind === 'stalled') return 'stalled';
   if (kind === 'provider-auth') return providerLimit(message) ? 'provider-limit' : 'provider-auth';
   // Остановка исполнителя из-за окружения — класс `needs-lead`, причина своя.
@@ -112,7 +116,7 @@ export function environmentCauseOf(
     return 'writer-environment';
   if (kind !== 'environment') return 'none';
   if (error instanceof CleanupFailure)
-    return error.original ? environmentCauseOf(error.original, message, kind) : 'cleanup';
+    return error.original ? environmentCauseOf(error.original, full, kind) : 'cleanup';
   if (error instanceof TaskFailure && error.diagnosis) return error.diagnosis;
   if (
     transportFailure(message) ||

@@ -7,6 +7,7 @@ import {
   lifecycleSchema,
   stepSchema,
   TaskFailure,
+  stepOutputText,
   type ExecutionPolicy,
   type ToolchainPin,
 } from '../contracts/index.ts';
@@ -28,7 +29,11 @@ import { containerIdentity, containerUse } from './container-identity.ts';
 import { ensurePortsFree } from './port-probe.ts';
 import { leaseScope } from './survivors.ts';
 import { redactor, type Redactor } from './redaction.ts';
+import { maskedTail } from '../verification/failure-summary.ts';
 export { redactor } from './redaction.ts';
+
+/** Предел хвоста вывода упавшего шага (сообщение, receipt, smoke). */
+export const STEP_TAIL_LIMIT = 600;
 
 type Environment = z.infer<typeof environmentSchema>;
 type Lifecycle = z.infer<typeof lifecycleSchema>;
@@ -170,6 +175,13 @@ export interface StepOutcome {
   timedOut: boolean;
   /** Шаг остановлен сигналом фазы (отмена, предел фазы). */
   aborted: boolean;
+  /** Сигнал, которым завершился процесс шага (`SIGKILL` после предела, чужой сигнал). */
+  signal?: string;
+  /**
+   * Хвост вывода упавшего шага (0.1.0-alpha.68): последние строки stdout и
+   * stderr с маской секретов, до `STEP_TAIL_LIMIT` знаков.
+   */
+  tail?: string;
   /** Код системной ошибки запуска (`ENOENT` — нет исполняемого файла, `EACCES`). */
   spawnError?: string;
   log?: string;
@@ -229,19 +241,34 @@ export async function runSteps(
       result.code && !result.timedOut && !signal.aborted
         ? registryFailureLine(step.command, result.code, result.stdout + '\n' + result.stderr)
         : undefined;
+    const failed = Boolean(result.code || result.timedOut || signal.aborted);
+    // Причина упавшего шага — в тексте отказа, receipt и smoke, а не только в
+    // логе: сигнал процесса и хвост вывода с маской (0.1.0-alpha.68).
+    const exitSignal = failed ? (result.diagnostics?.signal ?? undefined) : undefined;
+    const tail = failed
+      ? maskedTail(result.stdout, result.stderr, execution.redact, STEP_TAIL_LIMIT)
+      : '';
     execution.onStep?.({
       stage,
       id: step.id,
       durationMs: Date.now() - started,
-      ok: !result.code && !result.timedOut && !signal.aborted,
+      ok: !failed,
       exitCode: result.code,
       timedOut: result.timedOut,
       aborted: signal.aborted,
       log,
+      ...(exitSignal ? { signal: exitSignal } : {}),
+      ...(tail ? { tail } : {}),
       ...(registry ? { registryFailure: execution.redact(registry) } : {}),
     });
-    if (result.code || result.timedOut || signal.aborted) {
-      const message = `Шаг ${step.id}: exit=${result.code}; timeout=${result.timedOut}`;
+    if (failed) {
+      const message =
+        `Шаг ${step.id}: exit=${result.code}; timeout=${result.timedOut}` +
+        (exitSignal ? `; signal=${exitSignal}` : '') +
+        (stage === 'ready' || stage === 'setup' || stage === 'teardown'
+          ? `; стадия ${stage}`
+          : '') +
+        stepOutputText(tail);
       // Шаг установки зависимостей, упавший на сети или реестре: отказ среды
       // с причиной в сообщении, а не неизвестный (environment/dependency-network.ts).
       const network =
@@ -590,6 +617,14 @@ async function phaseEnvironment<T>(
   };
   const receiptFile: ReceiptFile = { path: receiptPath, data: receipt };
   await writeFile(receiptPath, JSON.stringify(receipt, null, 2));
+  // Упавшие шаги фазы — в receipt (0.1.0-alpha.68): какой шаг, код или
+  // сигнал, предел и хвост вывода с маской; teardown — отдельно.
+  const failedSteps: StepOutcome[] = [];
+  const observe = execution.onStep;
+  execution.onStep = (s) => {
+    if (!s.ok) failedSteps.push(s);
+    observe?.(s);
+  };
   let result: T | undefined, failure: Error | undefined;
   try {
     await measure('setup', async () => {
@@ -627,11 +662,44 @@ async function phaseEnvironment<T>(
       `${failure instanceof Error ? failure.message + '; ' : ''}Очистка окружения не завершена: ${error instanceof Error ? error.message : String(error)}`,
       failure,
     );
+  } finally {
+    execution.onStep = observe;
   }
-  await writeFile(receiptPath, JSON.stringify(receipt, null, 2));
+  const stepFailure = failedSteps.find((s) => s.stage !== 'teardown');
+  const cleanupFailures = failedSteps.filter((s) => s.stage === 'teardown');
+  if (stepFailure) receiptFile.data.failure = stepReceipt(stepFailure);
+  if (cleanupFailures.length) receiptFile.data.cleanupFailure = cleanupFailures.map(stepReceipt);
+  await writeFile(receiptPath, JSON.stringify(receiptFile.data, null, 2));
   if (failure) throw failure;
   return result as T;
 }
+/**
+ * Упавший шаг в receipt окружения: стадия, шаг, код выхода или сигнал,
+ * предел (`timedOut`), отмена фазы, отказ запуска и хвост вывода с маской.
+ */
+export interface StepFailureReceipt {
+  stage: string;
+  step: string;
+  exitCode?: number;
+  signal?: string;
+  timedOut: boolean;
+  aborted: boolean;
+  spawnError?: string;
+  tail?: string;
+  log?: string;
+}
+const stepReceipt = (s: StepOutcome): StepFailureReceipt => ({
+  stage: s.stage,
+  step: s.id,
+  ...(s.exitCode !== undefined ? { exitCode: s.exitCode } : {}),
+  ...(s.signal ? { signal: s.signal } : {}),
+  timedOut: s.timedOut,
+  aborted: s.aborted,
+  ...(s.spawnError ? { spawnError: s.spawnError } : {}),
+  ...(s.tail ? { tail: s.tail } : {}),
+  ...(s.log ? { log: s.log } : {}),
+});
+
 async function teardown(
   lifecycle: Lifecycle,
   cwd: string,

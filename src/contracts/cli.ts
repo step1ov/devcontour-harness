@@ -19,6 +19,7 @@ import {
   activitySchema,
   livenessStateSchema,
   stallActionSchema,
+  gateFailureSummarySchema,
 } from './execution.ts';
 import { environmentCauseSchema, readRunEventSchema } from './events.ts';
 import { deliveryStateSchema, resultEnvelopeSchema } from './result.ts';
@@ -2593,6 +2594,11 @@ export const gatesDataSchema = z.strictObject({
        * процессов недоступен. Правка кода её не снимет.
        */
       environment: environmentCauseSchema.optional(),
+      /**
+       * Выжимка провала (0.1.0-alpha.68): упавшие тесты, строка ошибки, хвост
+       * вывода с маской; `withheld` — gate не назвал причину.
+       */
+      failureSummary: gateFailureSummarySchema.optional(),
     }),
   ),
   /** Каталог логов и артефактов проверки. */
@@ -2657,6 +2663,10 @@ export const smokeDataSchema = z.strictObject({
       durationMs: z.number().int().nonnegative(),
       exitCode: z.number().int().optional(),
       timedOut: z.boolean().optional(),
+      /** Сигнал, которым завершился процесс упавшего шага (0.1.0-alpha.68). */
+      signal: z.string().max(40).optional(),
+      /** Хвост вывода упавшего шага с маской секретов (0.1.0-alpha.68). */
+      tail: z.string().max(1200).optional(),
       log: z.string().optional(),
       /** Исход хранилища зависимостей: `hit`, `partial`, `miss: причина` (промах — не отказ). */
       detail: z.string().optional(),
@@ -2682,6 +2692,8 @@ export const smokeDataSchema = z.strictObject({
       stage: z.string().optional(),
       step: z.string().optional(),
       message: z.string(),
+      /** Хвост вывода упавшего шага с маской секретов (0.1.0-alpha.68). */
+      tail: z.string().max(1200).optional(),
       advice: z.string(),
     })
     .optional(),

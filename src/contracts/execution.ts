@@ -384,6 +384,24 @@ export const evidenceFindingSchema = z.strictObject({
   late: lateFindingSchema.optional(),
 });
 
+/**
+ * Безопасная выжимка провала gate (0.1.0-alpha.68): имена упавших тестов
+ * (отчёт JUnit gate, вывод spec/TAP или JUnit-файлы, которые команда пишет
+ * сама), первая строка утверждения или ошибки и хвост вывода — всё с маской
+ * секретов и в пределах. `withheld` — gate не назвал ни теста, ни ошибки
+ * (вывод скрыт обёрткой): gate должен печатать выжимку сам.
+ */
+export const gateFailureSummarySchema = z.strictObject({
+  tests: z.array(z.string().min(1).max(200)).max(20).optional(),
+  testsTruncated: z.literal(true).optional(),
+  assertion: z.string().min(1).max(300).optional(),
+  tail: z.string().min(1).max(1200).optional(),
+  /** Откуда имена тестов: отчёт gate, вывод команды или её собственный отчёт. */
+  source: z.enum(['junit', 'output', 'command-report']).optional(),
+  withheld: z.literal(true).optional(),
+});
+export type GateFailureSummary = z.infer<typeof gateFailureSummarySchema>;
+
 export const evidenceRecordSchema = z.strictObject({
   id: z.string().min(1).max(200),
   runId: z.string().min(1).max(200),
@@ -451,6 +469,12 @@ export const evidenceRecordSchema = z.strictObject({
    * отчёта той же записи. Нет у gate без отчёта и у прежних записей.
    */
   reportDigest: digestSchema.optional(),
+  /**
+   * Выжимка провала (0.1.0-alpha.68, `gateFailureSummarySchema`): только у
+   * непройденной записи `test`, чей провал назвала команда (код выхода или
+   * упавшие testcases). Нет у прежних записей.
+   */
+  failureSummary: gateFailureSummarySchema.optional(),
   /**
    * Фактический toolchain процесса проверки (первый `node` в PATH окружения
    * фазы, его версия; `pnpm` при наличии). Нет у прежних записей и у ревью.

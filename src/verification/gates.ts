@@ -78,6 +78,11 @@ import {
   sandboxSignaturePartialNote,
   type SandboxSignatureCause,
 } from './sandbox-signatures.ts';
+import {
+  WITHHELD_NOTE,
+  commandReports,
+  failureSummary as summarizeFailure,
+} from './failure-summary.ts';
 import { sameNode, toolchainFacts, toolchainText, usesPnpm } from '../environment/toolchain-pin.ts';
 
 /** Длинное имя testcase заменяется хешем, а не обрезается: обрезка дала бы ложные совпадения. */
@@ -1125,6 +1130,10 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
   let exitOnly = false;
   /** Пометки к засчитанному провалу: часть упавших тестов закрыла песочница. */
   const partialNotes: string[] = [];
+  /** Выжимка провала, названного командой (`EvidenceRecord.failureSummary`). */
+  let failureSummary: EvidenceRecord['failureSummary'];
+  /** Начало запуска: отчёты команды старше него — от прежнего запуска. */
+  let startedAt = Date.now();
   let passed = false,
     summary = '',
     log = `# harness gate ${gate.id}: cwd=${relative(root, gateCwd) || '.'} argv=${JSON.stringify(gate.command.map(redact))}${gate.kind === 'test' ? ` fresh=${redact(JSON.stringify(freshness))}` : ''}\n# toolchain: ${toolchainText(toolchain)}\n`,
@@ -1146,6 +1155,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     // Нагрузка до запуска: gate, который сам перегрузил процессор (пул
     // потоков без предела), не должен заработать повтор своей нагрузкой.
     loadBefore = hostLoad.read();
+    startedAt = Date.now();
     const result = await runCheck(
       { config: run.policy },
       {
@@ -1380,14 +1390,48 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       }
       // Провал назван только кодом выхода (без упавших случаев отчёта).
       exitOnly = !counts?.failures;
+      // Выжимка провала: упавшие тесты отчёта, вывода или отчёта, который
+      // команда записала сама, строка ошибки и хвост вывода. Без отчёта gate
+      // имена из вывода дописываются к тексту; ничего не названо — пометка,
+      // что gate скрыл причину.
+      const reports = counts?.failures
+        ? []
+        : (await commandReports(gate.command, gateCwd, root, startedAt, reportPath)).flatMap(
+            (r) => {
+              try {
+                return junitFailures(r.xml, redact, 20);
+              } catch {
+                return [];
+              }
+            },
+          );
+      failureSummary = summarizeFailure({
+        ...(counts?.failures ? { junit: junitFailures(counts.xml, redact, 50) } : {}),
+        reports,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        redact,
+      });
+      // Имена не из отчёта gate (вывод, отчёт команды): отчёт gate мог
+      // назвать только общий провал обёртки.
+      const named =
+        failureSummary.source && failureSummary.source !== 'junit' && failureSummary.tests?.length
+          ? failureSummary.tests.join('; ').slice(0, 600)
+          : '';
       throw new Error(
         [
           `Код выхода ${result.code}`,
-          counts?.failures ? `упали ${failedCases(counts)}` : '',
+          counts?.failures
+            ? `упали ${failedCases(counts)}${named ? `; по выводу: ${named}` : ''}`
+            : named
+              ? `упали ${named}`
+              : '',
           diagnostic(result.stderr, result.stdout, redact),
         ]
           .filter(Boolean)
-          .join(': ') + partialNotes.map((n) => '; ' + n).join(''),
+          .join(': ') +
+          partialNotes.map((n) => '; ' + n).join('') +
+          (failureSummary.withheld ? `; ${WITHHELD_NOTE}` : ''),
       );
     }
     if (reportPath) {
@@ -1396,6 +1440,13 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       // Отчёт сохраняется и при провале с нулевым кодом выхода: из него
       // следующая попытка получает текст провала (`gateFeedback`).
       await keepReport(counts.xml);
+      if (counts.failures)
+        failureSummary = summarizeFailure({
+          junit: junitFailures(counts.xml, redact, 50),
+          stdout: result.stdout,
+          stderr: result.stderr,
+          redact,
+        });
       if (counts.failures || counts.skipped)
         throw new Error(summary + (counts.failures ? `: ${failedCases(counts)}` : ''));
     } else summary = 'Команда завершилась успешно';
@@ -1585,6 +1636,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     ...(manifest ? { tests: manifest.cases } : {}),
     ...(manifest?.truncated ? { testsTruncated: true } : {}),
     ...(reportDigest ? { reportDigest } : {}),
+    ...(!passed && failureSummary ? { failureSummary } : {}),
     ...(run.consumer ? { consumer: run.consumer } : {}),
     ...(toolchain.node ? { toolchain } : {}),
     ...(propertyEvidence ? { property: propertyEvidence } : {}),

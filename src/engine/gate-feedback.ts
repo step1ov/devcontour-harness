@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import type { AttemptState, EvidenceRecord } from '../contracts/index.ts';
+import type { AttemptState, EvidenceRecord, GateFailureSummary } from '../contracts/index.ts';
 import { sha256 } from '../contracts/index.ts';
 import { junitFailures } from '../verification/gates.ts';
 
@@ -16,7 +16,7 @@ export interface GateFeedbackCase {
   phase: EvidenceRecord['phase'];
   /** Нет у хвоста лога gate без JUnit-отчёта. */
   testcase?: string;
-  source: 'junit-failure' | 'junit-error' | 'log-tail';
+  source: 'junit-failure' | 'junit-error' | 'log-tail' | 'failure-summary';
   text: string;
   /** Текст обрезан до `FEEDBACK_CASE_LIMIT`. */
   truncated?: true;
@@ -48,6 +48,22 @@ export function clip(text: string, limit: number): { text: string; truncated?: t
     note = next;
   }
   return { text: (text.slice(0, keep) + note).slice(0, limit), truncated: true };
+}
+
+/** Выжимка провала gate для исполнителя (англ., как весь блок). */
+function summaryText(s: GateFailureSummary) {
+  return [
+    s.withheld
+      ? "The gate printed no failure cause: no failing test names and no error line (its wrapper may hide the details). The gate must print a safe failure summary (failing test names, the assertion line, a masked output tail); changing the gate command is the lead's move, not a code change of this task."
+      : undefined,
+    s.tests?.length
+      ? `Failing tests${s.source === 'output' ? ' (from the gate output)' : s.source === 'command-report' ? " (from the command's own JUnit report)" : ''}: ${s.tests.join('; ')}${s.testsTruncated ? ' and more' : ''}`
+      : undefined,
+    s.assertion ? `First error line: ${s.assertion}` : undefined,
+    s.tail ? `Output tail (masked):\n${s.tail}` : undefined,
+  ]
+    .filter(Boolean)
+    .join('\n');
 }
 
 /** Последняя запись каждого непрошедшего gate попытки (повтор заменяет исходную). */
@@ -90,6 +106,17 @@ export async function gateFeedback(
           }
         })()
       : [];
+    // Выжимка провала (0.1.0-alpha.68): тесты, названные не отчётом gate
+    // (вывод, отчёт команды), строка ошибки, хвост вывода; скрытый вывод —
+    // пометка, что gate не назвал причину.
+    const summary = e.failureSummary ? summaryText(e.failureSummary) : undefined;
+    if (summary && (e.failureSummary!.withheld || e.failureSummary!.source !== 'junit'))
+      cases.push({
+        gate,
+        phase: e.phase,
+        source: 'failure-summary',
+        ...clip(summary, FEEDBACK_CASE_LIMIT),
+      });
     if (failures.length) {
       for (const f of failures)
         cases.push({
