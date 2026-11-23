@@ -128,7 +128,7 @@ test('классификация браузера: признак у каждо�
   assert.match(line ?? '', /browser daemon unavailable/);
   assert.match(
     sandboxSignaturePartialNote('sandbox-browser', line!),
-    /признак отказа среды sandbox-browser .*провал засчитан; .*вынесите проверку в браузере/,
+    /часть провала — причина окружения sandbox-browser, а не дефект решения .*попытка засчитана за остальные провалы .*вынесите проверку в браузере/,
   );
   assert.equal(sandboxSignaturePartial('sandbox-browser', 'Photo API status'), undefined);
 });

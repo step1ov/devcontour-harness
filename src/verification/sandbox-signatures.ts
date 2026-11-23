@@ -225,8 +225,8 @@ export function sandboxSignatureCodeMessage(
 /** Пометка к засчитанному провалу: часть упавших тестов закрыла песочница. */
 export function sandboxSignaturePartialNote(cause: SandboxSignatureCause, line: string) {
   return (
-    `среди упавших есть признак отказа среды ${cause} (${SANDBOX_SIGNATURE_CODES[cause]}: «${line}»), ` +
-    'но есть и провалы без него — провал засчитан; ' +
+    `часть провала — причина окружения ${cause}, а не дефект решения (${SANDBOX_SIGNATURE_CODES[cause]}: «${line}»); ` +
+    'попытка засчитана за остальные провалы без этого признака; ' +
     `для части, которую закрыла песочница: ${WHAT[cause].advice}`
   );
 }
