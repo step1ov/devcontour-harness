@@ -449,6 +449,11 @@ export const eventPayloads = {
   'budget.raised': z.strictObject({
     by: z.string().min(1).max(300),
     generation: z.number().int().min(0),
+    /**
+     * `executionDigest` применённой политики: повторное согласование под ней
+     * (`graph.approved.reapproval.policyDigest`) называет причину правки.
+     */
+    policyDigest: digestSchema.optional(),
     changes: z
       .array(
         z.strictObject({

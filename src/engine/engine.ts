@@ -4628,7 +4628,11 @@ export class Engine {
     const before = control.appliedPolicy?.limits;
     if (before) {
       const changes = budgetRaises(before, limits);
-      if (changes.length) tx.emit({ type: 'budget.raised', payload: { by, generation, changes } });
+      if (changes.length)
+        tx.emit({
+          type: 'budget.raised',
+          payload: { by, generation, policyDigest: executionDigest(this.policy), changes },
+        });
     }
     tx.emit({
       type: 'policy.applied',
@@ -4938,7 +4942,10 @@ export class Engine {
       const before = control.appliedPolicy?.limits;
       const raises = before ? budgetRaises(before, budgetLimitsOf(this.policy)) : [];
       if (raises.length)
-        tx.emit({ type: 'budget.raised', payload: { by, generation, changes: raises } });
+        tx.emit({
+          type: 'budget.raised',
+          payload: { by, generation, policyDigest: executionDigest(this.policy), changes: raises },
+        });
       if (resume) tx.emit({ type: 'control.resumed', payload: { reason: 'reconfigure' } });
       return { status: 'applied' as const, generation };
     });

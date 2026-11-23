@@ -733,6 +733,7 @@ export const DECISION_EVENT_TYPES = [
   'work.cancelled',
   'work.reopened',
   'work.rework-abandoned',
+  'graph.registered',
   'graph.approved',
   'budget.raised',
 ] as const;
@@ -748,14 +749,24 @@ export function decisionEventsOf(
 }
 
 /**
- * Кто согласовал редакцию плана после события `e` графа: первое
- * `graph.approved` того же графа позже него (`agent` — ведущий). Нет —
- * редакция ещё не согласована, актёр неизвестен.
+ * Кто согласовал ту редакцию плана, регистрация которой вызвала событие `e`
+ * графа (0.1.0-alpha.68, ревью r1): регистрация — последнее
+ * `graph.registered` того же графа до события; согласование — первое
+ * `graph.approved` того же графа после события с тем же digest, и между ними
+ * нет другой регистрации (замена редакции). Иначе актёр неизвестен.
  */
 function approvalAfter(events: readonly RunEvent[], e: RunEvent): 'agent' | 'operator' | undefined {
+  let registered: string | undefined;
   for (const x of events)
-    if (x.seq > e.seq && x.type === 'graph.approved' && x.graphId === e.graphId)
-      return x.payload.actor;
+    if (x.seq < e.seq && x.type === 'graph.registered' && x.graphId === e.graphId)
+      registered = x.payload.digest;
+  if (!registered) return undefined;
+  for (const x of events) {
+    if (x.seq <= e.seq || x.graphId !== e.graphId) continue;
+    if (x.type === 'graph.registered' && x.payload.digest !== registered) return undefined;
+    if (x.type === 'graph.approved')
+      return x.payload.digest === registered ? x.payload.actor : undefined;
+  }
   return undefined;
 }
 
@@ -908,13 +919,20 @@ export function decisionsInputOf(
         changes: e.payload.changes,
         // Причину и кто решил называет повторное согласование после правки
         // политики (`reapprove --by --reason`), если оно было.
+        // Только под той же политикой: повторное согласование после правки,
+        // поднявшей предел (тот же digest исполнения); иначе причины нет.
         ...((r) =>
           r && r.type === 'graph.approved' && r.payload.reapproval
             ? { by: r.payload.reapproval.by, reason: r.payload.reapproval.reason }
             : {})(
-          events.find(
-            (x) => x.seq > e.seq && x.type === 'graph.approved' && !!x.payload.reapproval,
-          ),
+          e.payload.policyDigest
+            ? events.find(
+                (x) =>
+                  x.seq > e.seq &&
+                  x.type === 'graph.approved' &&
+                  x.payload.reapproval?.policyDigest === e.payload.policyDigest,
+              )
+            : undefined,
         ),
       });
     else if (e.type === 'graph.approved' && e.payload.reapproval && e.graphId)

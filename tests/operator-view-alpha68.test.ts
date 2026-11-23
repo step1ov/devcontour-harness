@@ -314,7 +314,8 @@ test('a68: решения из фактов — актёры, скрытый с�
       ['answer', 'operator'],
       // cancel x — `graph` без согласования: актёр неизвестен, решения нет.
       ['cancel', 'operator'],
-      ['reapproval', 'lead'],
+      // `reapprove --by codex` — как в журнале ведущего alpha.67: не `lead` — оператор.
+      ['reapproval', 'operator'],
       ['reapproval', 'operator'],
       ['reset', 'lead'],
       ['reset', 'operator'],
@@ -376,13 +377,28 @@ test('a68: журнал — согласование после переоткр
       type,
       payload,
     }) as RunEvent;
+  const reg = (seq: number, digest: string) =>
+    ev(seq, 'graph.registered', {
+      digest,
+      orders: 1,
+      source: { connector: 'files', ref: 'g', revision: String(seq) },
+    });
+  const d1 = '1'.repeat(64);
+  const d2 = '2'.repeat(64);
+  const d3 = '3'.repeat(64);
   const events = [
-    ev(1, 'work.reopened', { revision: 1, budget: 'fresh', acceptedSha: sha('a'), spent: 1 }, 'w'),
-    ev(2, 'work.cancelled', { by: 'graph', hadAttempt: false }, 'x'),
-    ev(3, 'graph.approved', { digest: 'd'.repeat(64), actor: 'agent' }),
-    ev(4, 'work.cancelled', { by: 'graph', hadAttempt: false }, 'z'),
-    ev(5, 'graph.approved', {
-      digest: 'd'.repeat(64),
+    reg(1, d1),
+    ev(2, 'work.reopened', { revision: 1, budget: 'fresh', acceptedSha: sha('a'), spent: 1 }, 'w'),
+    ev(3, 'work.cancelled', { by: 'graph', hadAttempt: false }, 'x'),
+    ev(4, 'graph.approved', { digest: d1, actor: 'agent' }),
+    // Редакция d2 убрала y, но её заменила d3 до согласования: отмену y никто
+    // не согласовал — актёр неизвестен (ревью r1).
+    reg(5, d2),
+    ev(6, 'work.cancelled', { by: 'graph', hadAttempt: false }, 'y'),
+    reg(7, d3),
+    ev(8, 'graph.approved', { digest: d3, actor: 'agent' }),
+    ev(9, 'graph.approved', {
+      digest: d3,
       actor: 'agent',
       reapproval: {
         by: 'lead',
@@ -392,7 +408,7 @@ test('a68: журнал — согласование после переоткр
         policyDigest: 'b'.repeat(64),
       },
     }),
-    ev(6, 'work.cancelled', { by: 'graph', hadAttempt: false }, 'late'),
+    ev(10, 'work.cancelled', { by: 'graph', hadAttempt: false }, 'late'),
   ];
   const facts = decisionsInputOf(
     [],
@@ -406,11 +422,10 @@ test('a68: журнал — согласование после переоткр
     view.decisions!.map((d) => [d.kind, d.by, d.workId ?? d.subject]),
     [
       ['reapproval', 'lead', 'g'],
-      ['cancel', 'lead', 'z'],
       ['cancel', 'lead', 'x'],
       ['reopen', 'lead', 'w'],
     ],
-    'отмена `late` ещё не согласована — актёр неизвестен',
+    'отмена `late` ещё не согласована, отмена y — в заменённой редакции: актёр неизвестен',
   );
 });
 
@@ -438,6 +453,7 @@ test('a68: решения — поднятый бюджет (человек, п�
     ev(1, 'budget.raised', {
       by: 'process',
       generation: 4,
+      policyDigest: 'b'.repeat(64),
       changes: [
         { field: 'maxAttempts', before: 3, after: 4 },
         { field: 'reviewRounds', before: 6, after: 8 },
@@ -452,6 +468,25 @@ test('a68: решения — поднятый бюджет (человек, п�
         round: 7,
         previousPolicyDigest: 'a'.repeat(64),
         policyDigest: 'b'.repeat(64),
+      },
+    }),
+    // Подъём под другой политикой, после которого повторного согласования под
+    // ней не было: причины нет (не берётся чужая).
+    ev(3, 'budget.raised', {
+      by: 'process',
+      generation: 6,
+      policyDigest: 'c'.repeat(64),
+      changes: [{ field: 'repairBudget', before: 6, after: 8 }],
+    }),
+    ev(4, 'graph.approved', {
+      digest: 'd'.repeat(64),
+      actor: 'agent',
+      reapproval: {
+        by: 'lead',
+        reason: 'другая правка политики',
+        round: 8,
+        previousPolicyDigest: 'c'.repeat(64),
+        policyDigest: 'e'.repeat(64),
       },
     }),
   ];
@@ -482,7 +517,10 @@ test('a68: решения — поднятый бюджет (человек, п�
     recoveryPolicyOf({ recovery: { mode: 'lead', diagnoseAfter: 2, leadResets: 2 } }),
   );
   const view = operatorViewSchema.parse(operatorView(baseInput({ decisions: facts })));
-  const budget = view.decisions!.find((d) => d.kind === 'budget')!;
+  const budgets = view.decisions!.filter((d) => d.kind === 'budget');
+  const unmatched = budgets.find((d) => /repairBudget/.test(d.title!))!;
+  assert.equal(unmatched.reason, undefined, 'причина другой политики не приписывается');
+  const budget = budgets.find((d) => /maxAttempts/.test(d.title!))!;
   assert.equal(budget.by, 'operator', 'бюджет поднимает человек');
   assert.match(budget.title!, /бюджет поднят: maxAttempts 3 → 4, reviewRounds 6 → 8/);
   assert.equal(budget.reason, 'владелец дал ещё раунд ревью плана');

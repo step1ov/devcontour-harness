@@ -4150,7 +4150,6 @@ const approverOf = (a: 'agent' | 'operator' | undefined): 'lead' | 'operator' | 
   a === 'agent' ? 'lead' : a === 'operator' ? 'operator' : undefined;
 
 /** `reapprove --by`: человеческие имена — `operator`, иначе (`lead`, имя агента) — ведущий. */
-const humanNames = /^(operator|user|owner|human|host|оператор|владелец|человек)$/i;
 
 const scopeText = {
   plan: { ru: 'плана', en: 'plan' },
@@ -4321,7 +4320,9 @@ function decisionDraft(c: Ctx, d: OperatorDecisionInput): DecisionDraft | undefi
       return {
         ...base,
         kind: 'reapproval',
-        by: humanNames.test(d.by.trim()) ? 'operator' : 'lead',
+        // Как у журнала ведущего (alpha.67): `--by lead` — ведущий, любое
+        // другое имя — оператор.
+        by: d.by.trim() === 'lead' ? 'lead' : 'operator',
         subject: d.graphId,
         title: en
           ? `plan re-approved after a policy change (review round ${d.round})`
