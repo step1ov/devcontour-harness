@@ -276,3 +276,16 @@ test('alpha.67 P5-4: больше 50 готовых — вопрос владе�
   );
   assert.match(view.progress.queue.line!, /готовых задач нет/);
 });
+
+test('alpha.67 P5-4: записанный бюджетный блок устарел (бюджет снят) — готовая работа считается по нынешнему расчёту', async () => {
+  const ctx = await askedAndReady();
+  ctx.store.transact('task.held', (tx) => {
+    const w = tx.work('b-ready')!;
+    tx.putWork({
+      ...w,
+      budgetBlock: { reason: 'прежний предел', at: new Date(0).toISOString() } as any,
+    });
+  });
+  assert.equal(runnerOfStatus(ctx)?.ready, 1);
+  ctx.store.close();
+});

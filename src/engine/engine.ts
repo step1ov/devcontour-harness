@@ -1702,15 +1702,16 @@ export class Engine {
     };
   }
 
-  /** Почему поручение сейчас не выдаётся; пусто — может быть выдано. */
   /**
    * Работу выдаст `claim` (условия самой работы, без глобальных: пауза,
    * барьер хоста, проверка базы, применение политики, совместная проверка,
    * предел параллельности — `claimBlockedGlobally`). Одна проверка для
    * `claim` и для строки очереди `status` (`runner.ready`). `fresh` —
    * чтение вне транзакции claim: записанный `budgetBlock` может отставать,
-   * бюджет считается заново, а устаревшая постановка или область — не готова
-   * (claim на ней откажет).
+   * бюджет считается заново (`budgetBlockOf`, или `budgetBlock` — общий
+   * расчёт для многих работ, `Engine.budgetBlockers`), записанный блок не
+   * читается, а устаревшая постановка или область — не готова (claim на ней
+   * откажет).
    */
   claimableWork(
     w: WorkState,
@@ -1719,10 +1720,16 @@ export class Engine {
       gateHolds?: ReturnType<Engine['environmentGateHolds']>;
       infraPending?: (w: WorkState) => string[];
       fresh?: boolean;
+      budgetBlock?: (workId: string) => string | undefined;
     } = {},
   ): boolean {
-    if (w.status !== 'ready' || w.hold || w.budgetBlock) return false;
-    if (options.fresh && this.budgetBlockOf(w.id, view)) return false;
+    if (w.status !== 'ready' || w.hold) return false;
+    if (
+      options.fresh
+        ? (options.budgetBlock ?? ((id: string) => this.budgetBlockOf(id, view)))(w.id)
+        : w.budgetBlock
+    )
+      return false;
     // Gate удержан отказом без повтора (ps в песочнице): тот же gate
     // откажет снова — ход ведущего, а не новая попытка.
     if (this.gateHoldsOf(w, options.gateHolds ?? this.environmentGateHolds(view)).length)
@@ -1775,6 +1782,7 @@ export class Engine {
     );
   }
 
+  /** Почему поручение сейчас не выдаётся; пусто — может быть выдано. */
   blockers(work: WorkState, view: ExecutionView) {
     const out: {
       code:

@@ -410,9 +410,15 @@ const messageWith = (head: string, ...parts: (string | undefined)[]) =>
  * разрешает повтор, одинаковый отпечаток не исчерпан, бюджет попыток и
  * восстановлений группы не исчерпан. Только описание: ничего не планирует.
  */
-function retryPlannedOf(input: Extract<StopInput, { kind: 'work' }>) {
+function retryPlannedOf(
+  input: Extract<StopInput, { kind: 'work' }>,
+  /** Не учитывать ожидание инфраструктуры (повтор был бы по классу отказа). */
+  ignoreInfra = false,
+) {
   const { work, repair, maxAttempts } = input;
   if (work.status !== 'failed') return false;
+  // Ожидание инфраструктуры прежнего графа: повтор не выдастся.
+  if (!ignoreInfra && work.infraWaitingOn?.length) return false;
   if (work.leadRecovery?.hold) return false;
   if (work.recovery) return work.recovery.status === 'retry' && repair.outlook === 'retry';
   if (repair.outlook !== undefined && repair.outlook !== 'retry') return false;
@@ -472,6 +478,24 @@ function cancelledOutcome(
 
 function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean): Outcome {
   const { work, control, maxAttempts } = input;
+  // Открытая работа инфраструктуры прежнего графа держит выдачу: готовой
+  // работы и упавшей, которую повторил бы controller (повтор не выдался бы).
+  // Ход человека или ведущего по упавшей (разбор, сброс) остаётся её шагом.
+  if (
+    work.infraWaitingOn?.length &&
+    (work.status === 'ready' || (work.status === 'failed' && retryPlannedOf(input, true)))
+  )
+    return {
+      code: 'NOT_READY',
+      cause: 'not-ready',
+      phase: 'claim',
+      // Как ожидание зависимости: по этой работе не действует никто; шаг —
+      // по диагнозу работы инфраструктуры (её разбор, согласование, сброс или
+      // отмена по плану). Движок её сам не отменяет.
+      actor: null,
+      action: 'wait',
+      note: `Ждёт работы инфраструктуры прежнего графа ${work.infraWaitingOn.join(', ')}: продуктовая работа её репозитория не выдаётся, пока та не принята или не отменена; следующий шаг — по диагнозу ${work.infraWaitingOn[0]} (harness explain --work ${work.infraWaitingOn[0]}).`,
+    };
   const kind: FailureKind = work.failureKind ?? 'unknown';
   // Отказ до начала работы — фаза preflight, какой бы ни была фаза попытки.
   const phase = work.preflight ? 'preflight' : (input.phase ?? failurePhase[kind]);
@@ -862,18 +886,6 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
         };
     }
   }
-  if (work.status === 'ready' && work.infraWaitingOn?.length)
-    return {
-      code: 'NOT_READY',
-      cause: 'not-ready',
-      phase: 'claim',
-      // Как ожидание зависимости: по этой работе не действует никто; шаг —
-      // по диагнозу работы инфраструктуры (её разбор, согласование, сброс или
-      // отмена по плану). Движок её сам не отменяет.
-      actor: null,
-      action: 'wait',
-      note: `Ждёт работы инфраструктуры прежнего графа ${work.infraWaitingOn.join(', ')}: продуктовая работа её репозитория не выдаётся, пока та не принята или не отменена; следующий шаг — по диагнозу ${work.infraWaitingOn[0]} (harness explain --work ${work.infraWaitingOn[0]}).`,
-    };
   if (work.status === 'ready' && work.waitingOn?.length)
     return {
       code: 'NOT_READY',

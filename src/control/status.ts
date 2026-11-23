@@ -353,12 +353,9 @@ function withSteps<B extends { code: string; actor?: string | null }>(
   return blockers.map((b) => (person(b.actor) ? { ...b, step: order.indexOf(b) + 1 } : b));
 }
 
-/**
- * Кто двигает очередь (`runner`): живой controller, попытка с действующим
- * владением или ревью плана в живом run — `running`; иначе открытые
- * поручения сдвинет только новый `harness run` (его делает ведущий). Нет
- * открытых поручений — поля нет.
- */
+/** Предел `runner.readyWorks` (`statusDataSchema`). */
+const READY_WORKS_MAX = 10_000;
+
 /**
  * Работу выдаст новый запуск (alpha.67, P5-4) — та же проверка, что у
  * `claim` (`Engine.claimableWork`, со всеми блокировками самой работы).
@@ -373,6 +370,8 @@ function issuableIn(
 ) {
   const gateHolds = engine.environmentGateHolds(v);
   const infraPending = infraPendingIndex(v);
+  // Бюджеты — одним расчётом на все работы вида, а не записями вызовов на каждую.
+  const budgetBlock = engine.budgetBlockers(v);
   return (w: WorkState) => {
     if (w.status === 'failed') {
       const needs = needsOf(w);
@@ -380,13 +379,20 @@ function issuableIn(
       return engine.claimableWork({ ...w, status: 'ready' }, v, {
         gateHolds,
         infraPending,
+        budgetBlock,
         fresh: true,
       });
     }
-    return engine.claimableWork(w, v, { gateHolds, infraPending, fresh: true });
+    return engine.claimableWork(w, v, { gateHolds, infraPending, budgetBlock, fresh: true });
   };
 }
 
+/**
+ * Кто двигает очередь (`runner`): живой controller, попытка с действующим
+ * владением или ревью плана в живом run — `running`; иначе открытые
+ * поручения сдвинет только новый `harness run` (его делает ведущий). Нет
+ * открытых поручений — поля нет.
+ */
 function runnerOf(
   v: ExecutionView,
   works: readonly WorkState[],
@@ -452,7 +458,7 @@ function runnerOf(
       state: 'not-running' as const,
       restartBy: 'lead' as const,
       ready: ready.length,
-      readyWorks: ready.map((w) => w.id),
+      readyWorks: ready.slice(0, READY_WORKS_MAX).map((w) => w.id),
       heldByQuestion: asked.slice(0, 50),
       line: `Очередь стоит — никто не запущен: запустите harness run: готово ${ruCount(ready.length, ['задача', 'задачи', 'задач'])}, ${asked.length > 1 ? 'вопросы блокируют' : 'вопрос блокирует'} только ${ids} (ведущий).`,
       lineEn: `The queue is idle — nothing is running: start harness run: ${ready.length} ${ready.length === 1 ? 'task is' : 'tasks are'} ready, the ${asked.length > 1 ? 'questions block' : 'question blocks'} only ${idsEn} (the lead).`,
@@ -461,7 +467,9 @@ function runnerOf(
   return {
     state: 'not-running' as const,
     restartBy: 'lead' as const,
-    ...(ready.length ? { ready: ready.length, readyWorks: ready.map((w) => w.id) } : {}),
+    ...(ready.length
+      ? { ready: ready.length, readyWorks: ready.slice(0, READY_WORKS_MAX).map((w) => w.id) }
+      : {}),
     line: waitsRun
       ? 'Очередь стоит — никто не запущен: работу сдвинет только новый запуск (ведущий: harness run).'
       : 'Очередь стоит — никто не запущен: после ответа или решения нужен новый запуск (ведущий: harness run).',
