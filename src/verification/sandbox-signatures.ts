@@ -87,25 +87,39 @@ const browserLines = [
 ];
 
 /**
- * Строки, которые сопровождают след класса и сами иным провалом не считаются:
- * объект ошибки `kill` и стек — у сигнала; общие строки запуска браузера и
- * его журнал о службах Mach — у браузера. Строка о пути к браузеру
- * (`executablePath`, ENOENT) сопровождением не бывает: это настройка запуска.
+ * Точный текст следа класса и его сопровождения внутри строки: из строки
+ * вырезается только он, а не вся строка. Иной признак провала в остатке
+ * (`Error: HTTP status 500; cleanup: kill EPERM`) засчитывает попытку.
+ * Объект ошибки `kill` (`errno`, `code: 'EPERM'`, `syscall: 'kill'`) —
+ * у сигнала; общие строки запуска браузера, префикс журнала Chromium и имена
+ * служб Mach — у браузера. Префикс `Error: ` вырезается только вплотную к
+ * следу. Строка о пути к браузеру (`executablePath`, ENOENT) сопровождением
+ * не бывает: это настройка запуска.
  */
-const companionLines: Record<SandboxSignatureCause, RegExp[]> = {
+const errorPrefix = String.raw`(?:\b(?:Uncaught )?Error: )?`;
+const companionText: Record<SandboxSignatureCause, RegExp[]> = {
   'sandbox-signal': [
-    ...signalLines,
-    signalSyscall,
-    /^\s*(?:code: ['"]EPERM['"]|errno: -?\d+),?\s*$/,
-    /^\s*at\s/,
+    new RegExp(errorPrefix + String.raw`\bkill EPERM\b`, 'g'),
+    /\bkill: (?:\(\d+\) - |kill -?\d+ failed: |-?\d+: )?operation not permitted/gi,
+    /\bsyscall: ['"]kill['"]/g,
+    /\bcode: ['"]EPERM['"]/g,
+    /\berrno: -?\d+/g,
   ],
   'sandbox-browser': [
-    ...browserLines,
-    BROWSER_LAUNCH,
-    /\bbootstrap_check_in\b|\bmach_port\w*/,
-    /^\s*at\s/,
+    new RegExp(
+      errorPrefix +
+        String.raw`(?:\bForeground )?\bbrowser daemon (?:is )?(?:unavailable|not available|failed to start|did not start|exited)\b`,
+      'gi',
+    ),
+    /\bbootstrap_check_in [\w.-]+: Permission denied \(1100\)/g,
+    // Префикс журнала Chromium: `[pid:tid:время:FATAL:mach_port_rendezvous.cc(142)]`.
+    /^\[[\d:/.]*:?(?:FATAL|ERROR|WARNING|INFO|VERBOSE\d*):[\w.]+\(\d+\)\]/g,
+    new RegExp(errorPrefix + '(?:' + BROWSER_LAUNCH.source + ')', 'gi'),
+    /\bbootstrap_check_in\b|\bmach_port\w*/g,
   ],
 };
+/** Строка целиком — сопровождение: кадр стека. */
+const companionLines: RegExp[] = [/^\s*at\s/];
 const launchConfig =
   /\bexecutablePath\b|\bexecutable\b.*\b(?:doesn't|does not) exist\b|\bENOENT\b|no such file|not found/i;
 
@@ -121,14 +135,17 @@ const foreignMarkers = [
 
 /**
  * В тексте есть иной провал: проваленное утверждение или строка ошибки, кода
- * ошибки, статуса HTTP, аварии, которая не сопровождает след класса `cause`.
+ * ошибки, статуса HTTP, аварии вне точного текста следа класса `cause` и
+ * его сопровождения: строка со следом и иной ошибкой — иной провал.
  */
 export function foreignFailure(cause: SandboxSignatureCause, text: string) {
   return text.split('\n').some((l) => {
     if (assertionMarkers.some((r) => r.test(l))) return true;
     if (cause === 'sandbox-browser' && launchConfig.test(l)) return true;
     if (!foreignMarkers.some((r) => r.test(l))) return false;
-    return !companionLines[cause].some((r) => r.test(l));
+    if (companionLines.some((r) => r.test(l))) return false;
+    const rest = companionText[cause].reduce((text, r) => text.replace(r, ' '), l);
+    return foreignMarkers.some((r) => r.test(rest));
   });
 }
 
@@ -319,4 +336,33 @@ const CALLS: Record<SandboxSignatureCause, RegExp[]> = {
 /** Строка кода вызывает то, что закрыла песочница класса `cause`. */
 export function sandboxSignatureCall(cause: SandboxSignatureCause, line: string) {
   return CALLS[cause].some((r) => r.test(line));
+}
+
+const PROBE_WHAT: Record<SandboxSignatureCause, { what: string; gate: string }> = {
+  'sandbox-signal': {
+    what: 'сигнал процессу вне песочницы (kill) из песочницы проверок',
+    gate: 'gate, посылающий сигнал процессу, который запустил не он',
+  },
+  'sandbox-browser': {
+    what: 'браузер в песочнице проверок',
+    gate: 'gate, запускающий браузер',
+  },
+};
+
+/** Строка ответа пробы ограничения песочницы для человека (`doctor`, `harness gates`). */
+export function sandboxLimitLine(cause: SandboxSignatureCause, capability: SandboxLimitCapability) {
+  const { what, gate } = PROBE_WHAT[cause];
+  switch (capability.status) {
+    case 'available':
+      return `${what}: доступен`;
+    case 'not-isolated':
+      return `${what}: проверки идут без песочницы ОС (isolation.mode: none)`;
+    case 'unknown':
+      return `${what}: не выяснен — ${capability.detail}; провал gate с этим следом засчитывается`;
+    case 'unavailable':
+      return (
+        `${what}: недоступен (${capability.detail}); ${gate}, упадёт с ` +
+        `${SANDBOX_SIGNATURE_CODES[cause]}. Что сделать: ${WHAT[cause].advice}`
+      );
+  }
 }

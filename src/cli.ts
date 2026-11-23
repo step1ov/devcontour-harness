@@ -2200,6 +2200,7 @@ async function run(
           ...optional('planAuthors', v.policy ? manifestLead(v.policy) : undefined),
           leadSandbox: true,
           processList: true,
+          sandboxLimits: true,
         },
       );
       // Manifest проекта рядом с политикой расходится с ней по слою lean — предупреждение.

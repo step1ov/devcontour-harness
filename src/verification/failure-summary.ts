@@ -14,9 +14,9 @@
  * должен печатать безопасную выжимку сам.
  */
 
-import { constants } from 'node:fs';
-import { lstat, open, realpath } from 'node:fs/promises';
-import { dirname, relative, resolve, sep } from 'node:path';
+import { constants, existsSync } from 'node:fs';
+import { lstat, open, realpath, type FileHandle } from 'node:fs/promises';
+import { join, relative, resolve, sep } from 'node:path';
 import type { GateFailureSummary } from '../contracts/index.ts';
 import { assertionMarkers, failedBlocks } from './process-list.ts';
 
@@ -181,13 +181,11 @@ const reportFlag =
  * внутри дерева, кроме отчёта gate. Читаются только записанные этим запуском
  * (`since`) обычные файлы до 5 МБ; отказ чтения — пустой список.
  *
- * Граница — по настоящим путям: путь отчёта и каждый его родитель после
- * разрешения ссылок лежат внутри настоящего корня дерева (родитель-ссылка
- * наружу отклоняется), сам отчёт ссылкой не бывает. Файл открывается один
- * раз (`O_NOFOLLOW`, `O_NONBLOCK`), тип, размер и время берутся `fstat`
- * открытого дескриптора, он же — тот файл, что проверен по пути (то же
- * устройство и inode), и читается не больше предела из этого дескриптора:
- * подмена пути между проверкой и чтением не подсовывает чужой файл.
+ * Граница — без ссылок на всём пути: отчёт открывается по компонентам от
+ * настоящего корня дерева (`readReportFile`), ни родитель, ни сам отчёт
+ * ссылкой не бывают (и ссылка внутрь дерева тоже), у отчёта ровно одно имя
+ * (`nlink` 1). Тип, размер и время берутся `fstat` открытого дескриптора, и
+ * читается не больше предела из него.
  */
 export async function commandReports(
   argv: readonly string[],
@@ -225,38 +223,89 @@ export async function commandReports(
   return out;
 }
 
-const inside = (path: string, root: string) => path === root || path.startsWith(root + sep);
+/**
+ * Шаги чтения отчёта для теста гонки: вызывается после открытия каталога
+ * (`directory`) и после открытия самого отчёта до сверки (`file`) с путём
+ * компонента. Только для тестов.
+ */
+export const reportReadHooks: { step?: (stage: 'directory' | 'file', path: string) => void } = {};
+
+/** Каталог дескрипторов процесса, через который путь открывается от дескриптора каталога. */
+const FD_DIR = '/proc/self/fd';
+const fdWalk = process.platform === 'linux' && existsSync(FD_DIR);
+
+const same = (a: { dev: number; ino: number }, b: { dev: number; ino: number }) =>
+  a.dev === b.dev && a.ino === b.ino;
 
 /**
  * Отчёт команды по пути `full` внутри `root` (настоящий корень — `realRoot`)
- * или undefined: ссылка, выход за дерево по настоящему пути, не обычный файл,
- * больше предела, старее запуска.
+ * или undefined: ссылка на любом компоненте пути, не обычный файл, у файла
+ * больше одного имени (жёсткая ссылка), больше предела, старее запуска.
+ *
+ * Обход по компонентам: дескриптор настоящего корня, затем каждый каталог
+ * открывается `O_DIRECTORY | O_NOFOLLOW`, отчёт — `O_NOFOLLOW | O_NONBLOCK`.
+ * - Linux (`/proc/self/fd`): компонент открывается относительно дескриптора
+ *   предыдущего каталога (`/proc/self/fd/<fd>/<имя>` — тот же каталог, что
+ *   открыт, как у `openat`). Подмена родителя ссылкой после его открытия на
+ *   обход не влияет: без гонки, каждое имя проверено `O_NOFOLLOW` в каталоге,
+ *   который уже открыт внутри дерева.
+ * - Иначе (macOS — `/dev/fd/<fd>/<имя>` там не обходится): компонент
+ *   открывается полным путём от настоящего корня с `O_NOFOLLOW`; после
+ *   открытия отчёта сверка: каждый префикс по `lstat` — каталог, не ссылка, с
+ *   тем же устройством и inode, что его открытый дескриптор, а путь отчёта по
+ *   `lstat` — тот же файл, что открыт, и у него одно имя. Подмена родителя,
+ *   которая держится на любом из этих вызовов, отклоняется; подмена, снятая до
+ *   сверки, — тоже: открытый чужой файл не совпадёт с файлом по пути, а
+ *   внести его в дерево вторым именем нельзя (`nlink` 1), переносом — только
+ *   с правом записи в его каталог вне дерева. Остаётся окно: процесс, который
+ *   переключает родителя между отдельными вызовами сверки с точностью до
+ *   вызова. Отчёт читается после остановки процессов gate, так что такой
+ *   процесс — только уцелевший потомок.
  */
 async function readReportFile(full: string, root: string, realRoot: string, since: number) {
-  // Каждый родитель внутри дерева — по настоящему пути.
-  for (let dir = dirname(full); inside(dir, root); dir = dirname(dir)) {
-    if (!inside(await realpath(dir), realRoot)) return undefined;
-    if (dir === root) break;
-  }
-  const real = await realpath(full);
-  if (!inside(real, realRoot)) return undefined;
-  const checked = await lstat(full);
-  if (checked.isSymbolicLink()) return undefined;
-  const handle = await open(real, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  const parts = relative(root, full).split(sep);
+  if (!parts.length || parts.some((p) => !p || p === '.' || p === '..')) return undefined;
+  const handles: FileHandle[] = [];
+  const opened = (h: FileHandle) => (handles.push(h), h);
   try {
-    const st = await handle.stat();
-    if (
-      !st.isFile() ||
-      st.dev !== checked.dev ||
-      st.ino !== checked.ino ||
-      st.size > REPORT_BYTES ||
-      st.mtimeMs < since - 1000
-    )
+    let dir = opened(await open(realRoot, constants.O_RDONLY | constants.O_DIRECTORY));
+    const dirs: { path: string; id: { dev: number; ino: number } }[] = [];
+    let path = realRoot;
+    for (let i = 0; i < parts.length; i++) {
+      const last = i === parts.length - 1;
+      path = join(path, parts[i]!);
+      const target = fdWalk ? `${FD_DIR}/${dir.fd}/${parts[i]}` : path;
+      const handle = opened(
+        await open(
+          target,
+          constants.O_RDONLY |
+            constants.O_NOFOLLOW |
+            (last ? constants.O_NONBLOCK : constants.O_DIRECTORY),
+        ),
+      );
+      reportReadHooks.step?.(last ? 'file' : 'directory', path);
+      if (last) break;
+      const st = await handle.stat();
+      if (!st.isDirectory()) return undefined;
+      dirs.push({ path, id: st });
+      dir = handle;
+    }
+    const file = handles.at(-1)!;
+    const st = await file.stat();
+    if (!st.isFile() || st.nlink !== 1 || st.size > REPORT_BYTES || st.mtimeMs < since - 1000)
       return undefined;
+    if (!fdWalk) {
+      for (const d of dirs) {
+        const now = await lstat(d.path);
+        if (now.isSymbolicLink() || !now.isDirectory() || !same(now, d.id)) return undefined;
+      }
+      const now = await lstat(path);
+      if (now.isSymbolicLink() || !same(now, st) || now.nlink !== 1) return undefined;
+    }
     const buffer = Buffer.alloc(Math.min(st.size, REPORT_BYTES) + 1);
     let length = 0;
     while (length < buffer.length) {
-      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length);
+      const { bytesRead } = await file.read(buffer, length, buffer.length - length, length);
       if (!bytesRead) break;
       length += bytesRead;
     }
@@ -264,7 +313,7 @@ async function readReportFile(full: string, root: string, realRoot: string, sinc
     if (length > st.size) return undefined;
     return buffer.subarray(0, length).toString('utf8');
   } finally {
-    await handle.close();
+    await Promise.all(handles.map((h) => h.close().catch(() => undefined)));
   }
 }
 

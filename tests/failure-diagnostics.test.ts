@@ -11,10 +11,12 @@ import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
+  linkSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
+  renameSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -38,6 +40,7 @@ import { runGate } from '../src/verification/gates.ts';
 import {
   commandReports,
   failureSummary,
+  reportReadHooks,
   WITHHELD_NOTE,
 } from '../src/verification/failure-summary.ts';
 import { executionPolicySchema } from '../src/contracts/index.ts';
@@ -191,7 +194,7 @@ test('gate со скрытым выводом: имена из JUnit, котор
   assert.match(text, /\n\s+причина: gate не назвал причину провала/);
 });
 
-test('отчёт команды: граница по настоящему пути — родитель-ссылка наружу и сам отчёт-ссылка отклонены, ссылка внутри дерева принята; размер — по открытому файлу', async () => {
+test('отчёт команды: ссылка на любом компоненте пути (наружу и внутрь дерева) и сам отчёт-ссылка отклонены; размер — по открытому файлу', async () => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), 'harness-reports-')));
   const outside = realpathSync(mkdtempSync(join(tmpdir(), 'harness-outside-')));
   const xml = '<testsuite><testcase name="t"><failure>x</failure></testcase></testsuite>';
@@ -209,15 +212,85 @@ test('отчёт команды: граница по настоящему пут
   writeFileSync(join(root, 'out', 'real.xml'), xml);
   symlinkSync(join(root, 'out', 'real.xml'), join(root, 'out', 'inner-link.xml'));
   assert.deepEqual(await read('out/inner-link.xml'), []);
-  // Родитель-ссылка внутрь дерева и обычный файл — читаются.
+  // Родитель-ссылка внутрь дерева тоже отклонена; обычный файл — читается.
   symlinkSync(join(root, 'out'), join(root, 'alias'));
-  assert.deepEqual(await read('alias/real.xml'), [{ path: join('alias', 'real.xml'), xml }]);
+  assert.deepEqual(await read('alias/real.xml'), []);
   assert.deepEqual(await read('out/real.xml'), [{ path: join('out', 'real.xml'), xml }]);
   // Больше предела — не читается; каталог с именем отчёта — тоже.
   writeFileSync(join(root, 'out', 'big.xml'), Buffer.alloc(5 * 1024 * 1024 + 1, 0x20));
   assert.deepEqual(await read('out/big.xml'), []);
   mkdirSync(join(root, 'out', 'dir.xml'));
   assert.deepEqual(await read('out/dir.xml'), []);
+});
+
+test('отчёт команды: жёсткая ссылка (второе имя файла) отклонена, в том числе на файл вне дерева', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'harness-reports-')));
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'harness-outside-')));
+  const xml = '<testsuite><testcase name="t"><failure>x</failure></testcase></testsuite>';
+  writeFileSync(join(outside, 'secret.xml'), xml);
+  mkdirSync(join(root, 'out'));
+  linkSync(join(outside, 'secret.xml'), join(root, 'out', 'junit.xml'));
+  writeFileSync(join(root, 'out', 'own.xml'), xml);
+  linkSync(join(root, 'out', 'own.xml'), join(root, 'out', 'twin.xml'));
+  const since = Date.now() - 10_000;
+  for (const name of ['junit.xml', 'twin.xml', 'own.xml'])
+    assert.deepEqual(
+      await commandReports(['node', `--test-reporter-destination=out/${name}`], root, root, since),
+      [],
+      name,
+    );
+});
+
+test('отчёт команды: родитель подменён ссылкой наружу между шагами чтения — файл вне дерева не прочитан', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'harness-reports-')));
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'harness-outside-')));
+  const inner = '<testsuite><testcase name="inner"><failure>x</failure></testcase></testsuite>';
+  const secret = '<testsuite><testcase name="secret"><failure>x</failure></testcase></testsuite>';
+  writeFileSync(join(outside, 'junit.xml'), secret);
+  mkdirSync(join(root, 'reports'));
+  writeFileSync(join(root, 'reports', 'junit.xml'), inner);
+  const since = Date.now() - 10_000;
+  const read = () =>
+    commandReports(['node', '--test-reporter-destination=reports/junit.xml'], root, root, since);
+  const swap = () => {
+    renameSync(join(root, 'reports'), join(root, 'reports.real'));
+    symlinkSync(outside, join(root, 'reports'));
+  };
+  const restore = () => {
+    renameSync(join(root, 'reports'), join(root, 'reports.link'));
+    renameSync(join(root, 'reports.real'), join(root, 'reports'));
+  };
+  try {
+    // Подмена после открытия каталога, до открытия отчёта (и держится до сверки).
+    reportReadHooks.step = (stage) => {
+      if (stage === 'directory') swap();
+    };
+    const swapped = await read();
+    assert.ok(!JSON.stringify(swapped).includes('secret'), JSON.stringify(swapped));
+    // Linux обходит от дескриптора каталога: прочитан файл внутри дерева.
+    if (process.platform === 'linux')
+      assert.deepEqual(swapped, [{ path: join('reports', 'junit.xml'), xml: inner }]);
+    else assert.deepEqual(swapped, []);
+    restore();
+    // Подмена только на время открытия отчёта, снята до сверки.
+    let phase = 0;
+    reportReadHooks.step = (stage) => {
+      if (stage === 'directory' && phase === 0) {
+        swap();
+        phase = 1;
+      } else if (stage === 'file' && phase === 1) {
+        restore();
+        phase = 2;
+      }
+    };
+    const restored = await read();
+    assert.ok(!JSON.stringify(restored).includes('secret'), JSON.stringify(restored));
+    if (process.platform !== 'linux') assert.deepEqual(restored, []);
+  } finally {
+    reportReadHooks.step = undefined;
+  }
+  // Без подмены отчёт читается.
+  assert.deepEqual(await read(), [{ path: join('reports', 'junit.xml'), xml: inner }]);
 });
 
 test('отчёт gate с общим провалом обёртки: текст называет упавшие тесты по выводу; подсказка исполнителю — выжимку', async () => {
