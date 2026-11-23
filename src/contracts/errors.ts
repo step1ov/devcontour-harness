@@ -51,7 +51,8 @@ export const errorCodes = {
   DIAGNOSIS_REQUIRED: 'refused',
   /**
    * Gate работы удержан отказом окружения без повтора (`sandbox-process-list`
-   * на вызове `ps` из базы, 0.1.0-alpha.66): выдачи нет, пока ведущий не
+   * на вызове `ps` из базы, 0.1.0-alpha.66; `sandbox-signal`,
+   * `sandbox-browser` — 0.1.0-alpha.68): выдачи нет, пока ведущий не
    * поменяет gate (другое определение) или не повторит остановленную работу
    * после исправления теста (`retry --by lead`).
    */

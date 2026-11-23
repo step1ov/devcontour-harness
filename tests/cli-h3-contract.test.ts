@@ -85,6 +85,8 @@ const laterCommands: readonly string[] = [
   'preview-list',
   // Разбор ведущего повторных отказов (0.1.0-alpha.66).
   'diagnose',
+  // План выпуска ведущего (0.1.0-alpha.68).
+  'lead-outline',
 ];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [
@@ -179,9 +181,15 @@ const ADDITIVE_EVENT_TYPES = new Set([
   'work.diagnosed',
   // alpha.67: сверка записи окружения smoke (`harness cleanup LS-…`).
   'environment.reconciled',
+  // alpha.68: дополнение разбора ведущего (`harness diagnose --addendum`).
+  'work.diagnosis-amended',
+  // alpha.68: поднятые пределы бюджета применённой политики.
+  'budget.raised',
 ]);
 /** Аддитивные флаги прежних команд после H2. */
 const ADDITIVE_ARGS = new Set([
+  // Проба ограничений песочницы проверок по флагу (0.1.0-alpha.68).
+  'doctor--probe-sandbox',
   'status--detail',
   // Повторное доказательство критериев принятого результата (0.1.0-alpha.66).
   'source-deliver--reprove',
@@ -268,6 +276,9 @@ const ADDITIVE_ENUM_VALUES = new Set([
   'dependency-store-registry',
   // Причина отказа среды: gate запускает ps в песочнице ОС (0.1.0-alpha.66).
   'sandbox-process-list',
+  // Причины отказа среды: сигнал процессу вне песочницы и браузер в ней (0.1.0-alpha.68).
+  'sandbox-signal',
+  'sandbox-browser',
 ]);
 /** Текст cancel в H2: alpha.66 добавила отказ от открытой доработки принятого поручения. */
 const H2_CANCEL_DESCRIPTION =
@@ -497,6 +508,16 @@ test('H3-01: прежние команды и схемы их данных не 
       }
       if (Object.keys(o).length !== before) v = o;
     }
+    // alpha.68: кем исполнен повтор и откуда актёр (`retry`: `by`, `bySource`).
+    if (k === 'properties' && v && typeof v === 'object') {
+      const o = { ...(v as Record<string, unknown>) };
+      const before = Object.keys(o).length;
+      if ('workId' in o && 'attempt' in o && 'changed' in o && 'bySource' in o) {
+        delete o.by;
+        delete o.bySource;
+      }
+      if (Object.keys(o).length !== before) v = o;
+    }
     if (k === 'enum' && Array.isArray(v) && v.includes('recovery') && v.includes('host'))
       v = (v as unknown[]).filter((x) => x !== 'lead');
     if (k === 'enum' && Array.isArray(v))
@@ -524,6 +545,28 @@ test('H3-01: прежние команды и схемы их данных не 
       // Ревью раунда 2: актёр шага пути (`track.steps[].actor`).
       if ('label' in o && 'state' in o && 'rework' in o) delete o.actor;
       if (Object.keys(o).length !== before) v = o;
+    }
+    // alpha.68: изменённые необязательные документы у run --source
+    // (`documentsDrift`), дополнения разбора (`addenda`), предел раундов
+    // ревью предмета (`rounds.remaining/free/since`, `used` с нуля).
+    if (k === 'properties' && v && typeof v === 'object') {
+      const o = { ...(v as Record<string, unknown>) };
+      const before = Object.keys(o).length;
+      if ('resumed' in o && 'works' in o) delete o.documentsDrift;
+      if ('failures' in o && 'epoch' in o) delete o.addenda;
+      if ('digest' in o && 'generation' in o && 'by' in o && 'at' in o) delete o.limits;
+      if ('reviewerBinding' in o && 'findings' in o) {
+        delete o.planDigest;
+        delete o.counted;
+        delete o.changes;
+      }
+      if ('used' in o && 'max' in o) {
+        delete o.remaining;
+        delete o.free;
+        delete o.since;
+        o.used = { type: 'integer', exclusiveMinimum: 0, maximum: 9007199254740991 };
+      }
+      if (Object.keys(o).length !== before || 'used' in o) v = o;
     }
     // Ревью раунда 2: событие снятия удержания при отклонённом повторе.
     if (k === 'oneOf' && Array.isArray(v))
@@ -669,6 +712,9 @@ test('H3-01: прежние команды и схемы их данных не 
     if (k === 'properties' && v && typeof v === 'object' && 'os' in v && 'reason' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.processList;
+      // Пробы сигнала вне песочницы и браузера (0.1.0-alpha.68).
+      delete rest.signal;
+      delete rest.browser;
       v = rest;
     }
     if (k === 'enum' && Array.isArray(v) && v.includes('writer-environment'))
@@ -839,6 +885,8 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.setup;
       // Обновления по последней проверке `harness update --check` (0.1.0-alpha.60).
       delete rest.updates;
+      // План выпуска ведущего или подсказка, что его нет (0.1.0-alpha.68).
+      delete rest.outline;
       return rest;
     }
     // Аддитивные поля находки плана или контракта: счёт раундов и решение
@@ -968,6 +1016,9 @@ test('H3-01: прежние команды и схемы их данных не 
     assert.ok(JSON.stringify(data).includes(JSON.stringify(value)), value + ' объявлен');
   // Хеш H2 вырезает список процессов песочницы у doctor: объявление держит эта проверка.
   assert.ok(JSON.stringify(data.doctor).includes('"processList"'), 'doctor: sandbox.processList');
+  // Хеш H2 вырезает пробы сигнала и браузера у doctor: объявление держит эта проверка.
+  for (const field of ['"signal"', '"browser"'])
+    assert.ok(JSON.stringify(data.doctor).includes(field), 'doctor: sandbox.' + field);
   // Хеш H2 вырезает поля слоя lean: объявление держит эта проверка.
   assert.ok(JSON.stringify(data.profile).includes('"gateTimeoutFloorMs"'), 'profile: граница gate');
   assert.ok(JSON.stringify(data.init).includes('"layers"'), 'init: слои профиля в manifest');

@@ -5,6 +5,7 @@ import {
   repairPolicy,
   repairRepeats,
 } from '../contracts/repair-policy.ts';
+import type { NoRetryEnvironmentCause } from '../contracts/execution.ts';
 import { CLIP_DIAGNOSTIC, clipText } from './clip.ts';
 import type { Actor, FailureKind, NextAction, PauseReason, WorkStatus } from './enums.ts';
 import type { InputState } from './input.ts';
@@ -138,15 +139,23 @@ export type StopInput =
         /** Предел окна контекста последнего отказа `context-exhausted`. */
         contextLimit?: 'prompt-too-long' | 'blocking-limit';
         /**
-         * Отказ окружения без повтора (`sandbox-process-list`, 0.1.0-alpha.66):
-         * повтора нет, ход ведущего — поменять gate или команду.
+         * Отказ окружения без повтора (`sandbox-process-list`, 0.1.0-alpha.66;
+         * `sandbox-signal`, `sandbox-browser` — 0.1.0-alpha.68): повтора нет,
+         * ход ведущего — поменять gate или команду.
          */
-        environmentCause?: 'sandbox-process-list';
+        environmentCause?: NoRetryEnvironmentCause;
         /**
          * Gate работы удержан отказом без повтора (`ENVIRONMENT_GATE_HELD`,
          * 0.1.0-alpha.66): `workId` — работа, чья попытка упала на ps из базы.
          */
-        gateHold?: { gate: string; workId: string; runId: string; route?: RetryRoute };
+        gateHold?: {
+          gate: string;
+          workId: string;
+          runId: string;
+          route?: RetryRoute;
+          /** Причина удержания; нет — `sandbox-process-list`. */
+          cause?: NoRetryEnvironmentCause;
+        };
         /**
          * Отказ без повтора исчерпал предел незасчитанных отказов работы
          * (`MAX_NEUTRAL_FAILURES`): маршрут повтора (`retryRoute`) — ход по

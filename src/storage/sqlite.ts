@@ -491,6 +491,21 @@ export class SqliteExecutionStore implements ExecutionStore {
     return rows.map((r) => readRunEvent(JSON.parse(r.data)));
   }
 
+  /**
+   * Последние `limit` событий перечисленных типов, по возрастанию `seq`
+   * (решения представления оператора, ревизия 8): выборка по типу в SQL, без
+   * чтения всего журнала.
+   */
+  eventsOfTypes(types: readonly string[], limit = 2000): RunEvent[] {
+    if (!types.length) return [];
+    const rows = this.db
+      .prepare(
+        `SELECT data FROM events WHERE json_extract(data, '$.type') IN (${types.map(() => '?').join(',')}) ORDER BY seq DESC LIMIT ?`,
+      )
+      .all(...types, Math.max(1, limit)) as { data: string }[];
+    return rows.reverse().map((r) => readRunEvent(JSON.parse(r.data)));
+  }
+
   close() {
     this.db.close();
   }

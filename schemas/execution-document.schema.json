@@ -1528,6 +1528,11 @@
                 "format": "date-time",
                 "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
               },
+              "roundEpochAt": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+              },
               "spent": {
                 "type": "integer",
                 "minimum": 0,
@@ -1940,6 +1945,40 @@
                         "at"
                       ],
                       "additionalProperties": false
+                    },
+                    "addenda": {
+                      "maxItems": 5,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "at": {
+                            "type": "string",
+                            "format": "date-time",
+                            "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                          },
+                          "text": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 2000
+                          },
+                          "evidence": {
+                            "maxItems": 10,
+                            "type": "array",
+                            "items": {
+                              "type": "string",
+                              "minLength": 1,
+                              "maxLength": 1000
+                            }
+                          }
+                        },
+                        "required": [
+                          "at",
+                          "text",
+                          "evidence"
+                        ],
+                        "additionalProperties": false
+                      }
                     }
                   },
                   "required": [
@@ -2062,6 +2101,14 @@
                 "enum": [
                   "os",
                   "none"
+                ]
+              },
+              "cause": {
+                "type": "string",
+                "enum": [
+                  "sandbox-process-list",
+                  "sandbox-signal",
+                  "sandbox-browser"
                 ]
               }
             },
@@ -2251,7 +2298,9 @@
           "environmentCause": {
             "type": "string",
             "enum": [
-              "sandbox-process-list"
+              "sandbox-process-list",
+              "sandbox-signal",
+              "sandbox-browser"
             ]
           },
           "failureFingerprint": {
@@ -4155,6 +4204,47 @@
                   "type": "string",
                   "pattern": "^[a-f0-9]{64}$"
                 },
+                "failureSummary": {
+                  "type": "object",
+                  "properties": {
+                    "tests": {
+                      "maxItems": 20,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200
+                      }
+                    },
+                    "testsTruncated": {
+                      "type": "boolean",
+                      "const": true
+                    },
+                    "assertion": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 300
+                    },
+                    "tail": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 1200
+                    },
+                    "source": {
+                      "type": "string",
+                      "enum": [
+                        "junit",
+                        "output",
+                        "command-report"
+                      ]
+                    },
+                    "withheld": {
+                      "type": "boolean",
+                      "const": true
+                    }
+                  },
+                  "additionalProperties": false
+                },
                 "toolchain": {
                   "type": "object",
                   "properties": {
@@ -5477,6 +5567,19 @@
             "by": {
               "type": "string",
               "minLength": 1
+            },
+            "limits": {
+              "type": "object",
+              "propertyNames": {
+                "type": "string",
+                "maxLength": 60
+              },
+              "additionalProperties": {
+                "type": [
+                  "number",
+                  "null"
+                ]
+              }
             }
           },
           "required": [

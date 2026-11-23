@@ -5,6 +5,7 @@ import {
   HarnessError,
   CONTEXT_LIMITS,
   contextDigest,
+  canonicalContext,
   contextIssues,
   contextSnapshotSchema,
   digestOf,
@@ -150,6 +151,15 @@ export interface SnapshotManifest {
    * совпадает. Нет поля — снимок записан до alpha.66.
    */
   legacyRevision?: string;
+  /**
+   * Ревизия постановок набора (0.1.0-alpha.68): та же ревизия без
+   * необязательных документов задач. Совпала у закреплённого и свежего
+   * чтения — постановки (текст, критерии, зависимости, обязательные
+   * документы, контекст задач, пакеты, предпосылки, базовая линия) те же, и
+   * правка одних необязательных документов (ответы и решения владельца)
+   * согласование не обесценивает. Нет поля — снимок записан до alpha.68.
+   */
+  ordersRevision?: string;
   readAt: string;
   rounds: number;
   limits: ConnectorConfig['limits'];
@@ -620,6 +630,8 @@ export function buildSnapshot(input: {
   let contextBytes = 0;
   /** Контекст задач по идентичности: часть ревизии набора (новое согласование при правке FI/SI). */
   const contextBy: [string, string][] = [];
+  /** Документы требований, на которые контекст задачи ссылается вместо текста (alpha.68). */
+  const requirementDocs: [string, string][] = [];
   /** Необязательные документы задач: ревизия набора (v2), не постановка задачи. */
   const optionalDocs: [string, string][] = [];
   const limits = config.limits;
@@ -861,6 +873,25 @@ export function buildSnapshot(input: {
             digest: file.digest,
           };
           contextBy.push([identityOf, file.digest]);
+          // Документ требований, который контекст задачи заменил ссылкой на
+          // закреплённый документ задачи, — часть постановки: его содержание
+          // входит в ревизию постановок (alpha.68). Ревизии набора v1/v2 —
+          // прежние формулы: закреплённые прежними версиями снимки остаются
+          // согласованными.
+          const referenced = [...pinnedDocs]
+            .filter(([, path]) => text.includes(path))
+            .map(([id]) => id)
+            .sort();
+          if (referenced.length)
+            requirementDocs.push([
+              identityOf,
+              digestOf(
+                referenced.map((id) => [
+                  id,
+                  sha256(read.documents.find((d) => d.id === id)?.body ?? ''),
+                ]),
+              ),
+            ]);
         }
       }
       // Исполнителю сказано, где постановка (или что её нет): строка в task.md.
@@ -974,14 +1005,24 @@ export function buildSnapshot(input: {
   // Ревизия набора. v2 (alpha.66): постановки задач (semantic digest v2) и
   // необязательные документы отдельно. legacyRevision — те же правила, что до
   // alpha.66: снимок, закреплённый прежней версией, остаётся согласованным.
-  const setRevision = (v: 1 | 2) =>
+  // `orders` — без необязательных документов (ревизия постановок, alpha.68).
+  const setRevision = (v: 1 | 2 | 'orders') =>
     digestOf({
       v: 1,
       connector,
-      tasks: tasks.map((t) => [t.identity, v === 2 ? t.semanticDigest : t.legacyDigest]),
+      tasks: tasks.map((t) => [t.identity, v === 1 ? t.legacyDigest : t.semanticDigest]),
       ...(v === 2
         ? { v: 2, documents: [...optionalDocs].sort(([a], [b]) => (a < b ? -1 : 1)) }
-        : {}),
+        : v === 'orders'
+          ? {
+              v: 'orders',
+              ...(requirementDocs.length
+                ? {
+                    requirementDocs: [...requirementDocs].sort(([a], [b]) => (a < b ? -1 : 1)),
+                  }
+                : {}),
+            }
+          : {}),
       prerequisites: prereqs,
       // Любая правка базовой линии — новое согласование; без неё ревизия прежняя.
       ...(config.baseline ? { baseline: digestOf(config.baseline) } : {}),
@@ -1002,6 +1043,7 @@ export function buildSnapshot(input: {
     });
   const revision = setRevision(2);
   const legacyRevision = setRevision(1);
+  const ordersRevision = setRevision('orders');
   const joined = `${config.provider}:${config.projectId}:${taskIds.join('+')}`;
   const parsed = workGraphSchema.safeParse({
     apiVersion: API_VERSION,
@@ -1027,11 +1069,12 @@ export function buildSnapshot(input: {
       })),
     );
   const graph = parsed.data;
-  const context: ContextSnapshot = {
+  // Каноническая форма (alpha.68): порядок источников не меняет снимок.
+  const context: ContextSnapshot = canonicalContext({
     apiVersion: API_VERSION,
     sources: [...sources, ...(input.local ?? [])],
     missing,
-  };
+  });
   // Пределы снимка контекста проверяются здесь, а не только при запуске:
   // source-snapshot и source-check называют их как отказ eligibility.
   for (const issue of contextLimitIssues(context))
@@ -1048,6 +1091,7 @@ export function buildSnapshot(input: {
     contextDigest: contextDigest(context),
     revision,
     legacyRevision,
+    ordersRevision,
     readAt: new Date().toISOString(),
     rounds: input.rounds,
     limits,

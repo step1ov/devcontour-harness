@@ -435,6 +435,7 @@ test('track: путь работы — попытки по шагам, разб�
         'checks1:failed',
         'review1:skipped',
         'integration1:skipped',
+        'diagnosis:planned',
         'code2:planned',
         'checks2:planned',
         'review2:planned',
@@ -458,10 +459,12 @@ test('track: путь работы — попытки по шагам, разб�
         'checks1:failed',
         'review1:skipped',
         'integration1:skipped',
+        'diagnosis:planned',
         'code2:planned',
         'checks2:planned',
         'review2:planned',
         'integration2:planned',
+        'diagnosis:planned',
         'code3:planned',
         'checks3:planned',
         'review3:planned',
@@ -485,6 +488,19 @@ test('track: путь работы — попытки по шагам, разб�
     });
     assert.deepEqual(kinds(t.steps), expected, `diagnoseAfter ${diagnoseAfter}`);
     assert.equal(t.steps[1]!.reason, 'проверки не прошли');
+    // Ревизия 8: до `diagnoseAfter` отказов — разбор по желанию (повтор
+    // делает harness сам), с ним и на исчерпании — обязательный.
+    const diagnoses = t.steps.filter((s) => s.kind === 'diagnosis');
+    assert.ok(diagnoses.every((s) => typeof s.required === 'boolean'));
+    const optional = diagnoses.filter((s) => s.required === false);
+    assert.equal(optional.length, Math.max(0, Math.min(diagnoseAfter, 3) - 1));
+    assert.ok(optional.every((s) => s.label === 'повтор: harness сам, ведущий может разобрать'));
+    assert.ok(
+      diagnoses
+        .filter((s) => s.required && s.state === 'planned')
+        .every((s) => s.label === 'обязательный разбор ведущего'),
+    );
+    assert.equal(diagnoses.at(-1)!.required, true, 'разбор перед сбросом обязателен');
   }
   // mode user: ни разборов, ни сбросов ведущего; разбор и сброс ведущего — решениями в истории.
   const user = setup({ mode: 'user' });
@@ -526,6 +542,11 @@ test('track: путь работы — попытки по шагам, разб�
     'diagnosis:D2: слабое покрытие',
     'reset:+3 (сброс 1 из 1, D2)',
   ]);
+  // D1 разобрал два отказа (держало правило), D2 — один, но по нему дан сброс.
+  assert.deepEqual(
+    t.steps.filter((s) => s.kind === 'diagnosis' && s.state === 'decision').map((s) => s.required),
+    [true, true],
+  );
   assert.equal(
     t.steps.filter((s) => s.kind === 'reset' && s.state === 'planned').length,
     0,
@@ -632,4 +653,49 @@ test('doctor: действующее правило решений словам�
   );
   assert.equal(usual.decisions?.items.find((i) => i.key === 'recovery.mode')?.source, 'derived');
   assert.ok(!usual.warnings?.some((w) => w.includes('recovery.mode')));
+});
+
+test('A68-1a: дополнение свежего разбора — без второго разбора и перерегистрации; исполнитель получает его; предела оно не даёт', async () => {
+  const { leadDiagnosisNote } = await import('../src/engine/runner.ts');
+  const ctx = setup({ mode: 'lead' });
+  const e = ctx.engine;
+  failOnce(e);
+  retryAuto(e);
+  failOnce(e);
+  // Дополнять нечего, пока разбора нет.
+  refused(() => e.amendDiagnosis('a', { text: 'вторая причина отказа' }), 'NOT_READY');
+  e.diagnose('a', { cause: 'environment', hypothesis: 'конфигурация gate не та' });
+  // Второй разбор того же отказа — отказ, как раньше.
+  refused(
+    () => e.diagnose('a', { cause: 'approach', hypothesis: 'другая гипотеза теста' }),
+    'NOT_READY',
+  );
+  const amended = e.amendDiagnosis('a', {
+    text: 'Ошибка очистки теста маскирует исходный отказ: token=abcdefabcdefabcdefabcdef',
+    evidence: ['лог gate'],
+  });
+  assert.equal(amended.diagnosis.id, 'D1');
+  assert.equal(amended.diagnosis.addenda?.length, 1);
+  assert.doesNotMatch(
+    amended.diagnosis.addenda[0]!.text,
+    /abcdefabcdefabcdef/,
+    'секрет замаскирован',
+  );
+  const d = work(e).leadRecovery!;
+  assert.equal(d.diagnoses.length, 1, 'нового разбора нет');
+  assert.equal(d.seq, 1);
+  const note = leadDiagnosisNote(d.diagnoses[0]!);
+  assert.match(note, /Lead addendum 1 to D1/);
+  assert.match(note, /маскирует исходный отказ/);
+  const events = ctx.store.events(0, 1000).filter((x) => x.type === 'work.diagnosis-amended');
+  assert.deepEqual((events[0]!.payload as { addendum: number }).addendum, 1);
+  for (let i = 2; i <= 5; i++) e.amendDiagnosis('a', { text: `ещё заметка ведущего ${i}` });
+  refused(
+    () => e.amendDiagnosis('a', { text: 'шестая заметка ведущего' }),
+    'INVALID_INPUT',
+    /5 дополнений/,
+  );
+  // После дополнения работа идёт дальше обычным повтором.
+  retryAuto(e);
+  assert.equal(e.claim('c1')?.attempt, 3);
 });

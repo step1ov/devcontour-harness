@@ -8,6 +8,7 @@ import {
   STATE_VERSION,
   inputPolicyOf,
   leadAnswersRule,
+  NO_RETRY_GATE_CODES,
   reviewVendorConflictMessage,
   reviewVendorConflicts,
   runtimeAssignments,
@@ -21,6 +22,7 @@ import {
 import { credentialPaths, isolationSupport } from '../environment/isolation.ts';
 import { chooseCheckoutRoot } from '../environment/checkout-root.ts';
 import { inspectPort, PORT_ADVICE } from '../environment/port-probe.ts';
+import { composeChecks } from '../environment/compose-check.ts';
 import { leadSandboxCheck, type LeadSandboxProbe } from '../environment/lead-sandbox.ts';
 import { defaultResourceDatabase, ResourcePool, resourceKey } from '../environment/resources.ts';
 import { HARNESS_VERSION } from '../package.ts';
@@ -30,7 +32,12 @@ import { resourceWarnings } from './resource-advice.ts';
 import { BROWSER_ADVICE, isBrowserRunner } from './browser-checks.ts';
 import { decisionSettingsView, recoveryPolicyOf } from '../projections/decisions.ts';
 import { timeBudgetWarnings } from '../verification/time-budget.ts';
-import { processListBackend } from '../verification/gates.ts';
+import { processListBackend, sandboxLimitBackend } from '../verification/gates.ts';
+import {
+  sandboxLimitLine,
+  type SandboxLimitCapability,
+  type SandboxSignatureCause,
+} from '../verification/sandbox-signatures.ts';
 import { processListLine, type ProcessListCapability } from '../verification/process-list.ts';
 import { resolveNodePin, sameNode, toolchainFacts } from '../environment/toolchain-pin.ts';
 
@@ -93,6 +100,16 @@ export async function doctor(
      * передаёт `true`; функция — подменённая проба.
      */
     processList?: true | (() => Promise<ProcessListCapability>);
+    /**
+     * Пробы ограничений песочницы проверок (0.1.0-alpha.68): сигнал процессу
+     * вне песочницы и браузер — `sandbox.signal`, `sandbox.browser` и строка
+     * в `notes`, как у `processList`. CLI передаёт `true` (общие пробы
+     * процесса, `sandboxLimitBackend`); объект — подменённые пробы.
+     */
+    sandboxLimits?:
+      | true
+      | 'cached'
+      | Partial<Record<SandboxSignatureCause, () => Promise<SandboxLimitCapability>>>;
   } = {},
 ) {
   const problems: string[] = [];
@@ -133,6 +150,42 @@ export async function doctor(
       : sandbox.ok
         ? await (options.processList === true ? processListBackend.probe : options.processList)()
         : undefined;
+  // Ограничения песочницы проверок (сигнал, браузер): как список процессов —
+  // строка с советом до первой попытки, не проблема среды.
+  const limitProbe = async (cause: SandboxSignatureCause) => {
+    const probes = options.sandboxLimits;
+    if (!probes) return undefined;
+    const probe =
+      policy?.isolation.mode === 'none'
+        ? () =>
+            Promise.resolve<SandboxLimitCapability>({
+              status: 'not-isolated',
+              detail: 'isolation.mode: none',
+            })
+        : !sandbox.ok
+          ? undefined
+          : probes === true
+            ? () => sandboxLimitBackend.probe(cause)
+            : probes === 'cached'
+              ? () =>
+                  Promise.resolve<SandboxLimitCapability>(
+                    sandboxLimitBackend.seen()[cause] ?? {
+                      status: 'unknown',
+                      detail: 'не проверялось (harness doctor --probe-sandbox)',
+                    },
+                  )
+              : probes[cause];
+    if (!probe) return undefined;
+    const c = await probe().catch((error: unknown): SandboxLimitCapability => ({
+      status: 'unknown',
+      detail: 'проба не исполнилась: ' + (error instanceof Error ? error.message : String(error)),
+    }));
+    return { ...c, line: sandboxLimitLine(cause, c) };
+  };
+  const [signalLimit, browserLimit] = await Promise.all([
+    limitProbe('sandbox-signal'),
+    limitProbe('sandbox-browser'),
+  ]);
   let state:
     | {
         stateVersion: number;
@@ -251,14 +304,31 @@ export async function doctor(
     ...(processList?.status === 'unavailable'
       ? ['sandbox-process-list: ' + processListLine(processList)]
       : []),
+    ...(signalLimit?.status === 'unavailable' ? ['sandbox-signal: ' + signalLimit.line] : []),
+    ...(browserLimit?.status === 'unavailable' ? ['sandbox-browser: ' + browserLimit.line] : []),
   ];
   for (const note of (policy?.repositories ?? []).flatMap((r) => {
     const browser = (r.writerProbe ?? []).filter(isBrowserRunner).map((s) => s.id);
+    // Под песочницей ОС проверок браузер не стартует и в gate (0.1.0-alpha.68):
+    // такой провал — отказ среды `sandbox-browser`, ход ведущего.
+    const gate =
+      policy?.isolation.mode === 'os'
+        ? ` В gate под песочницей ОС браузер не стартует: когда след песочницы у каждого упавшего теста и проба harness это подтвердила, такой провал — отказ среды sandbox-browser (${NO_RETRY_GATE_CODES['sandbox-browser']}), попытка не засчитана, gate удержан до хода ведущего; без подтверждения пробы провал засчитан.`
+        : '';
     return browser.length
-      ? [`browser-checks ${r.id} (${browser.join(', ')}): ${BROWSER_ADVICE}`]
+      ? [`browser-checks ${r.id} (${browser.join(', ')}): ${BROWSER_ADVICE}${gate}`]
       : [];
   }))
     notes.push(note);
+  // Модель compose шагов lifecycle (alpha.68, P6-16): сервис с опубликованными
+  // портами только во внутренних сетях — проблема до smoke; файл вне
+  // разбираемого подмножества YAML — заметка, проверка пропущена.
+  const composeBase = toolchain?.baseDir ?? checkouts?.baseDir;
+  if (policy && composeBase) {
+    const compose = composeChecks(policy, composeBase);
+    problems.push(...compose.problems);
+    notes.push(...compose.notes);
+  }
   const models = policy ? policyModels(policy) : [];
   if (policy) warnings.push(...codexModelWarnings(models));
   // Закреплённый toolchain: каталог и версия, сверка с node первым в PATH
@@ -291,6 +361,9 @@ export async function doctor(
       ...(processList
         ? { processList: { ...processList, line: processListLine(processList) } }
         : {}),
+      // Пробы ограничений песочницы проверок: сигнал вне песочницы и браузер.
+      ...(signalLimit ? { signal: signalLimit } : {}),
+      ...(browserLimit ? { browser: browserLimit } : {}),
     },
     ...(state ? { state } : {}),
     ...(checkoutRoot ? { checkouts: checkoutRoot } : {}),

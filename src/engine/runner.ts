@@ -4630,6 +4630,11 @@ export function leadDiagnosisNote(d: LeadDiagnosis) {
     `Lead diagnosis ${d.id} of the previous failed attempts (${d.failures.join(', ')}): cause ${d.cause}. ${action[d.cause]}`,
     d.hypothesis ? `Hypothesis to test in this attempt: ${d.hypothesis}` : '',
     d.evidence.length ? `Evidence: ${JSON.stringify(d.evidence)}` : '',
+    ...(d.addenda ?? []).map(
+      (a, i) =>
+        `Lead addendum ${i + 1} to ${d.id} (${a.at}): ${a.text}` +
+        (a.evidence.length ? ` Evidence: ${JSON.stringify(a.evidence)}` : ''),
+    ),
     'Do not repeat the approach of the failed attempts.',
   ]
     .filter(Boolean)

@@ -12,7 +12,7 @@ import {
 import { tmpdir } from 'node:os';
 import { hostLoad, loadText, type HostLoad } from '../environment/host-load.ts';
 import { join, resolve, sep, delimiter, relative, dirname } from 'node:path';
-import { accessSync, constants, existsSync } from 'node:fs';
+import { accessSync, constants, existsSync, readdirSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import {
@@ -69,6 +69,23 @@ import {
   processListSeen,
   type ProcessListCapability,
 } from './process-list.ts';
+import {
+  browserSignature,
+  sandboxSignatureCall,
+  sandboxSignatureCodeMessage,
+  sandboxSignatureFailure,
+  sandboxSignatureMessage,
+  sandboxSignaturePartial,
+  sandboxSignaturePartialNote,
+  sandboxSignatureSuspectNote,
+  type SandboxLimitCapability,
+  type SandboxSignatureCause,
+} from './sandbox-signatures.ts';
+import {
+  WITHHELD_NOTE,
+  commandReports,
+  failureSummary as summarizeFailure,
+} from './failure-summary.ts';
 import { sameNode, toolchainFacts, toolchainText, usesPnpm } from '../environment/toolchain-pin.ts';
 
 /** Длинное имя testcase заменяется хешем, а не обрезается: обрезка дала бы ложные совпадения. */
@@ -829,6 +846,19 @@ export async function processListAdded(
   base: string,
   sha: string,
 ): Promise<string[]> {
+  return addedCallFiles(repoPath, base, sha, processListCall);
+}
+
+/**
+ * Файлы, в которые изменение `base..sha` добавило строку, распознанную
+ * `isCall` (до 10). Те же исключения, что у `processListAdded`.
+ */
+export async function addedCallFiles(
+  repoPath: string,
+  base: string,
+  sha: string,
+  isCall: (line: string) => boolean,
+): Promise<string[]> {
   let out: string;
   try {
     out = await gitRawOutput(
@@ -854,7 +884,7 @@ export async function processListAdded(
       file = line.startsWith('+++ b/') ? line.slice(6) : undefined;
       continue;
     }
-    if (file && line.startsWith('+') && processListCall(line.slice(1))) files.add(file);
+    if (file && line.startsWith('+') && isCall(line.slice(1))) files.add(file);
   }
   return [...files].slice(0, 10);
 }
@@ -873,6 +903,216 @@ export const processListBackend = {
       if (c.status === 'unknown' && processListCache === pending) processListCache = undefined;
     });
     return pending;
+  },
+};
+
+/**
+ * Проба harness в песочнице ОС проверок (тот же `runCheck`, что у gates и у
+ * пробы `ps`): `interpret` читает исход. Песочница не исполнила пробу или
+ * проба не исполнилась — `unknown`.
+ */
+async function probeInGateSandbox(
+  argv: string[],
+  interpret: (result: { code: number | null; stdout: string; stderr: string }) => {
+    status: SandboxLimitCapability['status'];
+    detail: string;
+  },
+): Promise<SandboxLimitCapability> {
+  const support = isolationBackend.check();
+  if (!support.ok) return { status: 'unknown', detail: support.detail };
+  const dir = await realpath(await mkdtemp(join(tmpdir(), 'dc-limit-probe-')));
+  try {
+    const result = await runCheck(
+      { config: { isolation: { mode: 'os', domains: [] } } },
+      {
+        argv: argv.map((a) => a.replaceAll('{dir}', dir)),
+        cwd: dir,
+        env: { PATH: process.env.PATH ?? '/usr/bin:/bin', HOME: dir },
+        timeoutMs: 30_000,
+        signal: AbortSignal.timeout(60_000),
+        write: [dir],
+        readable: [],
+        controller: [],
+        settingsDir: join(dir, 'settings'),
+      },
+    );
+    if (result.notStarted || result.timedOut)
+      return {
+        status: 'unknown',
+        command: argv,
+        detail: `песочница не исполнила пробу: код ${result.code}`,
+      };
+    return { command: argv, ...interpret(result) };
+  } catch (error) {
+    return {
+      status: 'unknown',
+      command: argv,
+      detail: 'проба не исполнилась: ' + (error instanceof Error ? error.message : String(error)),
+    };
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+  }
+}
+
+/**
+ * Проба сигнала: процесс в песочнице ОС проверок посылает сигнал 0 процессу
+ * harness (он вне песочницы). EPERM — песочница сигналы закрывает
+ * (`unavailable`); сигнал прошёл — `available`; иное — `unknown`.
+ */
+export async function probeSandboxSignal(
+  mode: ExecutionPolicy['isolation']['mode'] = 'os',
+): Promise<SandboxLimitCapability> {
+  if (mode !== 'os') return { status: 'not-isolated', detail: 'isolation.mode: none' };
+  const script =
+    `try { process.kill(${process.pid}, 0); console.log('DC_SIGNAL_OK'); }` +
+    ` catch (e) { console.log('DC_SIGNAL_' + (e && e.code)); }`;
+  return probeInGateSandbox([process.execPath, '-e', script], ({ code, stdout, stderr }) => {
+    if (code === 0 && /^DC_SIGNAL_EPERM$/m.test(stdout))
+      return { status: 'unavailable', detail: `kill(${process.pid}, 0): EPERM` };
+    if (code === 0 && /^DC_SIGNAL_OK$/m.test(stdout))
+      return { status: 'available', detail: 'сигнал процессу вне песочницы прошёл' };
+    return {
+      status: 'unknown',
+      detail: `код ${code}: ${diagnostic(stderr, stdout) || 'без вывода'}`,
+    };
+  });
+}
+
+/** Известные места браузера на машине: системный Chrome/Chromium и кеш Playwright. */
+export function knownBrowsers(env: NodeJS.ProcessEnv = process.env): string[] {
+  const home = env.HOME ?? '';
+  const fixed =
+    process.platform === 'darwin'
+      ? [
+          '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+          '/Applications/Chromium.app/Contents/MacOS/Chromium',
+        ]
+      : [
+          '/usr/bin/chromium',
+          '/usr/bin/chromium-browser',
+          '/usr/bin/google-chrome',
+          '/usr/bin/google-chrome-stable',
+        ];
+  const caches = [
+    env.PLAYWRIGHT_BROWSERS_PATH,
+    home && join(home, 'Library', 'Caches', 'ms-playwright'),
+    home && join(home, '.cache', 'ms-playwright'),
+  ].filter((p): p is string => Boolean(p) && p !== '0');
+  const cached: string[] = [];
+  for (const cache of caches) {
+    let entries: string[] = [];
+    try {
+      entries = readdirSync(cache)
+        .filter((e) => /^chromium(?:_headless_shell)?-\d+$/.test(e))
+        .sort()
+        .reverse();
+    } catch {
+      continue;
+    }
+    for (const e of entries)
+      for (const rel of [
+        'chrome-mac/Chromium.app/Contents/MacOS/Chromium',
+        'chrome-mac-arm64/Chromium.app/Contents/MacOS/Chromium',
+        'chrome-mac/headless_shell',
+        'chrome-mac-arm64/headless_shell',
+        'chrome-linux/chrome',
+        'chrome-linux/headless_shell',
+      ])
+        cached.push(join(cache, e, rel));
+  }
+  return [...fixed, ...cached].filter((p) => existsSync(p));
+}
+
+/**
+ * Проба браузера: известный браузер машины стартует без окна в песочнице ОС
+ * проверок и печатает пустую страницу. Отказ со следом песочницы
+ * (`bootstrap_check_in`, `mach_port_rendezvous`) — `unavailable`; браузер
+ * отработал — `available`; браузера нет или отказ без следа песочницы —
+ * `unknown`: проба ничего не доказала, и провал gate остаётся засчитанным.
+ */
+export async function probeSandboxBrowser(
+  mode: ExecutionPolicy['isolation']['mode'] = 'os',
+  browsers: () => string[] = knownBrowsers,
+): Promise<SandboxLimitCapability> {
+  if (mode !== 'os') return { status: 'not-isolated', detail: 'isolation.mode: none' };
+  const [browser] = browsers();
+  if (!browser) return { status: 'unknown', detail: 'браузер на машине не найден' };
+  const argv = [
+    browser,
+    '--headless=new',
+    '--no-first-run',
+    '--no-default-browser-check',
+    '--disable-gpu',
+    // Без связки ключей и хранилища паролей ОС: их запрос в песочнице сам
+    // по себе не след ограничения браузера.
+    '--use-mock-keychain',
+    '--password-store=basic',
+    '--user-data-dir={dir}/profile',
+    '--dump-dom',
+    'about:blank',
+  ];
+  return probeInGateSandbox(argv, ({ code, stdout, stderr }) => {
+    if (code === 0 && /<html/i.test(stdout))
+      return { status: 'available', detail: 'браузер стартовал в песочнице' };
+    const evidence = browserSignature(stderr + '\n' + stdout);
+    if (evidence) return { status: 'unavailable', detail: `код ${code}: ${evidence}` };
+    return {
+      status: 'unknown',
+      detail: `код ${code} без следа песочницы: ${diagnostic(stderr, stdout) || 'без вывода'}`,
+    };
+  });
+}
+
+const sandboxLimitCache = new Map<SandboxSignatureCause, Promise<SandboxLimitCapability>>();
+const sandboxLimitSeen = new Map<SandboxSignatureCause, SandboxLimitCapability>();
+/**
+ * Пробы ограничений песочницы ОС проверок для `sandbox-signal` и
+ * `sandbox-browser`, одна на процесс harness и класс: отказ среды
+ * назначается, только когда проба ответила `unavailable`. Кешируется любой
+ * исход, и `unknown` тоже: проба с браузером идёт до 30 с, а ответ машины в
+ * пределах процесса не меняется. `seen` — ответы, полученные этим процессом
+ * (их показывают `harness gates` и `doctor`). Тест подменяет `probe` или
+ * `probes` и сбрасывает кеш `reset`.
+ */
+/** Когда получен ответ пробы (для срока `unknown`). */
+const sandboxLimitAt = new Map<SandboxSignatureCause, number>();
+export const sandboxLimitBackend = {
+  probes: {
+    'sandbox-signal': () => probeSandboxSignal('os'),
+    'sandbox-browser': () => probeSandboxBrowser('os'),
+  } as Record<SandboxSignatureCause, () => Promise<SandboxLimitCapability>>,
+  reset: () => {
+    sandboxLimitCache.clear();
+    sandboxLimitSeen.clear();
+    sandboxLimitAt.clear();
+  },
+  seen: (): Partial<Record<SandboxSignatureCause, SandboxLimitCapability>> =>
+    Object.fromEntries(sandboxLimitSeen),
+  /** Срок ответа `unknown` в кэше: неясный исход перепроверяется (ревью r3). */
+  unknownTtlMs: 5 * 60_000,
+  now: () => Date.now(),
+  probe: (cause: SandboxSignatureCause): Promise<SandboxLimitCapability> => {
+    const cached = sandboxLimitCache.get(cause);
+    const seen = sandboxLimitSeen.get(cause);
+    const expired =
+      seen?.status === 'unknown' &&
+      sandboxLimitBackend.now() - (sandboxLimitAt.get(cause) ?? 0) >
+        sandboxLimitBackend.unknownTtlMs;
+    if (cached && !expired) return cached;
+    const started = sandboxLimitBackend.probes[cause]()
+      .catch((error: unknown): SandboxLimitCapability => ({
+        status: 'unknown',
+        detail: 'проба не исполнилась: ' + (error instanceof Error ? error.message : String(error)),
+      }))
+      .then((c) => {
+        if (sandboxLimitCache.get(cause) === started) {
+          sandboxLimitSeen.set(cause, c);
+          sandboxLimitAt.set(cause, sandboxLimitBackend.now());
+        }
+        return c;
+      });
+    sandboxLimitCache.set(cause, started);
+    return started;
   },
 };
 /**
@@ -1101,6 +1341,12 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
   let reaped: ReapFailure | undefined;
   /** Провал назван только ненулевым кодом выхода, без иной причины. */
   let exitOnly = false;
+  /** Пометки к засчитанному провалу: часть упавших тестов закрыла песочница. */
+  const partialNotes: string[] = [];
+  /** Выжимка провала, названного командой (`EvidenceRecord.failureSummary`). */
+  let failureSummary: EvidenceRecord['failureSummary'];
+  /** Начало запуска: отчёты команды старше него — от прежнего запуска. */
+  let startedAt = Date.now();
   let passed = false,
     summary = '',
     log = `# harness gate ${gate.id}: cwd=${relative(root, gateCwd) || '.'} argv=${JSON.stringify(gate.command.map(redact))}${gate.kind === 'test' ? ` fresh=${redact(JSON.stringify(freshness))}` : ''}\n# toolchain: ${toolchainText(toolchain)}\n`,
@@ -1122,6 +1368,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     // Нагрузка до запуска: gate, который сам перегрузил процессор (пул
     // потоков без предела), не должен заработать повтор своей нагрузкой.
     loadBefore = hostLoad.read();
+    startedAt = Date.now();
     const result = await runCheck(
       { config: run.policy },
       {
@@ -1272,19 +1519,17 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       // (`process-list.ts`). Признак — в выводе, а при упавших testcases — в
       // тексте каждого из них; отказ подтверждает собственная проба harness
       // в той же песочнице, а не только напечатанное проверкой.
+      const failureTexts = counts?.failures
+        ? {
+            total: counts.failures,
+            texts: junitFailures(counts.xml, redact, Math.min(counts.failures, 200)).map(
+              (f) => `${f.message}\n${f.body}`,
+            ),
+          }
+        : undefined;
       const listing =
         run.policy.isolation.mode === 'os'
-          ? processListFailure(
-              result.stdout + '\n' + result.stderr,
-              counts?.failures
-                ? {
-                    total: counts.failures,
-                    texts: junitFailures(counts.xml, redact, Math.min(counts.failures, 200)).map(
-                      (f) => `${f.message}\n${f.body}`,
-                    ),
-                  }
-                : undefined,
-            )
+          ? processListFailure(result.stdout + '\n' + result.stderr, failureTexts)
           : undefined;
       if (listing && (await processListBackend.probe()).status === 'unavailable') {
         const tail = `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`;
@@ -1303,6 +1548,49 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
         kind = 'environment';
         cause = 'sandbox-process-list';
         throw new Error(processListMessage({ ...listing, line: redact(listing.line) }, tail));
+      }
+      // Сигнал процессу вне песочницы (`kill EPERM`) и браузер, который в
+      // песочнице ОС не стартует (0.1.0-alpha.68): след песочницы у каждого
+      // упавшего теста, вызов не из изменения задачи и, как у `ps`,
+      // собственная проба harness в той же песочнице подтвердила
+      // ограничение. Проба не подтвердила — засчитанный провал с пометкой о
+      // предполагаемой причине. Часть упавших со следом — пометка к провалу.
+      if (run.policy.isolation.mode === 'os') {
+        const output = result.stdout + '\n' + result.stderr;
+        const causes = ['sandbox-signal', 'sandbox-browser'] as SandboxSignatureCause[];
+        const noted = new Set<SandboxSignatureCause>();
+        for (const sandboxCause of causes) {
+          const line = sandboxSignatureFailure(sandboxCause, output, failureTexts);
+          if (!line) continue;
+          const probe = await sandboxLimitBackend.probe(sandboxCause);
+          if (probe.status !== 'unavailable') {
+            partialNotes.push(sandboxSignatureSuspectNote(sandboxCause, redact(line), probe));
+            noted.add(sandboxCause);
+            continue;
+          }
+          const tail = `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`;
+          const base = run.trustedBase;
+          const added =
+            base && base !== sha
+              ? await addedCallFiles(cwd, base, sha, (l) => sandboxSignatureCall(sandboxCause, l))
+              : [];
+          if (added.length)
+            throw new Error(sandboxSignatureCodeMessage(sandboxCause, redact(line), added, tail));
+          kind = 'environment';
+          cause = sandboxCause;
+          throw new Error(sandboxSignatureMessage(sandboxCause, redact(line), tail));
+        }
+        for (const sandboxCause of causes) {
+          if (noted.has(sandboxCause)) continue;
+          const line = sandboxSignaturePartial(sandboxCause, output, failureTexts);
+          if (!line) continue;
+          const probe = await sandboxLimitBackend.probe(sandboxCause);
+          partialNotes.push(
+            probe.status === 'unavailable'
+              ? sandboxSignaturePartialNote(sandboxCause, redact(line))
+              : sandboxSignatureSuspectNote(sandboxCause, redact(line), probe),
+          );
+        }
       }
       // Установка зависимостей, закреплённая политикой, упала на сети или
       // реестре пакетов, а признаков ошибки проекта нет: правка кода её не
@@ -1326,14 +1614,48 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       }
       // Провал назван только кодом выхода (без упавших случаев отчёта).
       exitOnly = !counts?.failures;
+      // Выжимка провала: упавшие тесты отчёта, вывода или отчёта, который
+      // команда записала сама, строка ошибки и хвост вывода. Без отчёта gate
+      // имена из вывода дописываются к тексту; ничего не названо — пометка,
+      // что gate скрыл причину.
+      const reports = counts?.failures
+        ? []
+        : (await commandReports(gate.command, gateCwd, root, startedAt, reportPath)).flatMap(
+            (r) => {
+              try {
+                return junitFailures(r.xml, redact, 20);
+              } catch {
+                return [];
+              }
+            },
+          );
+      failureSummary = summarizeFailure({
+        ...(counts?.failures ? { junit: junitFailures(counts.xml, redact, 50) } : {}),
+        reports,
+        stdout: result.stdout,
+        stderr: result.stderr,
+        redact,
+      });
+      // Имена не из отчёта gate (вывод, отчёт команды): отчёт gate мог
+      // назвать только общий провал обёртки.
+      const named =
+        failureSummary.source && failureSummary.source !== 'junit' && failureSummary.tests?.length
+          ? failureSummary.tests.join('; ').slice(0, 600)
+          : '';
       throw new Error(
         [
           `Код выхода ${result.code}`,
-          counts?.failures ? `упали ${failedCases(counts)}` : '',
+          counts?.failures
+            ? `упали ${failedCases(counts)}${named ? `; по выводу: ${named}` : ''}`
+            : named
+              ? `упали ${named}`
+              : '',
           diagnostic(result.stderr, result.stdout, redact),
         ]
           .filter(Boolean)
-          .join(': '),
+          .join(': ') +
+          partialNotes.map((n) => '; ' + n).join('') +
+          (failureSummary.withheld ? `; ${WITHHELD_NOTE}` : ''),
       );
     }
     if (reportPath) {
@@ -1342,6 +1664,13 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       // Отчёт сохраняется и при провале с нулевым кодом выхода: из него
       // следующая попытка получает текст провала (`gateFeedback`).
       await keepReport(counts.xml);
+      if (counts.failures)
+        failureSummary = summarizeFailure({
+          junit: junitFailures(counts.xml, redact, 50),
+          stdout: result.stdout,
+          stderr: result.stderr,
+          redact,
+        });
       if (counts.failures || counts.skipped)
         throw new Error(summary + (counts.failures ? `: ${failedCases(counts)}` : ''));
     } else summary = 'Команда завершилась успешно';
@@ -1531,6 +1860,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
     ...(manifest ? { tests: manifest.cases } : {}),
     ...(manifest?.truncated ? { testsTruncated: true } : {}),
     ...(reportDigest ? { reportDigest } : {}),
+    ...(!passed && failureSummary ? { failureSummary } : {}),
     ...(run.consumer ? { consumer: run.consumer } : {}),
     ...(toolchain.node ? { toolchain } : {}),
     ...(propertyEvidence ? { property: propertyEvidence } : {}),

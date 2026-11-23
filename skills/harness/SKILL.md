@@ -149,6 +149,14 @@ prepare fits a reasonable time.
 You are the planner: write the draft yourself. No other model is called for
 planning, and the draft approves nothing.
 
+**Declare the release outline first.** Before the first graph, record the
+whole release, not only the next graph: stages (infra per service, product,
+deploy, …) × components with a rough size and who does them (writers,
+environment, owner) — `$H lead outline` (see `$H lead outline --help`).
+Without it `status` and `harness view` say «плана выпуска нет — прогноз по одному
+графу» and the forecast reads one graph as the whole release. Update the
+outline with a reason when the plan grows.
+
 1. Write the user's goal and constraints to `.harness/work/<graph-id>.brief.md`.
    Ask the user a short question for every real ambiguity instead of
    guessing; the answer goes into the brief. A changed brief makes an earlier
@@ -474,6 +482,21 @@ id>"]`. The hypothesis is required for `coverage` and `approach` and must be
 new for the work. The next attempt gets the cause and the hypothesis in its
 prompt; then `$H retry --work <id>` or `$H run` continues.
 
+Found a second cause of the same failure after you diagnosed it (for example,
+a cleanup error in the test masks the original failure)? Add it to the fresh
+diagnosis instead of re-registering the graph or writing an instruction into
+the task source: `$H diagnose --state D --work <id> --addendum "<what else
+the writer must know>" [--evidence "…"]` (up to 5 per diagnosis). The next
+attempt gets the diagnosis with its addenda. An addendum is not a new
+diagnosis: it grants no new attempt limit and needs no plan review.
+
+**Infra work too big (`unfinished` twice).** Two `unfinished` attempts of an
+infra work (or one attempt that lists many independent deliverables: fault
+proxy, wrapper, fixtures, smoke, browser helper…) mean the order is too big
+for one attempt. Diagnose `split` and re-plan it into smaller infra works,
+each with one deliverable and its own check, instead of another `approach`
+on the same order.
+
 **Attempts exhausted (`ATTEMPTS_EXHAUSTED`).** If `explain` says `actor:
 lead`, it is yours: with `diagnose`, diagnose the last failure first; with
 `reset-attempts`, a fresh technical diagnosis exists (`coverage`, `approach`,
@@ -757,7 +780,26 @@ connector — is invisible unless you say it:
   refused; each of your records extends it). Your harness commands are
   written to your log only while your session is active, or when they say
   `--by lead` / `--actor lead` (`diagnose` is always yours); a command with `--actor operator` (or
-  `--by <human>`) is the operator's and does not extend your lease.
+  `--by <human>`) is the operator's and does not extend your lease. Inside
+  your open session `retry` needs an explicit role: `--by lead` for your own
+  decision (with the recovery limits) or `--by operator` for a human's
+  decision you pass on; without `--by` it is refused (`INVALID_INPUT`).
+  `input-answer` without `--actor` is always the operator's, also inside your
+  session: an owner's answer you pass on stays the owner's. Your own
+  technical answer needs `--actor lead --reason "…"`.
+- **Declare the whole release first** — before the first graph, record the
+  release outline: stages × components with a rough size and who does them,
+  not only the next graph:
+  `$H lead outline --state <state> --file outline.json` with
+  `{"stages":[{"id":"infra","title":"Инфраструктура","kind":"infra","components":[{"id":"api-infra","title":"API: сборка и gates","size":"S","actor":"writers"}]},{"id":"product","title":"Продукт","kind":"product","components":[{"id":"site","title":"Сайт","size":"M","actor":"writers","works":["site-form"]}]},{"id":"deploy","title":"Выкладка","kind":"deploy","components":[{"id":"staging","title":"Стенд","size":"S","actor":"owner"}]}]}`
+  (`kind`: infra | product | deploy | other; `size`: S = 1, M = 2, L = 4 tasks,
+  or `tasks: N`; `actor`: writers | environment | owner; optional `works`
+  names the work IDs or task keys of a component). The forecast then counts
+  the unregistered parts as release volume instead of reading one graph as
+  100 %; without an outline `status`/`view` show `RELEASE_OUTLINE_MISSING`
+  (a hint — `run` is not blocked). When the plan changes, record it again
+  with `--reason "<why>"`: the view says «план вырос: +…» instead of an
+  unexplained drop.
 - At each step outside harness, one short line in plain words, the way you
   would tell a non-developer: `$H lead note "Обновляю документ DOC-2 в источнике задач"
 --state <state>` (up to 200 characters; no secrets, no paths, no logs).
@@ -766,7 +808,9 @@ connector — is invisible unless you say it:
   Until then the view says «код принят, ведущий ещё работает: <your last
   note>» and progress stays below 100 %; it refuses while a work or rework is
   still open.
-- When you stop: `$H lead end --state <state>`.
+- When you stop: `$H lead end --state <state>`. If approved works are ready
+  and nothing runs, it still ends the session but warns
+  `READY_WORKS_NOT_RUNNING` (`data.readyNotRunning`): start `$H run` first.
 
 ### 10. New session
 
@@ -816,13 +860,25 @@ not copy acceptance logs or attempt state into notes.
   (`profiles/*.json`); `--profile ./file.json --repository <dir>` resolves a
   profile kept in the repository. Profile resolution only reads manifests and
   never runs project commands.
-- **Lead log**: `$H lead begin|note|end`, `$H release done --summary` (see «Lead log»).
+- **Lead log**: `$H lead begin|note|end`, `$H lead outline --file`, `$H release done --summary` (see «Lead log»).
 - **Queue control**: `$H status`, `pause`, `resume`, `cancel`, `retry`
   (bounded by the policy), `deliver` (repeats delivery without models or Git
   integration); with a connector, `source-deliver --reprove` re-proves the
   criteria of an accepted result after a binding fix.
 
 ## Don'ts
+
+- Do not hand-order or hand-compose context sources. Harness builds the
+  context snapshot (`input-context`, `source-snapshot`) and its digest does
+  not depend on source order; a hand-made copy only risks a different
+  content. When a digest differs, the review record names the changed
+  sources (`changes.context`).
+- Do not re-register a graph or a source snapshot just to pass a note to the
+  writer: use `diagnose --addendum`. A re-review of an unchanged plan does
+  not spend the plan-review round limit (`counted: false`), but a changed
+  plan does; `status` shows «раундов N/M, осталось K».
+- Before `lead end`, start `$H run` for every approved ready work; the
+  session end warns `READY_WORKS_NOT_RUNNING` when you forgot.
 
 - Use only the public CLI (`$H <command>`). Never import or call the
   package's library internals (`Engine`, `approve`, `carryInput`, isolation

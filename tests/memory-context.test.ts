@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   HarnessError,
   WORKSPACE_OWNER,
+  canonicalContext,
   contextDigest,
   type ContextSnapshot,
   type ErrorCode,
@@ -105,7 +106,9 @@ test('M01: writer и reviewer получают одни закреплённые
   assert.equal(provider.calls.recall, 1, 'исполнение не обращается к провайдеру');
 
   // Фактические входы runtime: ревью плана, writer, reviewer кода.
-  const pinned = contextText(snapshot);
+  // Harness исполняет каноническую форму снимка (источники по ID, alpha.68).
+  const executed = canonicalContext(snapshot);
+  const pinned = contextText(executed);
   const plan = ctx.prompts('review-plan');
   const implement = ctx.prompts('implement');
   const review = ctx.prompts('review-code');
@@ -118,13 +121,13 @@ test('M01: writer и reviewer получают одни закреплённые
     assert.ok(!prompt.includes('NEW-ANSWER-AFTER-APPROVAL'), 'новый ответ не подмешан');
   }
   const attempt = h.engine.read((v) => v.attempts('add-greeting')[0]!);
-  assert.equal(attempt.contextSnapshot, contextDigest(snapshot));
-  assert.equal(result.inputs.contextDigest, contextDigest(snapshot));
+  assert.equal(attempt.contextSnapshot, contextDigest(executed));
+  assert.equal(result.inputs.contextDigest, contextDigest(executed));
   const memoryPin = attempt.context!.find((c) => c.id === 'memory')!;
   assert.equal(memoryPin.digest, source.digest);
   assert.deepEqual(
-    h.engine.read((v) => v.local('context-snapshots', WORKSPACE_OWNER, contextDigest(snapshot))),
-    snapshot,
+    h.engine.read((v) => v.local('context-snapshots', WORKSPACE_OWNER, contextDigest(executed))),
+    executed,
     'сохранённый снимок — согласованный',
   );
 
@@ -158,7 +161,7 @@ test('M01: writer и reviewer получают одни закреплённые
   assert.equal(ctx.calls('claude', 'writer') - writerBefore, 1, 'нового writer нет');
   assert.equal(target(ctx), ref);
   evidence('M01', 'normal.json', {
-    snapshotDigest: contextDigest(snapshot),
+    snapshotDigest: contextDigest(executed),
     memorySourceDigest: source.digest,
     provenance,
     providerCalls: { beforeRun: 1, afterRun: 1, afterRecallAgain: provider.calls.recall },
@@ -260,7 +263,7 @@ test('M01/limit: обязательная память больше предел
   provider.respond([{ id: 'x', text: 'NEW-ANSWER-AFTER-APPROVAL' }]);
   await h.run({ graph: ctx.graph, author: 'claude', context: snapshot });
   assert.equal(h.result('add-greeting').result.outcome, 'accepted');
-  const pinned = contextText(snapshot);
+  const pinned = contextText(canonicalContext(snapshot));
   const prompts = [...ctx.prompts('implement'), ...ctx.prompts('review-code')];
   assert.ok(prompts.length >= 2);
   for (const prompt of prompts) {

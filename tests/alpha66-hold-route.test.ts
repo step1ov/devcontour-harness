@@ -11,7 +11,7 @@ import './temp-scope.ts';
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { digestOf, HarnessError, type WorkGraph } from '../src/contracts/index.ts';
+import { digestOf, HarnessError, WORKSPACE_OWNER, type WorkGraph } from '../src/contracts/index.ts';
 import { MAX_NEUTRAL_FAILURES } from '../src/contracts/repair-policy.ts';
 import type { Engine } from '../src/engine/engine.ts';
 import { stopInputsOf } from '../src/explain/state.ts';
@@ -310,12 +310,15 @@ test('оставленная доработка без abandoned.attempt (пре
     g.orders = g.orders.map((o) => ({ ...o, goal: o.goal + ' Доработка X.' }));
     return g;
   };
+  const current0 = () => e.read((v) => v.work('w')!);
   const replan = (g: WorkGraph) => {
     const { graph: state } = e.register(g, trustNone);
     e.recordReview(planReview(e, state, e.reviews('plan', state.id).length + 1));
     e.approve(state.id, 'agent');
   };
   replan(revised('2'));
+  const epoch = current0().rework?.roundEpochAt;
+  assert.ok(epoch, 'доработка со своим пределом открыла эпоху раундов');
   for (let i = 0; i < 2; i++) {
     env.clock.now += 1000;
     e.lead('c1');
@@ -338,6 +341,17 @@ test('оставленная доработка без abandoned.attempt (пре
   assert.equal(current().attempt, 1);
   replan(revised('3'));
   assert.equal(current().rework?.resumed, true);
+  assert.equal(
+    current().rework?.roundEpochAt,
+    epoch,
+    'продолжение сохраняет эпоху раундов (alpha.68)',
+  );
+  const epochs = e.read((v) => v.local('round-epochs', WORKSPACE_OWNER, 'g'))?.epochs;
+  assert.deepEqual(
+    epochs?.map((x) => [x.at, x.workId]),
+    [[epoch, 'w']],
+    'эпоха записана один раз и не стёрта отказом',
+  );
   assert.equal(current().attempt, 2, 'выведено: два засчитанных отказа после принятой попытки');
   // Принятой попытки не найти — строгая сторона: предел исчерпан.
   e.cancel('w', 'abandon', 'operator');
@@ -396,5 +410,51 @@ test('путь работы: удержанный gate — ожидание ве
       label: 'сброс попыток человеком',
       actor: 'user',
     },
+  );
+});
+
+test('A68-r3: первая запись эпох раундов начинается с эпох прежней сборки — израсходованные остаются израсходованными', () => {
+  const env = engineOf(policyOf());
+  const e = env.engine;
+  ready(e, graphOf({ w: [], x: [] }));
+  for (const id of ['w', 'x']) {
+    e.lead('c1');
+    const a = e.claim('c1')!;
+    assert.ok(a, id);
+    accept(e, a.id, a.token, sha('a'), sha('b'));
+    env.clock.now += 1000;
+  }
+  const replan = (revision: string, change: (o: { id: string; goal: string }) => string) => {
+    const g = graphOf({ w: [], x: [] }, revision, 'g');
+    g.orders = g.orders.map((o) => ({ ...o, goal: change(o) }));
+    const { graph: state } = e.register(g, trustNone);
+    e.recordReview(planReview(e, state, e.reviews('plan', state.id).length + 1));
+    e.approve(state.id, 'agent');
+  };
+  // Состояние прежней сборки: принятая доработка w открыла эпоху, записи
+  // эпох нет.
+  const first = '2026-01-01T00:00:00.500Z';
+  env.store.transact('task.retry', (tx) => {
+    const w = tx.work('w')!;
+    tx.putWork({
+      ...w,
+      rework: {
+        revision: 1,
+        budgets: 1,
+        fresh: true,
+        accepted: { resultSha: w.resultSha! },
+        reopenedAt: first,
+        roundEpochAt: first,
+        spent: 1,
+      },
+    });
+  });
+  env.clock.now += 1000;
+  replan('3', (o) => (o.id === 'x' ? o.goal + ' Доработка.' : o.goal));
+  const epochs = e.read((v) => v.local('round-epochs', WORKSPACE_OWNER, 'g'))!.epochs;
+  assert.deepEqual(
+    epochs.map((x) => x.at),
+    [first, e.read((v) => v.work('x')!.rework!.roundEpochAt)!],
+    'эпоха прежней сборки — в записи',
   );
 });

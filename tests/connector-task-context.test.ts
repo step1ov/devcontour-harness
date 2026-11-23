@@ -10,7 +10,12 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { HarnessError, cliDataSchemas, operatorViewSchema } from '../src/contracts/index.ts';
+import {
+  HarnessError,
+  cliDataSchemas,
+  digestOf,
+  operatorViewSchema,
+} from '../src/contracts/index.ts';
 import { openConnector, parseConfig } from '../src/integrations/connector/index.ts';
 import {
   RELAY_TASK_CONTEXT_CAPABILITY,
@@ -19,7 +24,10 @@ import {
 } from '../src/integrations/connector/compat.ts';
 import { relayCompatibilityCheck } from '../src/integrations/connector/commands.ts';
 import { parseQuestion } from '../src/integrations/connector/questions.ts';
-import { TASK_CONTEXT_FILE } from '../src/integrations/connector/snapshot.ts';
+import {
+  TASK_CONTEXT_FILE,
+  optionalDocumentsDigest,
+} from '../src/integrations/connector/snapshot.ts';
 import { fakeSuiteBackend, scenario } from '../src/integrations/connector/testing.ts';
 import {
   TransportError,
@@ -417,7 +425,7 @@ test('alpha.60: вопросы владельцу из Relay и весь сре�
       typeof operatorView
     >;
     operatorViewSchema.parse(view);
-    assert.equal(view.viewRevision, 7);
+    assert.equal(view.viewRevision, 8);
     assert.deepEqual(
       view.scope?.tasks.map((t) => [t.key, t.state, t.workId]),
       [[s.task.key, 'in-harness', s.workId]],
@@ -1072,4 +1080,71 @@ test('alpha.60 (P11): прогноз — p50/p90 разных попыток, з
   // Код 199/200 — 90 % выпуска, план согласован (половина доли ведущего).
   assert.equal(m.progress.percent, 95);
   assert.equal(m.progress.left, 1);
+});
+
+test('alpha.68 (r1): документ требований, который контекст задачи заменил ссылкой на документ задачи, — постановка: правка его текста — APPROVAL_STALE, а не documentsDrift', async () => {
+  const s = await scenario(fakeSuiteBackend());
+  try {
+    const doc = await s.project.admin.addDocument(s.task.id, {
+      name: 'Goal spec',
+      body: '# Goal\n\nVersion 1.\n',
+    });
+    let body = '# Goal\n\nVersion 1.\n';
+    const transport = () =>
+      contextual(s.project.transport(), {
+        records: () => [
+          fi(),
+          {
+            section: 'document',
+            kind: 'document',
+            id: doc.id,
+            key: 'DOC-9',
+            title: 'Goal spec',
+            revision: 1,
+            summary: '',
+            body,
+            reasons: [{ code: 'target-document', from: 'PRODUCT-1' }],
+          },
+        ],
+      }).transport;
+    const opened = await s.open({ transport: transport() });
+    await opened.connector.snapshot(join(s.root, 'a'));
+    const built = await opened.connector.source.snapshot();
+    // Ревизия набора — формула alpha.67 (тело документа требований в неё
+    // отдельно не входит): закреплённые прежней версией снимки остаются
+    // согласованными после обновления (ревью r2).
+    const m = built.manifest.tasks[0]!;
+    const read = await s.project.transport().readTask(m.id);
+    const mapping = s.loaded().config.tasks[0]!;
+    assert.equal(
+      built.manifest.revision,
+      digestOf({
+        v: 2,
+        connector: built.manifest.connector,
+        tasks: [[m.identity, m.semanticDigest]],
+        documents: [[m.identity, optionalDocumentsDigest(mapping, read)]],
+        prerequisites: built.graph.prerequisites,
+        taskContext: [
+          [m.identity, m.taskContext!.status === 'included' ? m.taskContext!.digest : ''],
+        ],
+      }),
+      'ревизия набора — прежняя формула',
+    );
+    assert.ok(built.manifest.ordersRevision);
+    const text = built.context.sources
+      .flatMap((x) => x.files)
+      .find((f) => f.path === TASK_CONTEXT_FILE)!.content.data;
+    assert.match(text, /documents\//, 'контекст ссылается на закреплённый документ задачи');
+    opened.close();
+    body = '# Goal\n\nVersion 2: a different requirement.\n';
+    await s.project.admin.updateDocument(doc.id, body);
+    const again = await s.open({ transport: transport() });
+    await assert.rejects(
+      again.connector.prepareRun(again.h),
+      (e: unknown) => e instanceof HarnessError && e.code === 'APPROVAL_STALE',
+    );
+    again.close();
+  } finally {
+    await s.cleanup();
+  }
 });

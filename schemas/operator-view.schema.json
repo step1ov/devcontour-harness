@@ -1083,6 +1083,9 @@
                         "user",
                         "harness"
                       ]
+                    },
+                    "required": {
+                      "type": "boolean"
                     }
                   },
                   "required": [
@@ -1103,6 +1106,116 @@
               "steps"
             ],
             "additionalProperties": false
+          },
+          "reopened": {
+            "type": "object",
+            "properties": {
+              "at": {
+                "type": "string",
+                "format": "date-time",
+                "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+              },
+              "by": {
+                "type": "string",
+                "enum": [
+                  "lead",
+                  "operator"
+                ]
+              },
+              "revision": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "budget": {
+                "type": "string",
+                "enum": [
+                  "fresh",
+                  "carried"
+                ]
+              },
+              "acceptedSha": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              },
+              "spent": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              }
+            },
+            "required": [
+              "at",
+              "revision",
+              "budget",
+              "acceptedSha",
+              "spent",
+              "reason"
+            ],
+            "additionalProperties": false
+          },
+          "attemptReviews": {
+            "maxItems": 40,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "attempt": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "phase": {
+                  "type": "string",
+                  "enum": [
+                    "candidate",
+                    "integration"
+                  ]
+                },
+                "verdict": {
+                  "type": "string",
+                  "enum": [
+                    "approved",
+                    "rejected",
+                    "invalid"
+                  ]
+                },
+                "findings": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "notes": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "at": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                },
+                "earlier": {
+                  "type": "boolean",
+                  "const": true
+                }
+              },
+              "required": [
+                "attempt",
+                "phase",
+                "verdict",
+                "findings",
+                "notes",
+                "at"
+              ],
+              "additionalProperties": false
+            }
           }
         },
         "required": [
@@ -1163,6 +1276,23 @@
                     "type": "null"
                   }
                 ]
+              },
+              "remaining": {
+                "anyOf": [
+                  {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
+              "free": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9007199254740991
               }
             },
             "required": [
@@ -2861,6 +2991,51 @@
                     "type": "boolean",
                     "const": true
                   },
+                  "stageProgress": {
+                    "type": "object",
+                    "properties": {
+                      "stage": {
+                        "type": "string",
+                        "enum": [
+                          "code",
+                          "checks",
+                          "review",
+                          "integration"
+                        ]
+                      },
+                      "from": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                      },
+                      "to": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                      },
+                      "since": {
+                        "type": "string",
+                        "format": "date-time",
+                        "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                      },
+                      "typicalMs": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9007199254740991
+                      },
+                      "samples": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                      }
+                    },
+                    "required": [
+                      "stage",
+                      "from",
+                      "to"
+                    ],
+                    "additionalProperties": false
+                  },
                   "line": {
                     "type": "string",
                     "minLength": 1,
@@ -2874,6 +3049,84 @@
                 ],
                 "additionalProperties": false
               }
+            },
+            "growth": {
+              "type": "object",
+              "properties": {
+                "at": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                },
+                "added": {
+                  "maxItems": 10,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  }
+                },
+                "before": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "after": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 100
+                },
+                "by": {
+                  "type": "string",
+                  "enum": [
+                    "works",
+                    "outline"
+                  ]
+                },
+                "reason": {
+                  "type": "string",
+                  "maxLength": 300
+                },
+                "line": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                }
+              },
+              "required": [
+                "at",
+                "added",
+                "before",
+                "after",
+                "by",
+                "line"
+              ],
+              "additionalProperties": false
+            },
+            "conditional": {
+              "type": "boolean",
+              "const": true
+            },
+            "infraShare": {
+              "type": "object",
+              "properties": {
+                "share": {
+                  "type": "number",
+                  "minimum": 0,
+                  "maximum": 1
+                },
+                "line": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                }
+              },
+              "required": [
+                "share",
+                "line"
+              ],
+              "additionalProperties": false
             },
             "planned": {
               "type": "object",
@@ -3187,6 +3440,69 @@
               ],
               "additionalProperties": false
             },
+            "outline": {
+              "type": "object",
+              "properties": {
+                "units": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "ownerUnits": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "loMs": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "hiMs": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "basis": {
+                  "type": "string",
+                  "enum": [
+                    "attempts",
+                    "default"
+                  ]
+                },
+                "line": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                }
+              },
+              "required": [
+                "units",
+                "basis",
+                "line"
+              ],
+              "additionalProperties": false
+            },
+            "finishing": {
+              "type": "object",
+              "properties": {
+                "since": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                },
+                "elapsedMs": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "exceeded": {
+                  "type": "boolean",
+                  "const": true
+                }
+              },
+              "additionalProperties": false
+            },
             "line": {
               "type": "string",
               "minLength": 1,
@@ -3195,6 +3511,202 @@
           },
           "required": [
             "humanWait",
+            "line"
+          ],
+          "additionalProperties": false
+        },
+        "outline": {
+          "type": "object",
+          "properties": {
+            "state": {
+              "type": "string",
+              "enum": [
+                "recorded",
+                "missing"
+              ]
+            },
+            "code": {
+              "type": "string",
+              "const": "RELEASE_OUTLINE_MISSING"
+            },
+            "revision": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "recordedAt": {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+            },
+            "units": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "registered": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "unregistered": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "beyond": {
+              "type": "integer",
+              "exclusiveMinimum": 0,
+              "maximum": 9007199254740991
+            },
+            "stages": {
+              "maxItems": 12,
+              "type": "array",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "title": {
+                    "type": "string",
+                    "maxLength": 120
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "infra",
+                      "product",
+                      "deploy",
+                      "other"
+                    ]
+                  },
+                  "state": {
+                    "type": "string",
+                    "enum": [
+                      "registered",
+                      "partial",
+                      "unregistered"
+                    ]
+                  },
+                  "units": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "registered": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "percent": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 100
+                  },
+                  "components": {
+                    "maxItems": 20,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "id": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 200
+                        },
+                        "title": {
+                          "type": "string",
+                          "maxLength": 120
+                        },
+                        "size": {
+                          "type": "string",
+                          "enum": [
+                            "S",
+                            "M",
+                            "L"
+                          ]
+                        },
+                        "tasks": {
+                          "type": "integer",
+                          "exclusiveMinimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "actor": {
+                          "type": "string",
+                          "enum": [
+                            "writers",
+                            "environment",
+                            "owner"
+                          ]
+                        },
+                        "state": {
+                          "type": "string",
+                          "enum": [
+                            "registered",
+                            "partial",
+                            "unregistered"
+                          ]
+                        },
+                        "units": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "registered": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 9007199254740991
+                        },
+                        "percent": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 100
+                        },
+                        "works": {
+                          "maxItems": 5,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 200
+                          }
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "actor",
+                        "state",
+                        "units",
+                        "registered",
+                        "percent"
+                      ],
+                      "additionalProperties": false
+                    }
+                  }
+                },
+                "required": [
+                  "id",
+                  "kind",
+                  "state",
+                  "units",
+                  "registered",
+                  "percent",
+                  "components"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "line": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 200
+            }
+          },
+          "required": [
+            "state",
             "line"
           ],
           "additionalProperties": false
@@ -4088,6 +4600,11 @@
           "maximum": 9007199254740991
         },
         "decisions": {
+          "type": "integer",
+          "exclusiveMinimum": 0,
+          "maximum": 9007199254740991
+        },
+        "attemptReviews": {
           "type": "integer",
           "exclusiveMinimum": 0,
           "maximum": 9007199254740991

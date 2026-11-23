@@ -14,7 +14,9 @@ import { join } from 'node:path';
 import {
   HarnessError,
   WORKSPACE_OWNER,
+  canonicalContext,
   contextDigest,
+  digestOf,
   executionPolicySchema,
   latestAnswer,
   sha256,
@@ -2192,4 +2194,210 @@ test('R7-3: отказ из-за потерянного снимка объяс�
   // Новый проход очереди работу не выдаёт сам: попытка по-прежнему одна.
   await ctx.runner.drain();
   assert.equal(ctx.engine.read((v) => v.attempts('add-greeting')).length, 1);
+});
+
+test('A68-1d: заменённое уточнение при держащейся остановке переносится — публичный путь к работе вопроса есть', () => {
+  // Тупик alpha.67: вопрос заменили, пока работа ушла из остановки (новая
+  // редакция вернула её в draft), затем согласование вернуло её в готовую
+  // с той же постановкой и попыткой вопроса — остановка снова держится.
+  // input-apply берёт только answered, а перенос отказывал «остановка
+  // держится». Теперь перенос — путь продолжения.
+  const env = stopped();
+  const answered = env.engine.answerInput(
+    env.request.id,
+    { text: 'Hello', actor: { kind: 'operator' } },
+    1,
+  ).request;
+  const closed = env.engine.supersedeInput(
+    env.request.id,
+    { by: 'lead', reason: 'перенос после новой редакции', successor: 'w' },
+    answered.version,
+  ).request;
+  assert.equal(closed.lifecycle, 'superseded');
+  assert.equal(
+    env.engine.read((v) => env.engine.originHolds(v, closed)),
+    true,
+    'исходная остановка держится',
+  );
+  // Правило неприменённых ответов прежнее: снимок с таким ответом не
+  // активируется обходом (run, approve) — только переносом.
+  assert.equal(
+    env.engine.read((v) => env.engine.carryAllowed(v, closed)),
+    false,
+  );
+  const pending = withInput(undefined, inputContextSource(closed, latestAnswer(closed)!));
+  assert.equal(env.engine.read((v) => env.engine.unappliedInputs(v, pending)).length, 1);
+  const digest = reviewSnapshot(env, env.graph);
+  const proposal = env.engine.proposeCarry(env.request.id, digest);
+  assert.deepEqual(proposal.problems, []);
+  const carried = env.engine.carryInput(env.request.id, {
+    contextDigest: digest,
+    actor: 'agent',
+    expectedVersion: closed.version,
+    targetDigest: proposal.target!.digest,
+  });
+  assert.equal(carried.carried, true);
+  env.clock.now += 1000;
+  const next = env.engine.claim('c1')!;
+  assert.equal(next.workId, 'w');
+  assert.equal(next.pinned?.contextDigest, digest);
+  assert.equal(next.input?.requestId, env.request.id, 'ответ связан с попыткой');
+});
+
+/** Источник контекста с одним файлом (для снимков прежней версии с порядком «как пришло»). */
+function fileSource(id: string, text: string) {
+  const entry = {
+    id,
+    kind: 'files',
+    version: '1',
+    required: true,
+    files: [
+      {
+        path: `${id}.md`,
+        digest: sha256(text),
+        bytes: Buffer.byteLength(text),
+        content: { encoding: 'utf8' as const, data: text },
+      },
+    ],
+    references: [],
+  };
+  return { ...entry, digest: sourceDigest(entry) };
+}
+
+/**
+ * Состояние прежней версии: граф согласован со снимком в порядке «beta,
+ * alpha» (не канонический), снимок записан под digest своих байтов.
+ */
+function legacyApproved(ctx: ReturnType<typeof hsetup>) {
+  const h = ctx.open();
+  const raw = structuredClone(ctx.graph) as unknown as { orders: Record<string, unknown>[] };
+  raw.orders[0] = { ...raw.orders[0], context: ['alpha', 'beta'] };
+  const graph = workGraphSchema.parse(raw);
+  const legacy: ContextSnapshot = {
+    apiVersion: 'devcontour-harness/v1alpha1',
+    sources: [fileSource('beta', 'B'), fileSource('alpha', 'A')],
+    missing: [],
+  };
+  // Digest прежней версии — SHA-256 канонического JSON байтов снимка как есть.
+  const digest = digestOf(legacy);
+  h.engine.host.store.transact('run.context', (tx) =>
+    tx.putLocal('context-snapshots', WORKSPACE_OWNER, digest, legacy),
+  );
+  const { graph: g } = h.engine.register(graph, trustNone);
+  h.engine.recordReview({ ...planReview(h.engine, g, 1), contextDigest: digest });
+  h.engine.approve(g.id, 'agent', { bindContext: true });
+  return { h, graph, legacy, digest, graphId: g.id };
+}
+
+test('A68-r1: согласование прежней версии с неканоническим снимком — после обновления run без нового ревью, попытка закреплена тем же снимком и принята', async () => {
+  const ctx = hsetup({ scenario: { writer: implement(), reviewer: approve() } });
+  const { h, graph, digest, graphId } = legacyApproved(ctx);
+  // Тот же контекст, другой (канонический) порядок источников.
+  await h.run({
+    graph,
+    context: {
+      apiVersion: 'devcontour-harness/v1alpha1',
+      sources: [fileSource('alpha', 'A'), fileSource('beta', 'B')],
+      missing: [],
+    },
+    author: 'claude',
+  });
+  assert.equal(h.engine.reviews('plan', graphId).length, 1, 'нового раунда ревью плана нет');
+  const work = h.engine.read((v) => v.work(graph.orders[0]!.id)!);
+  const [attempt] = h.engine.read((v) => v.attempts(work.id));
+  assert.equal(attempt!.pinned?.contextDigest, digest, 'попытка закреплена согласованным снимком');
+  assert.equal(work.status, 'done', attempt!.error);
+  h.close();
+});
+
+test('A68-r1: снимок с ответом, прошедший ревью в прежней версии (неканонический порядок), применяется input-resolve без нового раунда', async () => {
+  const ctx = hsetup({ scenario: { writer: implement(), reviewer: approve() } });
+  const { h, graphId } = legacyApproved(ctx);
+  h.engine.lead('controller');
+  h.engine.resume();
+  const a = h.engine.claim('controller')!;
+  h.engine.fail(a.id, a.token, 'вопрос', { kind: 'needs-input', input: outcome() });
+  const id = h.inputRequests({ workId: a.workId })[0]!.id;
+  h.answerInput(id, { text: 'Hello, <name>!', actor: { kind: 'operator' } }, 1);
+  // Прежняя версия строила снимок с ответом поверх действующего (без сортировки)
+  // и записывала раунд ревью по digest его байтов.
+  const request = h.inputRequest(id);
+  const base = h.engine.read((v) => {
+    const d = v.graph(graphId)!.approval!.context!.digest!;
+    return v.local('context-snapshots', WORKSPACE_OWNER, d)!;
+  });
+  const answered = withInput(base, inputContextSource(request, latestAnswer(request)!));
+  const legacyDigest = digestOf(answered);
+  h.engine.host.store.transact('run.context', (tx) =>
+    tx.putLocal('context-snapshots', WORKSPACE_OWNER, legacyDigest, answered),
+  );
+  const g = h.engine.read((v) => v.graph(graphId)!);
+  h.engine.recordReview({ ...planReview(h.engine, g, 2), contextDigest: legacyDigest });
+  const result = await h.resolveInput(id, { author: 'claude' });
+  assert.equal(
+    'reviewed' in result && result.reviewed,
+    'reused',
+    'раунд прежней версии покрывает снимок',
+  );
+  assert.equal(result.contextDigest, legacyDigest);
+  assert.equal(result.applied, true);
+  h.close();
+});
+
+test('A68-r2: заменённое уточнение в держащейся остановке — input-carry, затем run со снимком переноса: без INPUT_REQUIRED, ответ у исполнителя', async () => {
+  const ctx = hsetup({ scenario: { writer: implement(), reviewer: approve() } });
+  const h = ctx.open();
+  ready(h.engine, ctx.graph, 'controller');
+  const a = h.engine.claim('controller')!;
+  h.engine.fail(a.id, a.token, 'вопрос', { kind: 'needs-input', input: outcome() });
+  h.engine.release('controller');
+  const id = h.inputRequests({ workId: a.workId })[0]!.id;
+  h.answerInput(
+    id,
+    { text: 'Use the short greeting CARRIED-ANSWER', actor: { kind: 'operator' } },
+    1,
+  );
+  // Вопрос заменён, пока остановка держится (так его оставила новая редакция).
+  h.supersedeInput(id, { by: 'lead', reason: 'новая редакция графа', successor: a.workId }, 2);
+  const carried = await h.carryInputOf(id, { reason: 'перенос в ту же работу', author: 'claude' });
+  assert.equal(carried.carried, true);
+  const snapshot = h.engine.read((v) =>
+    v.local('context-snapshots', WORKSPACE_OWNER, carried.contextDigest)!,
+  );
+  await h.run({ graph: ctx.graph, author: 'claude', context: snapshot });
+  const work = h.engine.read((v) => v.work(a.workId)!);
+  assert.equal(work.status, 'done', work.failure);
+  const last = h.engine.read((v) => v.attempts(a.workId).at(-1)!);
+  assert.equal(last.input?.requestId, id, 'ответ связан с попыткой');
+  h.close();
+});
+
+test('A68-r2: снимок с ответом записан в обоих порядках (input-context прежней версии и ревью отсортированной копии) — input-resolve применяет без нового раунда', async () => {
+  const ctx = hsetup({ scenario: { writer: implement(), reviewer: approve() } });
+  const { h, graphId } = legacyApproved(ctx);
+  h.engine.lead('controller');
+  h.engine.resume();
+  const a = h.engine.claim('controller')!;
+  h.engine.fail(a.id, a.token, 'вопрос', { kind: 'needs-input', input: outcome() });
+  const id = h.inputRequests({ workId: a.workId })[0]!.id;
+  h.answerInput(id, { text: 'Hello, <name>!', actor: { kind: 'operator' } }, 1);
+  const request = h.inputRequest(id);
+  const base = h.engine.read((v) => {
+    const d = v.graph(graphId)!.approval!.context!.digest!;
+    return v.local('context-snapshots', WORKSPACE_OWNER, d)!;
+  });
+  // input-context прежней версии записал снимок «как пришло» (X)…
+  const unsorted = withInput(base, inputContextSource(request, latestAnswer(request)!));
+  // …а ревью прошла отсортированная копия того же содержания (C).
+  const sorted = canonicalContext(unsorted);
+  for (const s of [unsorted, sorted])
+    h.engine.host.store.transact('run.context', (tx) =>
+      tx.putLocal('context-snapshots', WORKSPACE_OWNER, digestOf(s), s),
+    );
+  const g = h.engine.read((v) => v.graph(graphId)!);
+  h.engine.recordReview({ ...planReview(h.engine, g, 2), contextDigest: digestOf(sorted) });
+  const result = await h.resolveInput(id, { author: 'claude' });
+  assert.equal('reviewed' in result && result.reviewed, 'reused');
+  assert.equal(result.applied, true);
+  h.close();
 });

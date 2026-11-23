@@ -36,6 +36,7 @@ import {
   type ReviewRecord,
   type statusDataSchema,
   type AttemptState,
+  type RunEvent,
   type WorkState,
 } from '../contracts/index.ts';
 import { HARNESS_VERSION } from '../package.ts';
@@ -55,8 +56,8 @@ import { attemptLine, type AttemptLineFacts } from '../contracts/attempt-line.ts
 import { named, type LinePart } from '../projections/clip.ts';
 import { inputStateOf } from '../projections/input.ts';
 import { explainStop } from '../projections/stop.ts';
-import { workTrack } from '../projections/track.ts';
-import { recoveryPolicyOf } from '../projections/decisions.ts';
+import { diagnosisRequired, workTrack } from '../projections/track.ts';
+import { recoveryPolicyOf, type RecoveryPolicy } from '../projections/decisions.ts';
 import { blockingRequest } from '../engine/input-requests.ts';
 import { stopInputsIn } from '../explain/state.ts';
 import { policySecrets } from '../environment/redaction.ts';
@@ -66,6 +67,7 @@ import {
   workDetailView,
   type SetupView,
   type OperatorActivityInput,
+  type OperatorDecisionInput,
   type OperatorReviewInput,
   type OperatorSourceInput,
   type OperatorView,
@@ -82,7 +84,7 @@ import { carriedInput, statusOf } from './status.ts';
 import { acceptedTargets } from './target.ts';
 import { WorkflowQueue } from './workflow.ts';
 import { reviewRoundCap } from './review.ts';
-import { reviewSubjectSummary } from './review-summary.ts';
+import { reviewSubjectSummary, subjectRoundBudget } from './review-summary.ts';
 import { stageOfStep } from './stage.ts';
 import { setupProgress } from './setup-progress.ts';
 import { cachedUpdates, installedHarness, loadUpdatesConfig } from '../update/check.ts';
@@ -374,7 +376,18 @@ export function reviewsOf(
   const max = reviewRoundCap(policy);
   const plans: OperatorReviewInput[] = [...records.entries()].map(([key, r]) => {
     const spent = spend.get(key) ?? none;
-    const s = reviewSubjectSummary(r, max, spent);
+    const s = reviewSubjectSummary(
+      r,
+      max,
+      spent,
+      subjectRoundBudget(
+        v,
+        r.kind,
+        r.subject,
+        rows.filter((x) => x.kind === r.kind && x.subject === r.subject),
+        max,
+      ),
+    );
     const counts = findingCounts(r.findings);
     const waiting = escalatedFindings(r.findings, r.round);
     return {
@@ -382,7 +395,12 @@ export function reviewsOf(
       subject: s.subject,
       at: r.at,
       approved: s.approved,
-      rounds: s.rounds,
+      rounds: {
+        used: s.rounds.used,
+        max: s.rounds.max,
+        ...(s.rounds.remaining !== undefined ? { remaining: s.rounds.remaining } : {}),
+        ...(s.rounds.free !== undefined ? { free: s.rounds.free } : {}),
+      },
       open: s.open,
       accepted: s.accepted,
       reviewer: {
@@ -710,6 +728,298 @@ export function activityInputOf(
   return out;
 }
 
+/** События журнала, из которых представление берёт решения (ревизия 8). */
+export const DECISION_EVENT_TYPES = [
+  'work.cancelled',
+  'work.reopened',
+  'work.rework-abandoned',
+  'graph.registered',
+  'graph.approved',
+  'budget.raised',
+  'policy.applied',
+] as const;
+
+/** Сколько последних событий решений читает представление. */
+const DECISION_EVENTS_LIMIT = 2000;
+
+/** События решений из хранилища (выборка по типу); без хранилища — нет. */
+export function decisionEventsOf(
+  store: Pick<SqliteExecutionStore, 'eventsOfTypes'> | undefined,
+): RunEvent[] {
+  return store ? store.eventsOfTypes(DECISION_EVENT_TYPES, DECISION_EVENTS_LIMIT) : [];
+}
+
+/**
+ * Кто согласовал ту редакцию плана, регистрация которой вызвала событие `e`
+ * графа (0.1.0-alpha.68, ревью r1–r2). Движок пишет в одной транзакции
+ * регистрации отмены и отказы от доработок до `graph.registered`, а
+ * переоткрытия — после: регистрация — следующее `graph.registered` того же
+ * графа (отмена, отказ) или предыдущее (переоткрытие). Согласование — первое
+ * `graph.approved` того же графа после регистрации с тем же digest, и между
+ * ними нет другой регистрации (замена редакции). Иначе актёр неизвестен.
+ */
+function approvalAfter(events: readonly RunEvent[], e: RunEvent): 'agent' | 'operator' | undefined {
+  const same = events.filter((x) => x.graphId === e.graphId);
+  const registration =
+    e.type === 'work.reopened'
+      ? same.filter((x) => x.seq < e.seq && x.type === 'graph.registered').at(-1)
+      : same.find((x) => x.seq > e.seq && x.type === 'graph.registered');
+  if (!registration || registration.type !== 'graph.registered') return undefined;
+  const digest = registration.payload.digest;
+  for (const x of same) {
+    if (x.seq <= registration.seq) continue;
+    if (x.type === 'graph.registered' && x.payload.digest !== digest) return undefined;
+    if (x.type === 'graph.approved')
+      return x.payload.digest === digest ? x.payload.actor : undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Решения (ревизия 8) по записям хранилища и журнала: разборы и сбросы
+ * ведущего и человека (`WorkState.leadRecovery`), ответы на вопросы
+ * исполнителя с актёром, решения по находкам ревью (план, контракт —
+ * последний раунд предмета; код — `WorkState.codeReviewDecisions`), отмены,
+ * переоткрытия и оставленные доработки (`work.*`), повторные согласования
+ * (`graph.approved` с `reapproval`). Только факты: фразы и актёра `by`
+ * выводит проекция.
+ */
+export function decisionsInputOf(
+  works: readonly WorkState[],
+  requests: readonly InputRequest[],
+  planRows: readonly ReviewRecord[],
+  events: readonly RunEvent[],
+  recovery: RecoveryPolicy,
+): OperatorDecisionInput[] {
+  const out: OperatorDecisionInput[] = [];
+  for (const w of works) {
+    for (const d of w.leadRecovery?.diagnoses ?? [])
+      (d.addenda ?? []).forEach((a, i) =>
+        out.push({
+          kind: 'diagnosis-addendum',
+          at: a.at,
+          workId: w.id,
+          diagnosis: d.id,
+          index: i + 1,
+          text: a.text,
+        }),
+      );
+    for (const d of w.leadRecovery?.diagnoses ?? [])
+      out.push({
+        kind: 'diagnosis',
+        at: d.at,
+        workId: w.id,
+        diagnosis: d.id,
+        cause: d.cause,
+        failures: d.failures.length,
+        required: diagnosisRequired(w, d, recovery),
+        ...(d.hypothesis ? { hypothesis: d.hypothesis } : {}),
+      });
+    for (const r of w.leadRecovery?.resets ?? [])
+      out.push({
+        kind: 'reset',
+        at: r.at,
+        workId: w.id,
+        by: r.by,
+        granted: r.granted,
+        spent: r.spent,
+        ...(r.index !== undefined ? { index: r.index } : {}),
+        ...(r.cap !== undefined ? { cap: r.cap } : {}),
+        ...(r.diagnosis ? { diagnosis: r.diagnosis } : {}),
+      });
+    for (const d of w.codeReviewDecisions ?? [])
+      out.push({
+        kind: 'finding',
+        at: d.at,
+        scope: 'code',
+        subject: w.id,
+        workId: w.id,
+        findingId: d.finding,
+        decision: d.decision,
+        by: d.by,
+        round: d.round,
+        reason: d.reason,
+      });
+  }
+  for (const q of requests) {
+    if (q.kind !== 'question') continue;
+    for (const x of q.answers)
+      out.push({
+        kind: 'answer',
+        at: x.at,
+        workId: q.workId,
+        requestId: q.id,
+        revision: x.revision,
+        by: x.actor.kind,
+        ...(x.basis ? { basis: x.basis } : {}),
+        answerKind: x.kind,
+        ...(x.reason ? { reason: x.reason } : {}),
+      });
+  }
+  // Решения по находкам плана и контракта — по последнему раунду предмета:
+  // время — раунда, в котором решение применено.
+  const bySubject = new Map<string, ReviewRecord[]>();
+  for (const r of planRows) {
+    const key = `${r.kind}\0${r.subject}`;
+    bySubject.set(key, [...(bySubject.get(key) ?? []), r]);
+  }
+  for (const rows of bySubject.values()) {
+    const last = rows.reduce((a, b) => (b.round > a.round ? b : a));
+    for (const f of last.findings)
+      if (f.disposition)
+        out.push({
+          kind: 'finding',
+          at: rows.find((r) => r.round === f.disposition!.round)?.at ?? last.at,
+          scope: last.kind,
+          subject: last.subject,
+          findingId: f.id,
+          decision: f.disposition.decision,
+          by: f.disposition.by,
+          round: f.disposition.round,
+          reason: f.disposition.reason,
+        });
+  }
+  for (const e of events) {
+    if (e.type === 'work.cancelled' && e.workId)
+      out.push({
+        kind: 'cancel',
+        at: e.at,
+        workId: e.workId,
+        seq: e.seq,
+        by: e.payload.by,
+        ...((a) => (a ? { approvedBy: a } : {}))(
+          e.payload.by === 'graph' ? approvalAfter(events, e) : undefined,
+        ),
+      });
+    else if (e.type === 'work.reopened' && e.workId)
+      out.push({
+        kind: 'reopen',
+        at: e.at,
+        workId: e.workId,
+        seq: e.seq,
+        revision: e.payload.revision,
+        budget: e.payload.budget,
+        acceptedSha: e.payload.acceptedSha,
+        ...((a) => (a ? { approvedBy: a } : {}))(approvalAfter(events, e)),
+      });
+    else if (e.type === 'work.rework-abandoned' && e.workId)
+      out.push({
+        kind: 'rework-abandoned',
+        at: e.at,
+        workId: e.workId,
+        seq: e.seq,
+        revision: e.payload.revision,
+        acceptedSha: e.payload.acceptedSha,
+        by: e.payload.by,
+        ...((a) => (a ? { approvedBy: a } : {}))(
+          e.payload.by === 'graph' ? approvalAfter(events, e) : undefined,
+        ),
+      });
+    else if (e.type === 'budget.raised')
+      out.push({
+        kind: 'budget',
+        at: e.at,
+        seq: e.seq,
+        generation: e.payload.generation,
+        changes: e.payload.changes,
+        // Причину и кто решил называет повторное согласование после правки
+        // политики (`reapprove --by --reason`), если оно было.
+        // Только в том же поколении политики: повторное согласование после
+        // этого подъёма и до следующего применения политики (ревью r2);
+        // иначе причины нет.
+        ...((r) =>
+          r && r.type === 'graph.approved' && r.payload.reapproval
+            ? { by: r.payload.reapproval.by, reason: r.payload.reapproval.reason }
+            : {})(
+          ((next) =>
+            events.find(
+              (x) =>
+                x.seq > e.seq &&
+                (next === undefined || x.seq < next) &&
+                x.type === 'graph.approved' &&
+                !!x.payload.reapproval,
+            ))(
+            // Граница — применение следующего поколения: `policy.applied` того
+            // же поколения пишется рядом с подъёмом (ревью r3).
+            events.find(
+              (x) =>
+                x.seq > e.seq &&
+                x.type === 'policy.applied' &&
+                x.payload.generation > e.payload.generation,
+            )?.seq,
+          ),
+        ),
+      });
+    else if (e.type === 'graph.approved' && e.payload.reapproval && e.graphId)
+      out.push({
+        kind: 'reapproval',
+        at: e.at,
+        graphId: e.graphId,
+        seq: e.seq,
+        by: e.payload.reapproval.by,
+        round: e.payload.reapproval.round,
+        reason: e.payload.reapproval.reason,
+      });
+  }
+  return out;
+}
+
+/**
+ * Доработка открыта (ревизия 8): работа переоткрыта новой редакцией плана
+ * после приёмки, доработка не принята, не оставлена и не отменена. Кто —
+ * актёр согласования редакции после события `work.reopened` этой доработки.
+ */
+export function reopenedOf(
+  w: Pick<WorkState, 'id' | 'status' | 'rework'>,
+  events: readonly RunEvent[],
+): OperatorWorkInput['reopened'] {
+  const r = w.rework;
+  if (!r || r.abandoned || w.status === 'done' || w.status === 'cancelled') return undefined;
+  const e = events.findLast(
+    (x) => x.type === 'work.reopened' && x.workId === w.id && x.payload.revision === r.revision,
+  );
+  const approved = e ? approvalAfter(events, e) : undefined;
+  return {
+    at: r.reopenedAt,
+    ...(approved ? { by: approved === 'agent' ? ('lead' as const) : ('operator' as const) } : {}),
+    revision: r.revision,
+    budget: r.fresh ? 'fresh' : 'carried',
+    acceptedSha: r.accepted.resultSha,
+    spent: r.spent,
+  };
+}
+
+/**
+ * Итог ревью кандидата и интеграции по попыткам (ревизия 8): последний
+ * применённый раунд попытки и фазы (протокол `valid` или запись прежней
+ * версии без `reviewRound`); только неприменённые ответы — `invalid`.
+ */
+export function attemptReviewsOf(
+  own: readonly AttemptState[],
+  earlier: ReadonlySet<string>,
+): NonNullable<OperatorWorkInput['attemptReviews']> {
+  const out: NonNullable<OperatorWorkInput['attemptReviews']>[number][] = [];
+  const open = (f: { status?: string }) => f.status === undefined || f.status === 'open';
+  for (const a of [...own].sort((x, y) => x.attempt - y.attempt))
+    for (const phase of ['candidate', 'integration'] as const) {
+      const rows = a.evidence.filter((e) => e.kind === 'review' && e.phase === phase);
+      if (!rows.length) continue;
+      const applied = rows.filter((e) => !e.reviewRound || e.reviewRound.protocol === 'valid');
+      const e = applied.at(-1) ?? rows.at(-1)!;
+      const findings = applied.length ? (e.findings ?? []).filter(open) : [];
+      out.push({
+        attempt: a.attempt,
+        phase,
+        verdict: !applied.length ? 'invalid' : e.passed ? 'approved' : 'rejected',
+        findings: findings.filter((f) => f.severity === 'blocking').length,
+        notes: findings.filter((f) => f.severity !== 'blocking').length,
+        at: e.createdAt,
+        ...(earlier.has(a.id) ? { earlier: true as const } : {}),
+      });
+    }
+  return out;
+}
+
 /** Вызов полностью учтён: завершён, usage полный, цена есть (правило отчёта). */
 const callComplete = (r: CallRecord) =>
   r.outcome !== 'active' && r.outcome !== 'abandoned' && r.usage.complete && r.costUsd !== null;
@@ -722,6 +1032,8 @@ export interface ViewSource {
   readonly stateDir: string;
   /** Каталог, от которого разрешаются пути репозиториев политики. */
   readonly baseDir: string;
+  /** Хранилище для событий решений (ревизия 8); нет — решений из журнала нет. */
+  readonly store?: Pick<SqliteExecutionStore, 'eventsOfTypes'>;
 }
 
 /** `Harness.status(undefined, {detail: true})`: статус и сверка принятого с target ref. */
@@ -814,12 +1126,16 @@ export function collectOperatorViewInput(
           workflows: source.workflows,
           stateDir: source.options.stateDir,
           baseDir: source.options.baseDir,
+          store: source.store,
         }
       : source;
   const policy = h.policy;
   const now = options.now ?? h.engine.clock();
   // Один снимок: вложенные чтения хранилища (status, задания графов) видят
   // ту же транзакцию, что и записи ниже.
+  // События решений (ревизия 8): выборка по типу до снимка состояния.
+  const events = decisionEventsOf(h.store);
+  const recovery = recoveryPolicyOf(policy);
   return h.engine.read((v) => {
     const status = statusWithTargets(h);
     const jobs = h.workflows.list().filter((j) => j.kind === 'graph');
@@ -898,6 +1214,9 @@ export function collectOperatorViewInput(
         title: w.order.title,
         ...(planned ? { planned: true as const } : {}),
         ...(w.order.kind === 'infra' ? { kind: 'infra' as const } : {}),
+        ...((seen) => (seen ? { seenAt: seen.at } : {}))(
+          v.local('work-seen', WORKSPACE_OWNER, sw.id),
+        ),
         ...(sw.resultSha ? { resultSha: sw.resultSha } : {}),
         ...(w.order.dependsOn.length ? { dependsOn: w.order.dependsOn } : {}),
         stage: {
@@ -935,13 +1254,17 @@ export function collectOperatorViewInput(
           en: workTrack(w, own, { ...o, lang: 'en' }),
         }))({
           maxAttempts: policy.maxAttempts,
-          recovery: recoveryPolicyOf(policy),
+          recovery,
           question: !!blockingRequest(v, w),
           budgetHeld: sw.blockers.some((b) => b.code === 'BUDGET_EXHAUSTED'),
           ...((held) => (held ? { gateHold: held.gate } : {}))(
             h.engine.gateHoldsOf(w, gateHolds)[0],
           ),
         }),
+        ...((r) => (r ? { reopened: r } : {}))(reopenedOf(w, events)),
+        ...((rows) => (rows.length ? { attemptReviews: rows } : {}))(
+          attemptReviewsOf(own, earlier),
+        ),
         rechecks: own.reduce((n, a) => n + a.evidence.filter((e) => e.recheck).length, 0),
         ...(sw.liveness ? { liveness: sw.liveness } : {}),
         ...(active?.status === 'active'
@@ -1022,6 +1345,13 @@ export function collectOperatorViewInput(
       v.locals('code-reviews', WORKSPACE_OWNER).map((r) => r.value),
       requestsOf(v),
       v.works(),
+    );
+    const decisions = decisionsInputOf(
+      v.works(),
+      requestsOf(v),
+      v.locals('reviews', WORKSPACE_OWNER).map((r) => r.value),
+      events,
+      recovery,
     );
     const control = v.control();
     const controller = v.controller();
@@ -1131,6 +1461,9 @@ export function collectOperatorViewInput(
               },
             }
           : {})(v.local('lead', WORKSPACE_OWNER, 'log')),
+      ...((outline) => (outline ? { outline } : {}))(
+        v.local('release-outline', WORKSPACE_OWNER, 'outline'),
+      ),
       ...((r) => (r ? { resources: r } : {}))(
         resourcesInputOf(policy, h.stateDir, view.baseDir, {
           // Попытка закончилась по снимку хранилища: квитанция окружения
@@ -1146,6 +1479,7 @@ export function collectOperatorViewInput(
       ),
       ...(status.budgets ? { budgets: status.budgets.budgets } : {}),
       activity,
+      decisions,
       warnings: view.warnings,
       mask: maskContextOf(policy, view.baseDir, h.stateDir),
       ...sourcesInput(h.stateDir, known),
@@ -1636,6 +1970,7 @@ function emptyInput(policy: ViewPolicy, now: number, stateDir: string): Operator
     stops: [],
     queue: { paused: false, ...NEVER_RUN },
     activity: [],
+    decisions: [],
     ...(policy.policy.budgets ? { budgets: [] } : {}),
     warnings: [
       ...policy.warnings,
@@ -1766,6 +2101,7 @@ export function harnessView(
         workflows: new WorkflowQueue(store, policy.policy, () => engine.clock()),
         stateDir,
         baseDir: policy.baseDir,
+        store,
       };
       return project(
         collectOperatorViewInput(source, policy, {

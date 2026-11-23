@@ -9,6 +9,9 @@ import {
 } from '../contracts/index.ts';
 import { git } from '../environment/process.ts';
 import { runGatesAt } from '../verification/gates-at.ts';
+import { sandboxLimitBackend } from '../verification/gates.ts';
+import { sandboxLimitLine } from '../verification/sandbox-signatures.ts';
+import { failureSummaryLine } from '../verification/failure-summary.ts';
 
 /** Исход одного gate проверки `harness gates`. */
 export type GateCheckStatus = 'passed' | 'failed' | 'cancelled' | 'not-run' | 'skipped';
@@ -162,6 +165,9 @@ export async function checkGates(input: GateCheckInput) {
         ? { exitCode: evidence.exitCode, summary: evidence.summary, log: evidence.log }
         : {}),
       ...(evidence?.toolchain ? { toolchain: evidence.toolchain } : {}),
+      ...(status === 'failed' && evidence?.failureSummary
+        ? { failureSummary: evidence.failureSummary }
+        : {}),
       ...(message ? { message } : {}),
       // Отказ среды, названный gate (`sandbox-process-list`, `sandbox-filesystem`…):
       // правка кода его не снимет.
@@ -179,6 +185,7 @@ export async function checkGates(input: GateCheckInput) {
     gates,
     logs: join(stateDir, 'gates-at', result.id),
     ...(result.warnings?.length ? { warnings: result.warnings } : {}),
+    ...sandboxProbes(),
   };
   // Итог рядом с логами: `review-code` прикладывает его к обзору того же SHA.
   // Неудачная запись итога не отменяет проверку.
@@ -189,23 +196,50 @@ export async function checkGates(input: GateCheckInput) {
   return data;
 }
 
+/**
+ * Ответы проб ограничений песочницы проверок этого процесса (сигнал,
+ * браузер) со строкой для человека: на них опирается класс отказа среды.
+ */
+function sandboxProbes() {
+  const seen = sandboxLimitBackend.seen();
+  const signal = seen['sandbox-signal'];
+  const browser = seen['sandbox-browser'];
+  if (!signal && !browser) return {};
+  return {
+    sandbox: {
+      ...(signal
+        ? { signal: { ...signal, line: sandboxLimitLine('sandbox-signal', signal) } }
+        : {}),
+      ...(browser
+        ? { browser: { ...browser, line: sandboxLimitLine('sandbox-browser', browser) } }
+        : {}),
+    },
+  };
+}
+
 /** Файл итога проверки `harness gates` в её каталоге `gates-at/<id>`. */
 export const GATES_RESULT_FILE = 'result.json';
 
 /** Таблица исходов для человека (`harness gates --human`). */
 export function gatesText(data: Awaited<ReturnType<typeof checkGates>>) {
   const width = Math.max(4, ...data.gates.map((g) => g.gate.length));
-  const lines = data.gates.map(
-    (g) =>
-      `${g.gate.padEnd(width)}  ${g.status.padEnd(9)}  ${g.exitCode ?? '-'}`.padEnd(width + 18) +
+  const lines = data.gates.flatMap((g) => [
+    `${g.gate.padEnd(width)}  ${g.status.padEnd(9)}  ${g.exitCode ?? '-'}`.padEnd(width + 18) +
       `  ${g.environment ? `[среда: ${g.environment}] ` : ''}${g.message ?? g.summary ?? ''}`.trimEnd(),
-  );
+    // Выжимка провала (0.1.0-alpha.68): скрытый вывод или строка ошибки.
+    ...(g.failureSummary && (g.failureSummary.withheld || g.failureSummary.assertion)
+      ? [`${' '.repeat(width + 2)}причина: ${failureSummaryLine(g.failureSummary)}`]
+      : []),
+  ]);
   return (
     [
       `${data.repositoryId} @ ${data.sha.slice(0, 12)} — ${data.passed ? 'PASS' : 'FAIL'} (${Math.round(data.durationMs / 1000)} с)`,
       `${'gate'.padEnd(width)}  ${'status'.padEnd(9)}  exit`,
       ...lines,
       `логи: ${data.logs}`,
+      ...[data.sandbox?.signal, data.sandbox?.browser].flatMap((c) =>
+        c ? [`возможность: ${c.line}`] : [],
+      ),
       ...(data.warnings ?? []).map((w) => `предупреждение: ${w}`),
     ].join('\n') + '\n'
   );

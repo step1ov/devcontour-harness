@@ -6,7 +6,11 @@ import {
   HarnessError,
   REVIEW_ITEMS_LIMIT,
   WORKSPACE_OWNER,
+  contextChanges,
+  contextChangeText,
   contextDigest,
+  contextDigestMatches,
+  roundBudget,
   digestOf,
   findingId,
   mcpEnvironment,
@@ -97,6 +101,16 @@ export interface TechnicalReviewInput {
   /** Предел раундов предмета; нет — без предела. */
   maxRounds?: number;
   /**
+   * Digest содержания плана (`planContentDigest`): тот же план после
+   * одобренного раунда — повторное ревью без траты предела (0.1.0-alpha.68).
+   */
+  planDigest?: string;
+  /**
+   * Начало эпохи раундов: последняя доработка принятой работы графа со своим
+   * пределом попыток. Раунды до неё предел не тратят (0.1.0-alpha.68).
+   */
+  roundEpoch?: string;
+  /**
    * Раунды предмета, которые хост провёл до harness и хранит сам. Учитываются,
    * только пока у предмета нет раундов в движке: нумерация продолжается после
    * них, а находки последнего из них — прежние открытые находки, состояние
@@ -160,7 +174,7 @@ export async function technicalReview(
     last.authorRuntime === input.author &&
     last.approved &&
     last.reviewerBinding === binding &&
-    last.contextDigest === contextKey &&
+    contextDigestMatches(last.contextDigest, context) &&
     // Прежний раунд подтверждает предмет только под той же политикой: после её
     // правки — новый раунд, а не сохранённая запись.
     last.policyDigest === executionDigest(policy)
@@ -197,10 +211,48 @@ export async function technicalReview(
   // оплаченный раунд: вызова нет, пока решения нет.
   const waiting = escalatedFindings(decided, before);
   if (waiting.length) throw escalationError(kind, subject, waiting, before);
-  if (input.maxRounds !== undefined && before >= input.maxRounds)
+  // Почему нужен новый раунд и тратит ли он предел (0.1.0-alpha.68): тот же
+  // план, политика, reviewer и автор после одобренного раунда — повторное
+  // ревью (ответ на вопрос, документы, ревизия источника), без траты предела.
+  const changes = last
+    ? (() => {
+        const lastSnapshot = last.contextDigest
+          ? engine.read((v) => v.local('context-snapshots', WORKSPACE_OWNER, last.contextDigest!))
+          : undefined;
+        const ctx = contextChanges(lastSnapshot, context);
+        return {
+          plan:
+            last.planDigest && input.planDigest
+              ? last.planDigest !== input.planDigest
+              : last.digest !== digest,
+          policy: last.policyDigest !== executionDigest(policy),
+          reviewer: last.reviewerBinding !== binding || last.authorRuntime !== input.author,
+          context: {
+            added: ctx.added.slice(0, 30),
+            removed: ctx.removed.slice(0, 30),
+            changed: ctx.changed.slice(0, 30),
+          },
+        };
+      })()
+    : undefined;
+  const budget = roundBudget(rounds, input.maxRounds ?? null, {
+    since: input.roundEpoch,
+    history: prior?.rounds ?? 0,
+  });
+  const free =
+    !!last &&
+    last.approved &&
+    !!changes &&
+    !changes.plan &&
+    !changes.policy &&
+    !changes.reviewer &&
+    (input.maxRounds === undefined || budget.free < input.maxRounds);
+  if (input.maxRounds !== undefined && !free && budget.used >= input.maxRounds)
     throw new HarnessError(
       'ATTEMPTS_EXHAUSTED',
-      `Исчерпаны раунды ревью ${kind} ${subject}: ${before} из ${input.maxRounds}`,
+      `Исчерпаны раунды ревью ${kind} ${subject}: ${budget.used} из ${input.maxRounds}` +
+        (budget.since ? ` с доработки ${budget.since}` : '') +
+        (changes ? `; новый раунд нужен: ${roundReason(changes)}` : ''),
     );
   const adapter = adapters[choice.reviewer.runtime];
   if (!adapter)
@@ -354,6 +406,9 @@ export async function technicalReview(
     ...(contextKey ? { contextDigest: contextKey } : {}),
     policyDigest: executionDigest(policy),
     isolationDigest: isolationDigest(policy),
+    ...(input.planDigest ? { planDigest: input.planDigest } : {}),
+    counted: !free,
+    ...(changes ? { changes } : {}),
     findings,
     artifact: join(dir, 'review.json'),
   };
@@ -694,6 +749,100 @@ export function mergeTechnicalRound(
   if (result.approved && merged.some((f) => f.status === 'open' && f.severity === 'blocking'))
     issues.push('approved при блокирующей находке');
   return { findings: merged, issues, notes };
+}
+
+/** Почему понадобился новый раунд: что изменилось против прежнего (текст отказа и ответа). */
+export function roundReason(changes: NonNullable<ReviewRecord['changes']>) {
+  const parts = [
+    changes.plan ? 'изменился план' : '',
+    changes.policy ? 'изменилась политика' : '',
+    changes.reviewer ? 'другой reviewer или автор' : '',
+    changes.context.added.length + changes.context.removed.length + changes.context.changed.length
+      ? 'контекст: ' + contextChangeText({ ...changes.context, kinds: [] })
+      : '',
+  ].filter(Boolean);
+  return parts.join('; ') || 'прежний раунд не одобрил предмет';
+}
+
+/** Сколько эпох раундов ревью плана может открыть доработка принятых работ графа. */
+export const MAX_ROUND_EPOCHS = 3;
+
+/**
+ * Начало эпохи раундов графа (0.1.0-alpha.68): доработка принятой работы
+ * графа со своим пределом попыток. Эпохи графа записаны навсегда
+ * (`round-epochs`, в порядке открытия); израсходованная эпоха — та, первый
+ * раунд ревью плана после которой засчитан (план изменился) или ещё не
+ * проведён. Израсходованных эпох на граф — не больше `MAX_ROUND_EPOCHS`;
+ * отказ от доработки эпоху не возвращает. Действующая — последняя из них,
+ * чья доработка не оставлена (продолжение оставленной сохраняет её время,
+ * `rework.roundEpochAt`). Состояние без записи (до alpha.68) — по текущим
+ * доработкам работ.
+ */
+export function planRoundEpoch(
+  view: {
+    works(graphId?: string): readonly {
+      id?: string;
+      rework?:
+        | {
+            fresh: boolean;
+            resumed?: true;
+            reopenedAt: string;
+            roundEpochAt?: string;
+            abandoned?: unknown;
+          }
+        | undefined;
+    }[];
+    locals?: (
+      namespace: 'reviews',
+      owner: string,
+    ) => readonly { value: Pick<ReviewRecord, 'kind' | 'subject' | 'at' | 'counted'> }[];
+    local?: (
+      namespace: 'round-epochs',
+      owner: string,
+      key: string,
+    ) => { epochs: readonly { at: string; workId: string }[] } | undefined;
+  },
+  graphId: string,
+) {
+  // Представление без работ (сводка из записей ревью) — без эпохи.
+  if (typeof view.works !== 'function') return undefined;
+  const works = view.works(graphId) ?? [];
+  const recorded =
+    typeof view.local === 'function'
+      ? view.local('round-epochs', WORKSPACE_OWNER, graphId)?.epochs
+      : undefined;
+  const epochs: { at: string; workId?: string }[] = recorded
+    ? [...recorded]
+    : works.flatMap((w) => {
+        const r = w.rework;
+        const start = r && (r.roundEpochAt ?? (r.fresh && !r.resumed ? r.reopenedAt : undefined));
+        return start ? [{ at: start, ...(w.id ? { workId: w.id } : {}) }] : [];
+      });
+  if (!epochs.length) return undefined;
+  const rounds =
+    typeof view.locals === 'function'
+      ? view
+          .locals('reviews', WORKSPACE_OWNER)
+          .map((x) => x.value)
+          .filter((r) => r.kind === 'plan' && r.subject === graphId)
+          .sort((a, b) => a.at.localeCompare(b.at))
+      : [];
+  // Одна регистрация — одна эпоха, сколько бы работ она ни переоткрыла.
+  const unique = [...new Map(epochs.map((e) => [e.at, e] as const)).values()];
+  const consumed = unique
+    .sort((a, b) => a.at.localeCompare(b.at))
+    .filter((e) => rounds.find((r) => r.at > e.at)?.counted !== false)
+    .slice(0, MAX_ROUND_EPOCHS);
+  const open = (e: { at: string; workId?: string }) =>
+    works.some(
+      (w) =>
+        // Эпоха одной регистрации: открыта, пока не оставлена хоть одна её доработка.
+        !!w.rework &&
+        !w.rework.abandoned &&
+        (w.rework.roundEpochAt ??
+          (w.rework.fresh && !w.rework.resumed ? w.rework.reopenedAt : undefined)) === e.at,
+    );
+  return [...consumed].reverse().find(open)?.at;
 }
 
 /** Предел раундов ревью плана и контракта по политике (`Harness.review`). */

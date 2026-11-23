@@ -7,9 +7,15 @@ import {
   HarnessError,
   WORKSPACE_OWNER,
   contextDigest,
+  contextDigestMatches,
+  canonicalContext,
+  canonicalContextDigest,
+  contextChanges,
+  contextChangeText,
   contextIssues,
   digestOf,
   workGraphDigest,
+  planContentDigest,
   type Author,
   type ContextSnapshot,
   type ContractDocument,
@@ -48,7 +54,7 @@ import {
   verificationRows,
 } from '../report/verification.ts';
 import { acceptedTargets } from './target.ts';
-import { reviewRoundCap, technicalReview } from './review.ts';
+import { planRoundEpoch, reviewRoundCap, technicalReview } from './review.ts';
 import { reviewCode, type CodeReviewInput } from './review-code.ts';
 import { lifecyclePreflight } from './preflight.ts';
 import { policySourceChanged, type PolicySource } from './provenance.ts';
@@ -284,7 +290,43 @@ export class Harness {
     const absent = needed.filter((id) => !context.sources.some((s) => s.id === id));
     if (absent.length)
       throw new HarnessError('NOT_READY', 'В снимке нет нужного контекста: ' + absent.join(', '));
-    return context;
+    return this.knownContext(graph.id, context);
+  }
+
+  /**
+   * Входящий снимок в форме, которую harness исполняет (0.1.0-alpha.68):
+   * уже записанный снимок (тот же digest) — как есть; снимок с тем же
+   * содержанием, что у действующего согласования графа или последнего раунда
+   * ревью его плана (в любом порядке источников; в том числе записанный
+   * прежней версией), — тот записанный снимок; иначе — каноническая форма
+   * (источники по ID). Так порядок источников не порождает новый digest, а
+   * согласования, закрепления попыток и раунды прежних версий остаются
+   * теми же байтами.
+   */
+  private knownContext(graphId: string, snapshot: ContextSnapshot): ContextSnapshot;
+  private knownContext(
+    graphId: string,
+    snapshot: ContextSnapshot | undefined,
+  ): ContextSnapshot | undefined;
+  private knownContext(graphId: string, snapshot: ContextSnapshot | undefined) {
+    if (!snapshot) return snapshot;
+    const stored = (digest: string | null | undefined) =>
+      digest
+        ? this.engine.read((v) => v.local('context-snapshots', WORKSPACE_OWNER, digest))
+        : undefined;
+    // Сначала — снимок последнего раунда ревью плана и действующего
+    // согласования: с ними сверяются продолжение и выдача (ревью r2).
+    const canonical = canonicalContextDigest(snapshot);
+    const candidates = [
+      this.engine.reviews('plan', graphId).at(-1)?.contextDigest,
+      this.engine.read((v) => v.graph(graphId)?.approval?.context?.digest),
+    ];
+    for (const digest of candidates) {
+      const known = stored(digest);
+      if (known && canonicalContextDigest(known) === canonical) return known;
+    }
+    if (stored(contextDigest(snapshot))) return snapshot;
+    return canonicalContext(snapshot);
   }
 
   /**
@@ -355,6 +397,14 @@ export class Harness {
           : {}),
       },
       maxRounds: reviewRoundCap(this.policy),
+      // Тот же план после одобренного раунда и доработка принятой работы —
+      // не новые траты предела раундов (0.1.0-alpha.68).
+      ...(input.kind === 'plan'
+        ? ((since) => ({
+            planDigest: planContentDigest(input.graph),
+            ...(since ? { roundEpoch: since } : {}),
+          }))(this.engine.read((v) => planRoundEpoch(v, subject)))
+        : {}),
       ...(input.dispositions?.length ? { dispositions: input.dispositions } : {}),
       ...(this.options.environment ? { environment: this.options.environment } : {}),
     });
@@ -623,7 +673,10 @@ export class Harness {
         `Запрос ${id} (${request.kind}, ${request.lifecycle}): снимок с ответом строится для вопроса в answered или заменённого (superseded)`,
       );
     const base = this.contextOf(request.graphId);
-    const snapshot = withInput(base, inputContextSource(request, answer, options.messages));
+    const snapshot = this.knownContext(
+      request.graphId,
+      withInput(base, inputContextSource(request, answer, options.messages)),
+    );
     const issues = contextIssues(snapshot);
     if (issues.length)
       throw new HarnessError('INVALID_INPUT', 'Снимок контекста: ' + issues.join('; '));
@@ -666,7 +719,7 @@ export class Harness {
     digest: string,
     author: Author | undefined,
   ) {
-    const covered = this.engine.planRoundCovers(graphId, digest);
+    const covered = this.engine.planRoundCovers(graphId, digest, snapshot);
     if ('round' in covered) return { round: covered.round, reviewed: 'reused' as const };
     if (!author)
       throw new HarnessError(
@@ -876,7 +929,9 @@ export class Harness {
     // они переносятся в него, и новый снимок проходит обычное ревью плана
     // вместе с ними — иначе правка контекста молча вернула бы ответ в
     // «ждёт применения».
-    return carried && contextDigest(carried) === contextDigest(approved) ? approved : carried;
+    return carried && canonicalContextDigest(carried) === canonicalContextDigest(approved)
+      ? approved
+      : carried;
   }
 
   /**
@@ -967,7 +1022,8 @@ export class Harness {
     }
     // Снимок с неприменённым ответом на вопрос исполнителя запуск не
     // активирует — до платного ревью: продолжение после ответа — applyInput.
-    const unapplied = this.engine.read((v) => this.engine.unappliedInputs(v, input.context));
+    const incoming = this.knownContext(graph.id, input.context);
+    const unapplied = this.engine.read((v) => this.engine.unappliedInputs(v, incoming));
     if (unapplied.length)
       throw new HarnessError(
         'INPUT_REQUIRED',
@@ -977,7 +1033,7 @@ export class Harness {
       );
     // Применённые ответы действующего согласования остаются в нём: запуск с
     // тем же снимком без них — не смена контекста.
-    const context = this.withAppliedInputs(graph.id, input.context);
+    const context = this.knownContext(graph.id, this.withAppliedInputs(graph.id, incoming));
     // Снимок с новым ответом не активируется под идущими попытками графа —
     // отказ до платного ревью.
     const busy = this.engine.read((v) => this.engine.inputActivationRefusal(v, graph.id, context));
@@ -1009,8 +1065,9 @@ export class Harness {
         ...(this.options.environment ? { environment: this.options.environment } : {}),
       });
     }
-    const contextKey = context ? contextDigest(context) : null;
-    const contextChanged = (graph.approval?.context?.digest ?? null) !== contextKey;
+    // Снимок сверяется по канонической форме и по digest прежних версий:
+    // тот же контекст в другом порядке — не смена контекста.
+    const contextChanged = !contextDigestMatches(graph.approval?.context?.digest ?? null, context);
     if (
       !graph.approval ||
       graph.approval.digest !== graph.digest ||
@@ -1034,7 +1091,9 @@ export class Harness {
         throw new HarnessError(
           'APPROVAL_REQUIRED',
           'approvalMode: operator — выполните review-plan и approve' +
-            (contextChanged ? ' (контекст изменился после ревью плана)' : ''),
+            (contextChanged
+              ? ` (контекст изменился после ревью плана — ${contextChangeText(contextChanges(this.contextOf(graph.id), context))})`
+              : ''),
         );
     }
     await this.runner.init();

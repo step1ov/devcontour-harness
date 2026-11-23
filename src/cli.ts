@@ -109,11 +109,15 @@ import {
   leadEnd,
   leadNote,
   leadCommandActor,
+  leadSessionOpen,
   leadTtlMs,
   recordLeadCommand,
   releaseDone,
+  type LeadCommandArgs,
 } from './control/lead.ts';
+import { leadOutline } from './control/outline.ts';
 import { parseDurationFlag } from './control/duration.ts';
+import { readyNotRunning } from './control/lead-end-warning.ts';
 
 const usage = `harness ${HARNESS_VERSION}
 
@@ -337,8 +341,10 @@ const forecastLines = (state: string): string | undefined => {
           line: string;
           added?: { line: string }[];
           works?: { line: string; percent: number; attempt?: unknown }[];
+          growth?: { line: string; reason?: string };
         };
         time: { line: string };
+        outline?: { line: string };
       };
       sourceReviews?: { line: string }[];
     };
@@ -346,6 +352,14 @@ const forecastLines = (state: string): string | undefined => {
     const out = [
       ...(f ? [`Прогноз выпуска: ${f.progress.line}; ${f.time.line}.`] : []),
       ...(f?.progress.added ?? []).map((a) => `  ${a.line}`),
+      // План выпуска (alpha.68): записан — его строка, нет — подсказка ведущему.
+      ...(f?.outline ? [`  ${f.outline.line}`] : []),
+      ...(f?.progress.growth
+        ? [
+            `  ${f.progress.growth.line}` +
+              (f.progress.growth.reason ? `: ${f.progress.growth.reason}` : ''),
+          ]
+        : []),
       // Готовность незаконченных работ: принятые уже видны строками работ.
       ...(f?.progress.works ?? [])
         .filter((w) => w.percent < 100 && w.attempt)
@@ -461,6 +475,7 @@ const options = {
   contracts: { type: 'string' },
   requirements: { type: 'string', multiple: true },
   'dry-run': { type: 'boolean' },
+  'probe-sandbox': { type: 'boolean' },
   detail: { type: 'boolean' },
   since: { type: 'string' },
   until: { type: 'string' },
@@ -512,11 +527,13 @@ const options = {
   summary: { type: 'string' },
   cause: { type: 'string' },
   hypothesis: { type: 'string' },
+  addendum: { type: 'string' },
   evidence: { type: 'string', multiple: true },
   diagnosis: { type: 'string' },
   recovery: { type: 'string' },
   'diagnose-after': { type: 'string' },
   'lead-resets': { type: 'string' },
+  file: { type: 'string' },
 } as const;
 
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
@@ -536,6 +553,7 @@ const flagOwners = {
   contracts: ['plan-request', 'plan-check'],
   requirements: ['plan-request'],
   'dry-run': ['worktree-cleanup'],
+  'probe-sandbox': ['doctor'],
   detail: ['status'],
   since: ['report'],
   until: ['report'],
@@ -561,12 +579,14 @@ const flagOwners = {
   text: ['input-answer', 'lead-begin', 'lead-note', 'lead-end'],
   ttl: ['lead-begin', 'preview-start'],
   summary: ['release-done'],
+  file: ['lead-outline'],
   option: ['input-answer'],
   kind: ['input-answer'],
   actor: ['input-answer', 'input-carry', 'review-plan', 'review-contract', 'review-accept'],
   by: ['reapprove', 'retry'],
   cause: ['diagnose'],
   hypothesis: ['diagnose'],
+  addendum: ['diagnose'],
   evidence: ['diagnose'],
   diagnosis: ['retry'],
   recovery: ['init'],
@@ -1476,26 +1496,48 @@ async function run(
             '--by: lead или operator (без флага — оператор)',
             [{ path: ['--by'], message: v.by }],
           );
+        // В открытой сессии ведущего повтор без `--by` — отказ (alpha.68,
+        // P6-17): ведущий называет свою роль явно — `--by lead` (решение
+        // ведущего, с его пределами) или `--by operator` (решение человека).
+        // Молчаливого умолчания нет ни в одну сторону.
+        if (command === 'retry' && v.by === undefined && leadSessionOpen(h.engine))
+          throw new HarnessError(
+            'INVALID_INPUT',
+            'Открыта сессия ведущего: повтор требует явного --by — --by lead (решение ведущего, с пределами recovery) или --by operator (решение человека, которое ведущий передаёт)',
+            [{ path: ['--by'], message: 'required in an open lead session' }],
+          );
+        const bySource =
+          command !== 'retry'
+            ? undefined
+            : v.by !== undefined
+              ? ('flag' as const)
+              : ('default' as const);
         const lead = command === 'retry' && v.by === 'lead';
+        const refused = (error: unknown) => error;
         if (v.diagnosis !== undefined && !(lead && v.reset))
           throw new HarnessError(
             'INVALID_INPUT',
             '--diagnosis — только со сбросом ведущего (--reset --by lead)',
           );
-        const result =
-          command === 'cancel'
-            ? h.engine.cancel(need('work'), v.reason, 'operator')
-            : h.engine.retry(
-                need('work'),
-                v.reset
-                  ? {
-                      // Сброс ведущего называет причину разбором; своя причина — по желанию.
-                      reason: lead ? (v.reason ?? '') : need('reason'),
-                      ...(v.diagnosis !== undefined ? { diagnosis: v.diagnosis } : {}),
-                    }
-                  : undefined,
-                lead ? 'lead' : 'operator',
-              );
+        let result;
+        try {
+          result =
+            command === 'cancel'
+              ? h.engine.cancel(need('work'), v.reason, 'operator')
+              : h.engine.retry(
+                  need('work'),
+                  v.reset
+                    ? {
+                        // Сброс ведущего называет причину разбором; своя причина — по желанию.
+                        reason: lead ? (v.reason ?? '') : need('reason'),
+                        ...(v.diagnosis !== undefined ? { diagnosis: v.diagnosis } : {}),
+                      }
+                    : undefined,
+                  lead ? 'lead' : 'operator',
+                );
+        } catch (error) {
+          throw refused(error);
+        }
         return {
           command,
           data: {
@@ -1505,6 +1547,7 @@ async function run(
             changed: result.changed,
             ...('abandoned' in result && result.abandoned ? { abandoned: true as const } : {}),
             ...('reset' in result && result.reset ? { reset: result.reset } : {}),
+            ...(bySource ? { by: lead ? ('lead' as const) : ('operator' as const), bySource } : {}),
           },
         };
       } finally {
@@ -1535,12 +1578,67 @@ async function run(
                     optional('text', typeof v.text === 'string' ? v.text : undefined),
                   )
                 : releaseDone(h.engine, { summary: need('summary') });
+        if (command === 'lead-end') {
+          // Готовые работы, а никто не запущен (alpha.68, P6-33): сессия
+          // закончена, выход прежний — только предупреждение. Сбой проверки
+          // конец сессии не меняет.
+          let warning;
+          try {
+            warning = readyNotRunning(h);
+          } catch {
+            warning = undefined;
+          }
+          if (warning) {
+            process.stderr.write(`harness: ${warning.code}: ${warning.line}\n`);
+            return { command, data: { ...data, readyNotRunning: warning } };
+          }
+        }
         return { command, data };
       } finally {
         h.close();
       }
     }
+    case 'lead-outline': {
+      // План выпуска ведущего (0.1.0-alpha.68): локальная запись состояния.
+      const input = readJson(resolve(need('file')), 'outline');
+      const h = open(need('state'), binding(need('state')), false);
+      try {
+        return {
+          command,
+          data: leadOutline(
+            h.engine,
+            input,
+            optional('reason', typeof v.reason === 'string' ? v.reason : undefined),
+          ),
+        };
+      } finally {
+        h.close();
+      }
+    }
     case 'diagnose': {
+      if (v.addendum !== undefined) {
+        if (v.cause !== undefined || v.hypothesis !== undefined)
+          throw new HarnessError(
+            'INVALID_INPUT',
+            '--addendum дополняет свежий разбор: без --cause и --hypothesis (новый разбор — без --addendum)',
+            [{ path: ['--addendum'], message: 'exclusive' }],
+          );
+        const h = open(need('state'), binding(need('state')), true);
+        try {
+          return {
+            command,
+            data: {
+              ...h.engine.amendDiagnosis(need('work'), {
+                text: v.addendum,
+                ...(v.evidence ? { evidence: v.evidence } : {}),
+              }),
+              amended: true as const,
+            },
+          };
+        } finally {
+          h.close();
+        }
+      }
       const cause = need('cause');
       if (!(leadDiagnosisCauses as readonly string[]).includes(cause))
         throw new HarnessError('INVALID_INPUT', `--cause: ${leadDiagnosisCauses.join(' | ')}`, [
@@ -2104,6 +2202,8 @@ async function run(
           ...optional('planAuthors', v.policy ? manifestLead(v.policy) : undefined),
           leadSandbox: true,
           processList: true,
+          // Проба браузера (до 30 с) — только по флагу; иначе известный ответ.
+          sandboxLimits: v['probe-sandbox'] ? true : 'cached',
         },
       );
       // Manifest проекта рядом с политикой расходится с ней по слою lean — предупреждение.
@@ -2246,6 +2346,9 @@ async function run(
             v.kind ?? 'clarification',
             'kind',
           );
+          // Ответ без `--actor` — оператора, и в открытой сессии ведущего:
+          // ответ владельца, который передаёт ведущий, не записывается
+          // решением ведущего. Ответ ведущего — только явно `--actor lead`.
           const actor = parseWith(z.enum(['operator', 'lead']), v.actor ?? 'operator', 'actor');
           return {
             command,
@@ -2335,6 +2438,7 @@ function leadAlias(args: string[]): string[] {
     rest[0] !== undefined && !rest[0].startsWith('--') ? [flag, rest[0], ...rest.slice(1)] : rest;
   if (a === 'lead' && (b === 'begin' || b === 'end')) return [`lead-${b}`, ...rest];
   if (a === 'lead' && b === 'note') return ['lead-note', ...lifted('--text')];
+  if (a === 'lead' && b === 'outline') return ['lead-outline', ...rest];
   if (a === 'release' && b === 'done') return ['release-done', ...lifted('--summary')];
   return args;
 }
@@ -2363,13 +2467,15 @@ function journalLeadCommand(
     const state = typeof values.state === 'string' ? values.state : undefined;
     if (!state || !existsSync(join(state, 'state.sqlite')) || !existsSync(bindingFile(state)))
       return false;
-    const flags = {
+    const flags: LeadCommandArgs = {
       ...optional('work', typeof values.work === 'string' ? values.work : undefined),
       ...optional('request', typeof values.request === 'string' ? values.request : undefined),
       ...optional('actor', typeof values.actor === 'string' ? values.actor : undefined),
       ...(values.reset === true ? { reset: true } : {}),
       ...(typeof values.by === 'string' ? { by: values.by } : {}),
     };
+    // Актёр, которого команда получила от сессии ведущего (alpha.68): журнал
+    // пишет его, как если бы флаг был задан.
     const entry = leadCommandEntry(command, flags, data, phase);
     if (!entry) return false;
     const h = open(state, binding(state), false);

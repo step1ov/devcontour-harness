@@ -39,6 +39,14 @@ export interface TrackStep {
    * ожидании ведущего: ведущий, человек или harness (0.1.0-alpha.66).
    */
   actor?: TrackStepActor;
+  /**
+   * Шаг разбора (`diagnosis`, ревизия 8): обязателен ли разбор ведущего.
+   * `true` — работу держит правило восстановления (засчитанных отказов без
+   * решения не меньше `recovery.diagnoseAfter`) или разбор нужен для сброса
+   * на исчерпании; `false` — повтор делает harness сам, ведущий разбирает
+   * по желанию. Только показ: кто решает, не меняется.
+   */
+  required?: boolean;
 }
 
 /** Кто решает на шаге пути. */
@@ -98,7 +106,8 @@ const failureText: Partial<Record<FailureKind, Bi>> = {
   cancelled: { ru: 'отменено', en: 'cancelled' },
 };
 
-const causeShort: Record<string, Bi> = {
+/** Причина разбора ведущего коротко (путь работы и `decisions[]`). */
+export const causeShort: Record<string, Bi> = {
   coverage: { ru: 'слабое покрытие', en: 'weak coverage' },
   approach: { ru: 'неверный подход', en: 'wrong approach' },
   split: { ru: 'разделить задачу', en: 'split the task' },
@@ -109,6 +118,11 @@ const causeShort: Record<string, Bi> = {
 
 const L = {
   diagnosis: { ru: 'разбор ведущего', en: 'lead diagnosis' },
+  mandatory: { ru: 'обязательный разбор ведущего', en: 'mandatory lead diagnosis' },
+  optional: {
+    ru: 'повтор: harness сам, ведущий может разобрать',
+    en: 'retry: harness on its own, the lead may diagnose',
+  },
   replan: { ru: 'перепланирование', en: 're-plan' },
   reset: { ru: 'ещё попытки от ведущего', en: 'more attempts from the lead' },
   userReset: { ru: 'сброс попыток человеком', en: 'attempts reset by a human' },
@@ -135,6 +149,22 @@ export interface TrackOptions {
    * плановых попыток — ожидание ведущего.
    */
   gateHold?: string;
+}
+
+/**
+ * Разбор был обязателен (ревизия 8): он разобрал не меньше
+ * `recovery.diagnoseAfter` отказов без решения (их держало правило
+ * `DIAGNOSIS_REQUIRED`) или по нему ведущий дал новый предел на исчерпании;
+ * иначе ведущий разобрал по желанию. По действующей политике `recovery`.
+ */
+export function diagnosisRequired(
+  work: Pick<WorkState, 'leadRecovery'>,
+  d: { id: string; failures: readonly string[] },
+  recovery: RecoveryPolicy,
+): boolean {
+  if (!recovery.enabled) return false;
+  if (d.failures.length >= recovery.diagnoseAfter) return true;
+  return (work.leadRecovery?.resets ?? []).some((r) => r.by === 'lead' && r.diagnosis === d.id);
 }
 
 /** Путь работы: история, текущая точка и плановый остаток. */
@@ -216,6 +246,7 @@ export function workTrack(
           label: t(d.cause === 'split' ? L.replan : L.diagnosis),
           at: d.at,
           reason: `${d.id}: ${t(causeShort[d.cause] ?? causeShort.other!)}`,
+          required: diagnosisRequired(work, d, o.recovery),
         },
       ],
     });
@@ -281,7 +312,13 @@ export function workTrack(
     if (!closed && o.question)
       planned.push({ kind: 'question', state: 'waiting', label: t(L.question) });
     if (hold?.kind === 'diagnosis-required') {
-      planned.push({ kind: 'diagnosis', state: 'waiting', actor: 'lead', label: t(L.diagnosis) });
+      planned.push({
+        kind: 'diagnosis',
+        state: 'waiting',
+        actor: 'lead',
+        label: t(L.diagnosis),
+        required: true,
+      });
       pending = 0;
     } else if (hold?.kind === 'replan')
       planned.push({ kind: 'diagnosis', state: 'waiting', actor: 'lead', label: t(L.replan) });
@@ -309,6 +346,7 @@ export function workTrack(
                 state: 'waiting',
                 actor: 'lead',
                 label: t(step.step === 'replan' ? L.replan : L.diagnosis),
+                ...(step.step === 'replan' ? {} : { required: true }),
               }
           : { kind: 'user-decision', state: 'waiting', actor: 'user', label: t(L.user) },
       );
@@ -325,8 +363,10 @@ export function workTrack(
           en: `waits for the lead: check ${o.gateHold} is held`,
         }).slice(0, 80),
       });
-    // Плановые попытки: остаток предела; разбор — там, где отказов без
-    // разбора станет `diagnoseAfter` (если каждая следующая не удастся).
+    // Плановые попытки: остаток предела; обязательный разбор — там, где
+    // отказов без разбора станет `diagnoseAfter` (если каждая следующая не
+    // удастся). Между попытками до него (ревизия 8) — разбор по желанию:
+    // повтор делает harness сам, ведущий может разобрать отказ.
     if (work.activeRunId) pending++;
     let next = Math.max(0, ...own.map((a) => a.attempt)) + 1;
     const left = Math.max(0, o.maxAttempts - work.attempt);
@@ -342,9 +382,10 @@ export function workTrack(
     };
     for (let k = 0; k < left; k++) {
       if (r.enabled && pending >= r.diagnoseAfter && r.diagnoseAfter < o.maxAttempts) {
-        plan({ kind: 'diagnosis', actor: 'lead', label: t(L.diagnosis) });
+        plan({ kind: 'diagnosis', actor: 'lead', label: t(L.mandatory), required: true });
         pending = 0;
-      }
+      } else if (r.enabled && pending > 0 && planned.at(-1)?.kind !== 'diagnosis')
+        plan({ kind: 'diagnosis', actor: 'lead', label: t(L.optional), required: false });
       attemptRow();
       pending++;
     }
@@ -352,7 +393,7 @@ export function workTrack(
     if (r.enabled) {
       for (let k = spareFrom; k <= r.leadResets; k++) {
         if (planned.at(-1)?.kind !== 'diagnosis')
-          plan({ kind: 'diagnosis', actor: 'lead', label: t(L.diagnosis) });
+          plan({ kind: 'diagnosis', actor: 'lead', label: t(L.mandatory), required: true });
         plan({
           kind: 'reset',
           actor: 'lead',

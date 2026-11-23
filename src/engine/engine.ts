@@ -1,8 +1,11 @@
 import { RU, ruCount } from '../contracts/plural.ts';
 import { randomUUID } from 'node:crypto';
 import {
+  canonicalContextDigest,
+  contextDigestMatches,
   STAGE_NAME_LIMIT,
   noRetryEnvironmentCauses,
+  NO_RETRY_GATE_CODES,
   type NoRetryEnvironmentCause,
   codeReviewDecisionSchema,
   codeReviewHistory,
@@ -45,6 +48,7 @@ import {
   type ExecutionTransaction,
   type ExecutionView,
   type LeadLog,
+  type ReleaseOutline,
   type FailureKind,
   type GraphState,
   type InputActor,
@@ -544,6 +548,17 @@ export class Engine {
       };
       tx.putGraph(state);
       const reopened: { workId: string; rework: NonNullable<WorkState['rework']> }[] = [];
+      // Эпохи раундов, открытые до записи `round-epochs` (состояние прежней
+      // сборки): первая запись начинается с них, израсходованные остаются
+      // израсходованными (ревью r3).
+      const legacyEpochs = tx.local('round-epochs', WORKSPACE_OWNER, graph.id)
+        ? []
+        : tx.works(graph.id).flatMap((w) => {
+            const r = w.rework;
+            const start =
+              r && (r.roundEpochAt ?? (r.fresh && !r.resumed ? r.reopenedAt : undefined));
+            return start ? [{ at: start, workId: w.id }] : [];
+          });
       for (const order of graph.orders) {
         const prior = tx.work(order.id);
         if (prior && prior.graphId !== graph.id)
@@ -626,6 +641,18 @@ export class Engine {
             : {}),
         });
         if (reopen) reopened.push({ workId: order.id, rework: reopen });
+        // Эпоха раундов ревью плана — запись графа, которая не стирается:
+        // её не вернуть ни новой доработкой, ни отказом (ревью r2).
+        if (reopen?.fresh && reopen.roundEpochAt === at) {
+          const prev = tx.local('round-epochs', WORKSPACE_OWNER, graph.id)?.epochs ?? legacyEpochs;
+          tx.putLocal('round-epochs', WORKSPACE_OWNER, graph.id, {
+            epochs: [...prev, { at, workId: order.id }].slice(-100),
+          });
+        }
+        // Первое появление работы в выпуске (alpha.68): по нему прогноз
+        // называет рост плана. Новая редакция прежнюю запись не трогает.
+        if (!prior && !tx.local('work-seen', WORKSPACE_OWNER, order.id))
+          tx.putLocal('work-seen', WORKSPACE_OWNER, order.id, { at, graphId: graph.id });
       }
       for (const prior of existing ? tx.works(graph.id) : [])
         if (!graph.orders.some((o) => o.id === prior.id) && prior.status !== 'done') {
@@ -707,6 +734,14 @@ export class Engine {
         ...(run?.finishedAt ? { at: run.finishedAt } : {}),
       },
       reopenedAt: at,
+      // Эпоха раундов ревью плана: своя у доработки со своим пределом,
+      // прежняя — у продолжения оставленной и у перенесённого счётчика.
+      ...((epoch) => (epoch ? { roundEpochAt: epoch } : {}))(
+        fresh
+          ? at
+          : (prior.rework?.roundEpochAt ??
+              (prior.rework?.fresh && !prior.rework.resumed ? prior.rework.reopenedAt : undefined)),
+      ),
       spent: prior.attempt,
       acceptedOrder: prior.order,
     };
@@ -999,14 +1034,19 @@ export class Engine {
    * причина. Только чтение; им `Harness.resolveInput` и `carryInputOf`
    * решают, нужен ли новый раунд.
    */
-  planRoundCovers(graphId: string, contextDigest: string | null) {
+  planRoundCovers(graphId: string, contextDigest: string | null, snapshot?: ContextSnapshot) {
     return this.read((v): { round: number } | { reason: string } => {
       try {
         const { last } = this.approvalRules(v, graphId, this.policy.approvalMode);
         // Отклонённый раунд не переиспользуется ни в каком режиме: новый раунд
         // с отказом — тоже отказ (REVIEW_REJECTED).
         if (!last.approved) return { reason: `раунд ${last.round} не одобрил граф` };
-        if ((last.contextDigest ?? null) !== contextDigest)
+        // Тот же снимок в другом порядке источников или записанный digest
+        // прежней версии — тот же контекст (0.1.0-alpha.68).
+        if (
+          (last.contextDigest ?? null) !== contextDigest &&
+          !(snapshot && contextDigestMatches(last.contextDigest, snapshot))
+        )
           return { reason: `раунд ${last.round} рассматривал другой снимок контекста` };
         return { round: last.round };
       } catch (error) {
@@ -3673,7 +3713,17 @@ export class Engine {
     if (this.host.input)
       return { review: this.host.input.review(work, contextDigest, actor, tx, request) };
     const checked = this.approvalRules(tx, work.graphId, actor);
-    if ((checked.last.contextDigest ?? null) !== contextDigest)
+    // Снимок раунда и снимок ответа сверяются по содержанию: тот же снимок
+    // в другом порядке источников (записанный прежней версией) — тот же
+    // контекст (0.1.0-alpha.68).
+    const same = (a: string | null, b: string | null) => {
+      if (a === b) return true;
+      if (!a || !b) return false;
+      const x = tx.local('context-snapshots', WORKSPACE_OWNER, a);
+      const y = tx.local('context-snapshots', WORKSPACE_OWNER, b);
+      return !!x && !!y && canonicalContextDigest(x) === canonicalContextDigest(y);
+    };
+    if (!same(checked.last.contextDigest ?? null, contextDigest))
       throw new HarnessError(
         'APPROVAL_REQUIRED',
         'Последний раунд ревью плана рассматривал другой снимок контекста: проведите review-plan со снимком ответа',
@@ -3741,6 +3791,25 @@ export class Engine {
     const orderChanged = this.orderMoved(view, work, request.originBasis);
     if (answer.kind === 'requirement-change') return orderChanged;
     return orderChanged || !this.originHolds(view, request);
+  }
+
+  /**
+   * Перенос, который принимают `proposeCarry` и `carryInput` (0.1.0-alpha.68):
+   * правило переноса (`carryAllowed`) или уточнение заменённого вопроса, чья
+   * исходная остановка снова держится (новая редакция вернула работу в
+   * готовую с той же постановкой и попыткой вопроса). `applyInput` берёт
+   * только `answered`, и без этого у такого вопроса не было бы публичного
+   * пути к работе. Перенесённый так ответ с записанным основанием —
+   * применённый и для `unappliedInputs` (`carried`).
+   */
+  private carryPermitted(view: ExecutionView, request: InputRequest) {
+    if (this.carryAllowed(view, request)) return true;
+    const answer = latestAnswer(request);
+    return (
+      request.lifecycle === 'superseded' &&
+      answer?.kind === 'clarification' &&
+      this.originHolds(view, request)
+    );
   }
 
   /** Неприменённые источники ответов снимка с правилом переноса этого движка. */
@@ -4002,7 +4071,12 @@ export class Engine {
       if (request.lifecycle === 'pending')
         throw new HarnessError('INPUT_REQUIRED', `На вопрос ${id} ещё нет ответа`);
       if (request.lifecycle !== 'answered')
-        throw new HarnessError('NOT_READY', `Запрос ${id} ${request.lifecycle}`);
+        throw new HarnessError(
+          'NOT_READY',
+          request.lifecycle === 'superseded'
+            ? `Запрос ${id} superseded: ответ заменённого вопроса доводится до работы переносом — harness input-carry --request ${id} --reason <почему> --author <runtime ведущего>`
+            : `Запрос ${id} ${request.lifecycle}`,
+        );
       this.expectVersion(request, options.expectedVersion);
       if (!answer || answer.digest !== options.answerDigest)
         throw new HarnessError(
@@ -4149,7 +4223,7 @@ export class Engine {
         problems.push(`запрос ${request.lifecycle}, нужен superseded`);
       const answer = latestAnswer(request);
       if (!answer) return { request, problems: [...problems, 'ответа нет'] };
-      if (!this.carryAllowed(v, request))
+      if (!this.carryPermitted(v, request))
         problems.push('правило переноса не позволяет перенести ответ');
       if (!this.carriesAnswer(v, request, answer, contextDigest))
         problems.push('снимок контекста не содержит последний ответ');
@@ -4218,7 +4292,7 @@ export class Engine {
       )
         return { carried: true as const, changed: false, request };
       this.expectVersion(request, options.expectedVersion);
-      if (!this.carryAllowed(tx, request))
+      if (!this.carryPermitted(tx, request))
         throw new HarnessError(
           'INPUT_REQUIRED',
           answer.kind === 'requirement-change'
@@ -4233,7 +4307,9 @@ export class Engine {
       const snapshot =
         this.host.input?.snapshot?.(options.contextDigest, tx) ??
         tx.local('context-snapshots', WORKSPACE_OWNER, options.contextDigest);
-      const unapplied = this.unappliedInputs(tx, snapshot);
+      // Ответ, который переносится этим вызовом, — не «неприменённый»: его
+      // правило — `carryPermitted` выше; другие неприменённые ответы — отказ.
+      const unapplied = this.unappliedInputs(tx, snapshot).filter((u) => u.requestId !== id);
       if (unapplied.length)
         throw new HarnessError(
           'INPUT_REQUIRED',
@@ -4572,10 +4648,23 @@ export class Engine {
   private adoptPolicy(tx: ExecutionTransaction, by: string, operation?: string) {
     const control = tx.control();
     const generation = (control.appliedPolicy?.generation ?? 0) + 1;
+    const limits = budgetLimitsOf(this.policy);
     tx.setControl({
       ...control,
-      appliedPolicy: { digest: this.loadedPolicy, generation, at: iso(this.now()), by },
+      appliedPolicy: { digest: this.loadedPolicy, generation, at: iso(this.now()), by, limits },
     });
+    // Поднятые пределы бюджета — решение о бюджете: запись в журнале с
+    // прежним и новым значением (0.1.0-alpha.68). Без записанных пределов
+    // прежнего применения (до alpha.68) сравнивать не с чем.
+    const before = control.appliedPolicy?.limits;
+    if (before) {
+      const changes = budgetRaises(before, limits);
+      if (changes.length)
+        tx.emit({
+          type: 'budget.raised',
+          payload: { by, generation, policyDigest: executionDigest(this.policy), changes },
+        });
+    }
     tx.emit({
       type: 'policy.applied',
       payload: {
@@ -4641,12 +4730,44 @@ export class Engine {
     });
   }
 
+  /**
+   * План выпуска ведущего (alpha.68): одна локальная запись `release-outline`
+   * у `@workspace`; `fn` получает прежний план и решает, что записать
+   * (`outline: undefined` — ничего не менять).
+   */
+  recordReleaseOutline<T>(
+    fn: (
+      prev: ReleaseOutline | undefined,
+      now: number,
+      view: ExecutionView,
+    ) => { outline?: ReleaseOutline; result: NotPromise<T> },
+  ): T {
+    return this.tx('lead.recorded', (tx) => {
+      this.assertNoUpdate(tx);
+      const prev = tx.local('release-outline', WORKSPACE_OWNER, 'outline');
+      const { outline, result } = fn(prev, this.now(), tx);
+      if (outline) tx.putLocal('release-outline', WORKSPACE_OWNER, 'outline', outline);
+      return result;
+    });
+  }
+
   recordPolicy(owner: string) {
     this.tx('config.started', (tx) => {
       const lease = tx.controller();
       if (!this.mine(lease, owner)) return;
-      const applied = tx.control().appliedPolicy;
-      if (applied?.digest === this.loadedPolicy) return;
+      const control = tx.control();
+      const applied = control.appliedPolicy;
+      if (applied?.digest === this.loadedPolicy) {
+        // Состояние прежней версии: пределы применённой политики ещё не
+        // записаны — записываются при первом запуске controller, чтобы
+        // первый подъём после обновления попал в журнал (`budget.raised`).
+        if (!applied.limits)
+          tx.setControl({
+            ...control,
+            appliedPolicy: { ...applied, limits: budgetLimitsOf(this.policy) },
+          });
+        return;
+      }
       if (applied && this.mayAdopt(tx)) return;
       this.adoptPolicy(tx, owner);
     });
@@ -4839,7 +4960,13 @@ export class Engine {
       tx.setControl({
         ...control,
         reconfigure: { ...request, appliedAt: at, appliedBy: by, error: undefined },
-        appliedPolicy: { digest: request.digest, generation, at, by },
+        appliedPolicy: {
+          digest: request.digest,
+          generation,
+          at,
+          by,
+          limits: budgetLimitsOf(this.policy),
+        },
         ...(resume
           ? {
               paused: false,
@@ -4853,6 +4980,14 @@ export class Engine {
         type: 'policy.applied',
         payload: { digest: request.digest, generation, by, operation: request.operation },
       });
+      // Поднятые пределы бюджета — запись решения о бюджете (как при запуске).
+      const before = control.appliedPolicy?.limits;
+      const raises = before ? budgetRaises(before, budgetLimitsOf(this.policy)) : [];
+      if (raises.length)
+        tx.emit({
+          type: 'budget.raised',
+          payload: { by, generation, policyDigest: executionDigest(this.policy), changes: raises },
+        });
       if (resume) tx.emit({ type: 'control.resumed', payload: { reason: 'reconfigure' } });
       return { status: 'applied' as const, generation };
     });
@@ -5603,14 +5738,15 @@ export class Engine {
 
   /** Удержание выдачи правилом восстановления ведущим (`policy.recovery`). */
   /**
-   * Удержание gate по отказу `sandbox-process-list` попытки: упавший gate —
-   * последний непройденный evidence попытки с этим кодом (не проверка
+   * Удержание gate по отказу без повтора попытки (`sandbox-process-list`,
+   * `sandbox-signal`, `sandbox-browser`): упавший gate — последний
+   * непройденный evidence попытки с кодом этой причины (не проверка
    * потребителя), его определение — в политике репозитория попытки.
    */
   private environmentHoldOf(a: AttemptState): WorkState['environmentHold'] {
-    const e = a.evidence.findLast(
-      (x) => !x.passed && !x.consumer && x.summary.startsWith('GATE_SANDBOX_PROCESS_LIST'),
-    );
+    const cause = a.environmentCause ?? 'sandbox-process-list';
+    const code = NO_RETRY_GATE_CODES[cause];
+    const e = a.evidence.findLast((x) => !x.passed && !x.consumer && x.summary.startsWith(code));
     if (!e?.gate) return undefined;
     const gate = this.policy.repositories
       .find((r) => r.id === a.repositoryId)
@@ -5623,6 +5759,7 @@ export class Engine {
       runId: a.id,
       at: iso(this.now()),
       isolation: this.policy.isolation.mode,
+      ...(cause === 'sandbox-process-list' ? {} : { cause }),
     };
   }
 
@@ -6091,6 +6228,72 @@ export class Engine {
   }
 
   /**
+   * Дополнить свежий разбор ведущего (`harness diagnose --addendum`,
+   * 0.1.0-alpha.68): вторая причина или заметка к тому же засчитанному
+   * отказу, найденная после разбора, — без перерегистрации графа и без
+   * нового разбора. Следующая попытка получает разбор вместе с
+   * дополнениями. Причина, гипотеза, счёт разборов и право на сброс не
+   * меняются: тот же разбор второй предел не даёт. Отказ: идёт попытка,
+   * свежего разбора нет (засчитанный отказ после него — нужен новый разбор),
+   * больше пяти дополнений. Модель не вызывается.
+   */
+  amendDiagnosis(workId: string, input: { text: string; evidence?: readonly string[] }) {
+    return this.tx('task.retry', (tx) => {
+      this.assertNoUpdate(tx);
+      const w = tx.work(workId);
+      if (!w) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + workId);
+      if (w.status === 'done' || w.status === 'cancelled')
+        throw new HarnessError('NOT_READY', `Поручение ${workId} ${w.status}: дополнять нечего`);
+      if (w.activeRunId)
+        throw new HarnessError(
+          'NOT_READY',
+          `Идёт попытка ${w.activeRunId}: дополнение — после её окончания`,
+        );
+      const attempts = tx.attempts(workId);
+      const fresh = freshDiagnosis(w, attempts);
+      if (!fresh)
+        throw new HarnessError(
+          'NOT_READY',
+          pendingFailures(w, attempts).length
+            ? `Свежего разбора нет: засчитанный отказ после последнего разбора — новый разбор (harness diagnose --work ${workId} --cause … --hypothesis "…")`
+            : 'Свежего разбора последнего засчитанного отказа нет: дополнять нечего',
+        );
+      const text = maskSecrets(input.text).trim();
+      if (text.length < 10 || text.length > 2000)
+        throw new HarnessError('INVALID_INPUT', '--addendum: от 10 до 2000 знаков', [
+          { path: ['--addendum'], message: String(text.length) },
+        ]);
+      const evidence = (input.evidence ?? []).map((e) => maskSecrets(e).trim()).filter(Boolean);
+      if (evidence.length > 10 || evidence.some((e) => e.length > 1000))
+        throw new HarnessError('INVALID_INPUT', '--evidence: не больше 10, каждая до 1000 знаков');
+      const addenda = fresh.addenda ?? [];
+      if (addenda.length >= 5)
+        throw new HarnessError(
+          'INVALID_INPUT',
+          `У разбора ${fresh.id} уже 5 дополнений: новая причина — после следующего отказа новым разбором`,
+        );
+      const diagnosis: LeadDiagnosis = {
+        ...fresh,
+        addenda: [...addenda, { at: iso(this.now()), text, evidence }],
+      };
+      const diagnoses = w.leadRecovery!.diagnoses.map((d) => (d.id === fresh.id ? diagnosis : d));
+      tx.putWork({ ...w, leadRecovery: { ...w.leadRecovery!, diagnoses } });
+      tx.emit({
+        type: 'work.diagnosis-amended',
+        graphId: w.graphId,
+        workId,
+        payload: {
+          diagnosis: diagnosis.id,
+          addendum: diagnosis.addenda!.length,
+          textLength: text.length,
+          evidence: evidence.length,
+        },
+      });
+      return { workId, diagnosis };
+    });
+  }
+
+  /**
    * Решение ведущего или оператора по открытым находкам ревью кода поручения
    * (`review-accept`, docs/review-protocol.md §10): находки принимаются
    * известным ограничением с основанием. Решение — не одобрение и не повтор:
@@ -6237,4 +6440,40 @@ export function infraPendingIndex(view: ExecutionView): (work: WorkState) => str
 /** Одна работа — `infraPendingIndex` без индекса. */
 export function infraPendingOf(work: WorkState, view: ExecutionView): string[] {
   return infraPendingIndex(view)(work);
+}
+
+/**
+ * Пределы бюджета политики (0.1.0-alpha.68) по именам: попытки, раунды ревью
+ * плана и контракта, повторы, сбросы ведущего, расходы и время поручения,
+ * группы и установки. `null` — без предела.
+ */
+export function budgetLimitsOf(policy: ExecutionPolicy): Record<string, number | null> {
+  const out: Record<string, number | null> = {
+    maxAttempts: policy.maxAttempts,
+    reviewRounds: policy.maxAttempts * 2,
+    repairBudget: policy.repairBudget,
+    leadResets: recoveryPolicyOf(policy).leadResets,
+  };
+  for (const scope of ['work', 'group', 'total'] as const) {
+    const b = policy.budgets?.[scope];
+    out[`budgets.${scope}.usd`] = b?.usd ?? null;
+    out[`budgets.${scope}.timeMs`] = b?.timeMs ?? null;
+  }
+  return out;
+}
+
+/** Поднятые пределы: больше прежнего или снят (`null` после числа). */
+export function budgetRaises(
+  before: Record<string, number | null>,
+  after: Record<string, number | null>,
+) {
+  return Object.keys(after)
+    .filter((field) => field in before)
+    .flatMap((field) => {
+      const a = before[field] ?? null;
+      const b = after[field] ?? null;
+      const raised = a !== null && (b === null || b > a);
+      return raised ? [{ field, before: a, after: b }] : [];
+    })
+    .slice(0, 20);
 }

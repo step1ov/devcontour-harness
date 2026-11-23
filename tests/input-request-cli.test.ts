@@ -652,7 +652,12 @@ test('alpha.60 CLI: status --human — строки очереди, обновл
   assert.equal(lines.filter((l) => l.startsWith('Обновления:')).length, 1);
   // Первая строка — кто двигает очередь (alpha.60 P1), последняя — прогноз (P11).
   assert.match(lines[0]!, /^Очередь стоит — никто не запущен: .*\(ведущий: harness run\)\.$/);
-  assert.match(lines.at(-1)!, /^Прогноз выпуска: готово ~\d+ %, осталось задач: 1 из 1; /);
+  // alpha.68: под прогнозом — подсказка ведущему, что плана выпуска нет.
+  assert.match(lines.at(-2)!, /^Прогноз выпуска: готово ~\d+ %, осталось задач: 1 из 1/);
+  assert.match(
+    lines.at(-1)!,
+    /^ {2}плана выпуска нет — прогноз по одному графу: .*harness lead outline/,
+  );
   assert.equal(lines.filter((l) => l.startsWith('Прогноз выпуска:')).length, 1);
   assert.equal(lines.filter((l) => l.startsWith('Очередь стоит')).length, 1);
   // Доска успокоилась: --watch печатает один кадр — с той же строкой прогноза.
@@ -673,11 +678,28 @@ test('alpha.60 CLI: status --human — строки очереди, обновл
   const view = p.harness('view', '--state', p.state).json.data;
   assert.equal(view.progress.queue.runner, 'not-running');
   assert.equal(view.progress.queue.line, json.runner.line);
-  assert.ok(lines.at(-1)!.includes(view.forecast.progress.line));
+  assert.ok(lines.at(-2)!.includes(view.forecast.progress.line));
+  assert.ok(lines.at(-1)!.includes(view.forecast.outline.line));
   // Вопрос в представлении из настоящего состояния — с вариантами и обоснованием (P12).
   assert.deepEqual(
     view.questions[0].options.map((o: { id: string }) => o.id),
     ['hello', 'hi'],
   );
   assert.equal(view.questions[0].rationale, 'User-visible text');
+});
+
+test('alpha.68 CLI: input-answer без --actor и в открытой сессии ведущего — ответ оператора; ведущий отвечает только явно --actor lead', () => {
+  const p = project();
+  const base = ['--graph', 'graph.json', '--policy', 'policy.json', '--state', p.state];
+  assert.equal(p.harness('run', ...base).status, exitCodes.refused);
+  const id: string = p.harness('input-list', '--state', p.state).json.data.requests[0].id;
+  assert.equal(p.harness('lead', 'begin', '--state', p.state, '--ttl', '30m').status, 0);
+  const args = ['--state', p.state, '--request', id, '--text', 'Hello', '--option', 'hello'];
+  const explicit = p.harness('input-answer', ...args, '--actor', 'lead', '--request-version', '1');
+  assert.equal(explicit.json.ok, false, 'вопрос человека ведущий сам не решает');
+  // Ответ владельца, который передаёт ведущий, не записывается решением ведущего.
+  const relayed = p.harness('input-answer', ...args, '--request-version', '1');
+  assert.equal(relayed.status, 0, relayed.stderr);
+  assert.equal(relayed.json.data.answer.actor.kind, 'operator');
+  assert.equal(relayed.json.data.actorSource, undefined);
 });

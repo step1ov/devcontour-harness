@@ -126,6 +126,7 @@ test('P3-1: изменённая постановка принятого пор�
     fresh: true,
     accepted: { runId: third.id, resultSha: sha('b'), at: w.rework!.accepted.at },
     reopenedAt: w.rework!.reopenedAt,
+    roundEpochAt: w.rework!.reopenedAt,
     spent: 3,
     // 0.1.0-alpha.66: постановка принятой редакции — для отказа от доработки.
     acceptedOrder: graphOf({ w: [], x: ['w'] }).orders[0],

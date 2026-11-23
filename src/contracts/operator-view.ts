@@ -10,6 +10,12 @@ import {
 
 import { resourcesViewSchema } from './view-resources.ts';
 import { setupProgressSchema } from './setup-progress.ts';
+import {
+  OUTLINE_ACTORS,
+  OUTLINE_LIMITS,
+  OUTLINE_SIZES,
+  OUTLINE_STAGE_KINDS,
+} from './outline-weights.ts';
 
 export * from './operator-view-limits.ts';
 
@@ -124,7 +130,17 @@ export const reviewSubjectViewSchema = z.strictObject({
   subject: id,
   workId: id.optional(),
   approved: z.boolean(),
-  rounds: z.strictObject({ used: count, max: z.number().int().positive().nullable() }),
+  /**
+   * Раунды предмета: `used` — засчитанные в текущей эпохе (с 0.1.0-alpha.68),
+   * `remaining` — до предела, `free` — повторные ревью неизменённого плана,
+   * не тратившие предел (необязательные, ревизия 8).
+   */
+  rounds: z.strictObject({
+    used: count,
+    max: z.number().int().positive().nullable(),
+    remaining: count.nullable().optional(),
+    free: count.optional(),
+  }),
   open: z.strictObject({ blocking: count, notes: count }),
   accepted: count,
   reviewer: bindingSchema.optional(),
@@ -427,11 +443,61 @@ export const workViewSchema = z.strictObject({
              * сброс человеком — `user`, сброс ведущего — `lead`.
              */
             actor: z.enum(trackStepActors).optional(),
+            /**
+             * Ревизия 8: шаг разбора (`diagnosis`) обязателен — работу держит
+             * правило восстановления (`DIAGNOSIS_REQUIRED`, исчерпание) —
+             * или ведущий разбирает по желанию (`false`: повтор делает
+             * harness сам). Только показ.
+             */
+            required: z.boolean().optional(),
           }),
         )
         .max(L.trackSteps),
       truncated: count.optional(),
     })
+    .optional(),
+  /**
+   * Ревизия 8: работа переоткрыта новой редакцией плана после приёмки
+   * (`work.reopened`), доработка ещё не принята и не оставлена. `by` — кто
+   * согласовал редакцию, переоткрывшую работу (`agent` — ведущий,
+   * `operator` — человек); не согласована — поля нет. `budget` — свой
+   * предел попыток (`fresh`) или перенесённый (`carried`), `spent` —
+   * засчитанные попытки принятой редакции, `reason` — фраза для карточки.
+   */
+  reopened: z
+    .strictObject({
+      at: isoTimeSchema,
+      by: z.enum(['lead', 'operator']).optional(),
+      revision: z.number().int().positive(),
+      budget: z.enum(['fresh', 'carried']),
+      acceptedSha: sha,
+      spent: count,
+      reason: z.string().min(1).max(T.line),
+    })
+    .optional(),
+  /**
+   * Ревизия 8: итог независимого ревью кандидата по попыткам (и ревью
+   * интеграции, `phase`): последний применённый раунд попытки и фазы.
+   * `invalid` — у попытки и фазы были только ответы не по протоколу или
+   * небезопасные. `findings` — открытые blocking-находки раунда, `notes` —
+   * прочие открытые. `earlier` — попытка прежней (принятой) редакции работы
+   * до доработки. Сверх предела — самые ранние отброшены
+   * (`truncated.attemptReviews`). Ревью кода ведущего (`reviews[kind=code]`)
+   * сюда не входит.
+   */
+  attemptReviews: z
+    .array(
+      z.strictObject({
+        attempt: z.number().int().positive(),
+        phase: z.enum(['candidate', 'integration']),
+        verdict: z.enum(['approved', 'rejected', 'invalid']),
+        findings: count,
+        notes: count,
+        at: isoTimeSchema,
+        earlier: z.literal(true).optional(),
+      }),
+    )
+    .max(L.attemptReviews)
     .optional(),
 });
 
@@ -539,7 +605,11 @@ const activitySchema = z.strictObject({
   plain: z.string().min(1).max(T.activity),
 });
 
-/** P2: решения; обязательные сочетания — design §3.9. */
+/**
+ * Решения (ревизия 8 — harness выдаёт): кто, когда и что решил по записям
+ * хранилища и журнала событий, новые сверху; виды и соответствие актёров —
+ * docs/operator-view.md. Обязательные сочетания — design §3.9.
+ */
 const decisionSchema = z
   .strictObject({
     id,
@@ -567,6 +637,55 @@ const decisionSchema = z
     if (d.kind === 'accepted-limitation')
       need(d.findingId !== undefined, 'findingId', 'accepted-limitation требует findingId');
   });
+
+/** alpha.68: заполнение части плана выпуска работами. */
+const outlineFillSchema = z.enum(['registered', 'partial', 'unregistered']);
+
+/**
+ * alpha.68: план выпуска ведущего в прогнозе (`forecast.outline`) или
+ * подсказка `RELEASE_OUTLINE_MISSING`, что его нет (`run` не блокируется).
+ */
+const forecastOutlineSchema = z.strictObject({
+  state: z.enum(['recorded', 'missing']),
+  code: z.literal('RELEASE_OUTLINE_MISSING').optional(),
+  revision: z.number().int().positive().optional(),
+  recordedAt: isoTimeSchema.optional(),
+  units: count.optional(),
+  registered: count.optional(),
+  unregistered: count.optional(),
+  beyond: z.number().int().positive().optional(),
+  stages: z
+    .array(
+      z.strictObject({
+        id,
+        title: freeText(T.title).optional(),
+        kind: z.enum(OUTLINE_STAGE_KINDS),
+        state: outlineFillSchema,
+        units: count,
+        registered: count,
+        percent: z.number().int().min(0).max(100),
+        components: z
+          .array(
+            z.strictObject({
+              id,
+              title: freeText(T.title).optional(),
+              size: z.enum(OUTLINE_SIZES).optional(),
+              tasks: z.number().int().positive().optional(),
+              actor: z.enum(OUTLINE_ACTORS),
+              state: outlineFillSchema,
+              units: count,
+              registered: count,
+              percent: z.number().int().min(0).max(100),
+              works: z.array(id).max(OUTLINE_LIMITS.viewWorks).optional(),
+            }),
+          )
+          .max(OUTLINE_LIMITS.componentsPerStage),
+      }),
+    )
+    .max(OUTLINE_LIMITS.stages)
+    .optional(),
+  line: z.string().min(1).max(T.line),
+});
 
 /**
  * Прогноз выпуска (ревизия 4, P11): готовность всего объёма и время; те же
@@ -616,10 +735,45 @@ const forecastSchema = z.strictObject({
           retry: z.enum(['repair', 'answer']).optional(),
           /** Доработка после приёмки: `percent` — готовность доработки, работа уже в `done`. */
           rework: z.literal(true).optional(),
+          /**
+           * alpha.68: этап идущей попытки к приёмке — доли попытки на начале
+           * (`from`) и конце (`to`) этапа, начало этапа, типичная длительность.
+           */
+          stageProgress: z
+            .strictObject({
+              stage: z.enum(['code', 'checks', 'review', 'integration']),
+              from: z.number().min(0).max(1),
+              to: z.number().min(0).max(1),
+              since: isoTimeSchema.optional(),
+              typicalMs: count.optional(),
+              samples: z.number().int().positive().optional(),
+            })
+            .optional(),
           line: z.string().min(1).max(T.line),
         }),
       )
       .max(L.forecastWorks)
+      .optional(),
+    /** alpha.68: последний рост плана — что добавлено, готовность без него и с ним. */
+    growth: z
+      .strictObject({
+        at: isoTimeSchema,
+        added: z.array(z.string().min(1).max(200)).max(10),
+        before: z.number().int().min(0).max(100),
+        after: z.number().int().min(0).max(100),
+        by: z.enum(['works', 'outline']),
+        reason: freeText(OUTLINE_LIMITS.reason).optional(),
+        line: z.string().min(1).max(T.line),
+      })
+      .optional(),
+    /** alpha.68: «если ведущий не добавит задач» — последний отрезок при открытой сессии ведущего. */
+    conditional: z.literal(true).optional(),
+    /** alpha.68: плана нет, все работы — инфраструктура: её доля выпуска (оценка). */
+    infraShare: z
+      .strictObject({
+        share: z.number().min(0).max(1),
+        line: z.string().min(1).max(T.line),
+      })
       .optional(),
     /**
      * Ревизия 6: планируемые задачи (вес 0) — ещё не утверждённые; `line` —
@@ -707,8 +861,29 @@ const forecastSchema = z.strictObject({
       })
       .optional(),
     humanWait: z.strictObject({ works: count, ms: count, since: isoTimeSchema.optional() }),
+    /** alpha.68: незарегистрированные части плана выпуска — оценка по размеру. */
+    outline: z
+      .strictObject({
+        units: count,
+        ownerUnits: z.number().int().positive().optional(),
+        loMs: count.optional(),
+        hiMs: count.optional(),
+        basis: z.enum(['attempts', 'default']),
+        line: z.string().min(1).max(T.line),
+      })
+      .optional(),
+    /** alpha.68: код принят, ведущий завершает — начало отрезка, сколько идёт, превышена ли его доля. */
+    finishing: z
+      .strictObject({
+        since: isoTimeSchema.optional(),
+        elapsedMs: count.optional(),
+        exceeded: z.literal(true).optional(),
+      })
+      .optional(),
     line: z.string().min(1).max(T.line),
   }),
+  /** alpha.68: план выпуска ведущего или подсказка, что его нет. */
+  outline: forecastOutlineSchema.optional(),
   assumptions: z.array(z.string().min(1).max(400)).max(10),
 });
 
@@ -944,6 +1119,8 @@ export const operatorViewSchema = z.strictObject({
       alternates: truncatedCount.optional(),
       activity: truncatedCount.optional(),
       decisions: truncatedCount.optional(),
+      /** Ревизия 8: записи `works[].attemptReviews` сверх предела, по всем работам. */
+      attemptReviews: truncatedCount.optional(),
       /**
        * Работы, у которых документ сверх предела размера опустил поля
        * ревизии 4 (`attempts.lastFailure.kind`/`counted`, `blockers[].step`,
@@ -1025,6 +1202,8 @@ export const workDetailViewSchema = z.strictObject({
       questions: truncatedCount.optional(),
       blockers: truncatedCount.optional(),
       dependsOn: truncatedCount.optional(),
+      /** Ревизия 8: записи `work.attemptReviews` сверх предела. */
+      attemptReviews: truncatedCount.optional(),
     })
     .optional(),
 });

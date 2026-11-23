@@ -2284,7 +2284,7 @@
               "type": "object",
               "properties": {
                 "rows": {
-                  "maxItems": 20,
+                  "maxItems": 22,
                   "type": "array",
                   "items": {
                     "type": "object",
@@ -2297,6 +2297,8 @@
                           "sandbox-filesystem",
                           "sandbox-policy",
                           "sandbox-process-list",
+                          "sandbox-signal",
+                          "sandbox-browser",
                           "dependency-network",
                           "provider-auth",
                           "provider-limit",

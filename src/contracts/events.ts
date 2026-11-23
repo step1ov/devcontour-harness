@@ -43,6 +43,16 @@ export const environmentCauses = [
    * запускает setuid-программы в песочнице. Правка кода этого не снимет.
    */
   'sandbox-process-list',
+  /**
+   * Gate посылает сигнал (`kill`) процессу вне своей песочницы ОС, а она это
+   * запрещает (`GATE_SANDBOX_SIGNAL`, 0.1.0-alpha.68): `kill EPERM`.
+   */
+  'sandbox-signal',
+  /**
+   * Gate запускает браузер или его демон, а в песочнице ОС проверок он не
+   * стартует (`GATE_SANDBOX_BROWSER`, 0.1.0-alpha.68).
+   */
+  'sandbox-browser',
   'dependency-network',
   'provider-auth',
   'provider-limit',
@@ -294,6 +304,16 @@ export const eventPayloads = {
     evidence: z.number().int().min(0),
   }),
   /**
+   * Ведущий дополнил разбор (`harness diagnose --addendum`, 0.1.0-alpha.68):
+   * номер разбора, номер дополнения и длина текста (текста нет).
+   */
+  'work.diagnosis-amended': z.strictObject({
+    diagnosis: z.string(),
+    addendum: z.number().int().min(1),
+    textLength: z.number().int().min(0),
+    evidence: z.number().int().min(0),
+  }),
+  /**
    * Принятое поручение получило изменённую постановку новой редакцией графа
    * (`WorkState.rework`): доработка `revision` после приёмки `acceptedSha`.
    * `budget: fresh` — у неё свой предел попыток, `carried` — сверх
@@ -420,6 +440,30 @@ export const eventPayloads = {
     by: z.enum(jointResetActors),
     settled: z.number().int().min(0),
     reasonLength: z.number().int().min(0),
+  }),
+  /**
+   * Применённая политика подняла пределы бюджета (0.1.0-alpha.68): кто
+   * применил, поколение и каждое поднятое значение `before → after`
+   * (`null` — без предела). Причину называет `reapprove --reason`.
+   */
+  'budget.raised': z.strictObject({
+    by: z.string().min(1).max(300),
+    generation: z.number().int().min(0),
+    /**
+     * `executionDigest` применённой политики: повторное согласование под ней
+     * (`graph.approved.reapproval.policyDigest`) называет причину правки.
+     */
+    policyDigest: digestSchema.optional(),
+    changes: z
+      .array(
+        z.strictObject({
+          field: z.string().min(1).max(60),
+          before: z.number().nullable(),
+          after: z.number().nullable(),
+        }),
+      )
+      .min(1)
+      .max(20),
   }),
   /** Политика стала применённой: запуском процесса или операцией reconfigure. */
   'policy.applied': z.strictObject({

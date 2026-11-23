@@ -195,7 +195,10 @@ export const carried = (
     request.lifecycle === 'superseded' &&
     last?.digest === manifest.answerDigest &&
     last.revision === manifest.revision &&
-    mayCarry(request)
+    // Перенос, который уже состоялся (`carryInput` записал основание с этим
+    // ответом), — применённый ответ, какое бы правило переноса ни действовало
+    // сейчас (0.1.0-alpha.68: перенос в держащуюся остановку).
+    (mayCarry(request) || request.target?.answerDigest === manifest.answerDigest)
   );
 };
 

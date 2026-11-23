@@ -19,6 +19,7 @@ import {
   activitySchema,
   livenessStateSchema,
   stallActionSchema,
+  gateFailureSummarySchema,
 } from './execution.ts';
 import { environmentCauseSchema, readRunEventSchema } from './events.ts';
 import { deliveryStateSchema, resultEnvelopeSchema } from './result.ts';
@@ -36,6 +37,7 @@ import { updateDataSchema, updateCheckStates } from './update.ts';
 import { sourceRefSchema } from './work.ts';
 import { setupProgressSchema } from './setup-progress.ts';
 import { leadDataSchema } from './lead.ts';
+import { outlineDataSchema } from './outline.ts';
 import { profilePinSchema, resolvedProfileSchema } from './profiles.ts';
 import {
   filePlanEntrySchema,
@@ -517,7 +519,7 @@ export const cliCommands = {
         value: 'text',
         required: false,
         description:
-          'lead — сброс ведущего по свежему техническому разбору (policy.recovery.mode: lead, предел leadResets); operator или без флага — решение оператора (operator явно не пишется в журнал ведущего и при его активной сессии)',
+          'lead — сброс ведущего по свежему техническому разбору (policy.recovery.mode: lead, предел leadResets); operator — решение оператора (operator явно не пишется в журнал ведущего и при его активной сессии); без флага — operator; в открытой сессии ведущего флаг обязателен (иначе INVALID_INPUT)',
       },
       {
         name: '--diagnosis',
@@ -540,15 +542,24 @@ export const cliCommands = {
     description:
       'Записать разбор ведущего повторных засчитанных отказов работы: причина (coverage — добавить случаи, approach — новая гипотеза, split — разделить с ревью плана, contradiction — вопрос человеку, environment, other), гипотеза (обязательна для coverage и approach, не повторяет прежние) и доказательства. Следующая попытка получает гипотезу; при исчерпанных попытках техническая причина даёт ведущему право на сброс (retry --reset --by lead). Модель не вызывается',
     writes: true,
-    idempotency: 'Каждый вызов — новый разбор D<n>; повтор той же гипотезы — отказ',
+    idempotency:
+      'Каждый вызов — новый разбор D<n>; повтор той же гипотезы — отказ. С --addendum — дополнение свежего разбора (до 5), не новый разбор',
     args: [
       state,
       work,
       {
         name: '--cause',
         value: 'text',
-        required: true,
-        description: 'coverage | approach | split | contradiction | environment | other',
+        required: false,
+        description:
+          'coverage | approach | split | contradiction | environment | other (обязательна без --addendum)',
+      },
+      {
+        name: '--addendum',
+        value: 'text',
+        required: false,
+        description:
+          'Дополнить свежий разбор того же засчитанного отказа (вторая причина, заметка ведущего; 10–2000 знаков): следующая попытка получит его вместе с разбором; граф не перерегистрируется, новый предел не даётся. Без --cause и --hypothesis',
       },
       {
         name: '--hypothesis',
@@ -658,6 +669,13 @@ export const cliCommands = {
         required: false,
         description:
           'Конфигурация связки задач: сверить версию Relay (договор и capabilities) и предупредить, если она ниже рекомендуемой; без флага — connector.json рядом с --policy, если он есть',
+      },
+      {
+        name: '--probe-sandbox',
+        value: 'flag',
+        required: false,
+        description:
+          'Проверить ограничения песочницы проверок пробами (сигнал процессу вне песочницы, запуск браузера — до 30 с); без флага — уже известный ответ процесса или «не проверялось»',
       },
     ],
     refusals: [],
@@ -1174,7 +1192,7 @@ export const cliCommands = {
         value: 'text',
         required: false,
         description:
-          'Кто отвечает: operator (по умолчанию; словами человека) или lead — только на неблокирующие запросы или с разрешения inputPolicy.leadAnswers (technical: технические вопросы с --reason; maxSeverity: до порога серьёзности)',
+          'Кто отвечает: operator (словами человека) или lead — только на неблокирующие запросы или с разрешения inputPolicy.leadAnswers (technical: технические вопросы с --reason; maxSeverity: до порога серьёзности); без флага — operator, и в открытой сессии ведущего: ответ ведущего — только явно --actor lead',
       },
       {
         name: '--reason',
@@ -1659,7 +1677,7 @@ export const cliCommands = {
   },
   'lead-end': {
     description:
-      'Ведущий заканчивает сессию: панель больше не говорит «ведущий работает» (0.1.0-alpha.66). Синоним: harness lead end',
+      'Ведущий заканчивает сессию: панель больше не говорит «ведущий работает» (0.1.0-alpha.66). Готовые работы, а никто не запущен, — предупреждение READY_WORKS_NOT_RUNNING в stderr и readyNotRunning в ответе; сессия всё равно закончена, выход 0 (0.1.0-alpha.68). Синоним: harness lead end',
     writes: true,
     idempotency: 'Повтор закрывает уже закрытую сессию ещё одной записью журнала',
     args: [
@@ -1688,6 +1706,31 @@ export const cliCommands = {
       },
     ],
     refusals: ['NOT_FOUND', 'NOT_READY'],
+  },
+  'lead-outline': {
+    description:
+      'План выпуска ведущего до первого графа: этапы × компоненты с грубым размером (S/M/L или число задач) и тем, кто их делает (writers, environment, owner). Прогноз считает незарегистрированные части плана объёмом выпуска; без плана status и панель подсказывают RELEASE_OUTLINE_MISSING, run не блокируется (0.1.0-alpha.68). Синоним: harness lead outline --file F',
+    writes: true,
+    idempotency:
+      'Тот же план — без изменений (changed: false); другой — новая редакция с причиной («план вырос: +…») и строкой журнала ведущего',
+    args: [
+      state,
+      {
+        name: '--file',
+        value: 'path',
+        required: true,
+        description:
+          'JSON {stages:[{id, title, kind: infra|product|deploy|other, components:[{id, title, size: S|M|L, tasks?, actor: writers|environment|owner, works?}]}], reason?}',
+      },
+      {
+        name: '--reason',
+        value: 'text',
+        required: false,
+        description:
+          'Почему план изменился (главнее reason файла); нет — «план вырос: +…» по разнице',
+      },
+    ],
+    refusals: ['NOT_FOUND'],
   },
   'preview-start': {
     description:
@@ -2245,6 +2288,24 @@ export const statusDataSchema = z.strictObject({
    */
   setupProgress: setupProgressSchema.optional(),
   /**
+   * 0.1.0-alpha.68: план выпуска ведущего (`harness lead outline`). Записан —
+   * `recorded` с редакцией и объёмом (задач); нет, а работы есть и выпуск не
+   * закрыт, — `missing` с кодом `RELEASE_OUTLINE_MISSING`: прогноз тогда по
+   * зарегистрированным работам. Подсказка, а не блокировка: `run` идёт.
+   * Нет поля — работ нет, выпуск закрыт или `status --graph`.
+   */
+  outline: z
+    .strictObject({
+      state: z.enum(['recorded', 'missing']),
+      code: z.literal('RELEASE_OUTLINE_MISSING').optional(),
+      revision: z.number().int().positive().optional(),
+      units: z.number().int().positive().optional(),
+      stages: z.number().int().positive().optional(),
+      line: z.string().min(1).max(300),
+      lineEn: z.string().min(1).max(300),
+    })
+    .optional(),
+  /**
    * Только `status --detail`: время снимка, почему стоит выдача и активные
    * попытки (стадия, длительность, владение, gates). Без флага поля нет.
    */
@@ -2277,6 +2338,27 @@ export const runDataSchema = z.strictObject({
   /** Граф уже был зарегистрирован этой редакцией: работа продолжена. */
   resumed: z.boolean(),
   baseline: baselineViewSchema.optional(),
+  /**
+   * `run --source` (0.1.0-alpha.68): после закреплённого снимка изменились
+   * только необязательные документы задач — согласование действует,
+   * исполняется закреплённый снимок; документы вносит новый source-snapshot.
+   */
+  documentsDrift: z
+    .strictObject({
+      pinnedRevision: z.string().min(1).max(100),
+      freshRevision: z.string().min(1).max(100),
+      documents: z
+        .array(
+          z.strictObject({
+            taskKey: z.string().max(200),
+            name: z.string().max(300),
+            change: z.enum(['added', 'removed', 'changed']),
+          }),
+        )
+        .max(20),
+      note: z.string().max(2000),
+    })
+    .optional(),
   works: z.array(
     z.strictObject({
       id: idSchema,
@@ -2340,14 +2422,26 @@ export const workActionDataSchema = z.strictObject({
       granted: z.number().int().min(1).optional(),
     })
     .optional(),
+  /**
+   * `retry` (0.1.0-alpha.68): кем исполнен повтор и откуда актёр — `flag`
+   * (`--by`) или `default` (без флага и без сессии ведущего: оператор). В
+   * открытой сессии ведущего `--by` обязателен.
+   */
+  by: z.enum(['lead', 'operator']).optional(),
+  bySource: z.enum(['flag', 'default']).optional(),
 });
 
 /** `harness diagnose`: записанный разбор, что дальше и действующее правило. */
 export const diagnoseDataSchema = z.strictObject({
   workId: idSchema,
   diagnosis: leadDiagnosisSchema,
-  next: z.enum(['attempt', 'diagnose', 'replan', 'user-decision', 'lead-reset', 'user-reset']),
-  mode: z.enum(['lead', 'user']),
+  /** Нет у дополнения (`--addendum`): что дальше, оно не меняет. */
+  next: z
+    .enum(['attempt', 'diagnose', 'replan', 'user-decision', 'lead-reset', 'user-reset'])
+    .optional(),
+  mode: z.enum(['lead', 'user']).optional(),
+  /** Дополнение свежего разбора записано (`--addendum`, 0.1.0-alpha.68). */
+  amended: z.literal(true).optional(),
 });
 
 export const approveDataSchema = z.strictObject({
@@ -2416,6 +2510,10 @@ export const doctorDataSchema = z.strictObject({
     reason: z.string().optional(),
     /** Список процессов в песочнице проверок (CLI `doctor`). */
     processList: processListCapabilitySchema.optional(),
+    /** Сигнал процессу вне песочницы проверок (`kill`), проба harness (0.1.0-alpha.68). */
+    signal: processListCapabilitySchema.optional(),
+    /** Браузер в песочнице проверок, проба harness (0.1.0-alpha.68). */
+    browser: processListCapabilitySchema.optional(),
   }),
   state: z
     .strictObject({
@@ -2593,6 +2691,11 @@ export const gatesDataSchema = z.strictObject({
        * процессов недоступен. Правка кода её не снимет.
        */
       environment: environmentCauseSchema.optional(),
+      /**
+       * Выжимка провала (0.1.0-alpha.68): упавшие тесты, строка ошибки, хвост
+       * вывода с маской; `withheld` — gate не назвал причину.
+       */
+      failureSummary: gateFailureSummarySchema.optional(),
     }),
   ),
   /** Каталог логов и артефактов проверки. */
@@ -2602,6 +2705,17 @@ export const gatesDataSchema = z.strictObject({
    * процесс, loopback свободен (например, AirPlay Receiver на macOS).
    */
   warnings: z.array(z.string()).optional(),
+  /**
+   * Ответы проб ограничений песочницы ОС проверок, полученные этим процессом
+   * harness (0.1.0-alpha.68): сигнал вне песочницы и браузер. Проба идёт,
+   * когда провал gate несёт след класса; без неё поля нет.
+   */
+  sandbox: z
+    .strictObject({
+      signal: processListCapabilitySchema.optional(),
+      browser: processListCapabilitySchema.optional(),
+    })
+    .optional(),
 });
 
 /** Ответ `smoke`: шаги окружения на коммите без gates, их длительность и класс отказа. */
@@ -2657,6 +2771,10 @@ export const smokeDataSchema = z.strictObject({
       durationMs: z.number().int().nonnegative(),
       exitCode: z.number().int().optional(),
       timedOut: z.boolean().optional(),
+      /** Сигнал, которым завершился процесс упавшего шага (0.1.0-alpha.68). */
+      signal: z.string().max(40).optional(),
+      /** Хвост вывода упавшего шага с маской секретов (0.1.0-alpha.68). */
+      tail: z.string().max(1200).optional(),
       log: z.string().optional(),
       /** Исход хранилища зависимостей: `hit`, `partial`, `miss: причина` (промах — не отказ). */
       detail: z.string().optional(),
@@ -2682,6 +2800,8 @@ export const smokeDataSchema = z.strictObject({
       stage: z.string().optional(),
       step: z.string().optional(),
       message: z.string(),
+      /** Хвост вывода упавшего шага с маской секретов (0.1.0-alpha.68). */
+      tail: z.string().max(1200).optional(),
       advice: z.string(),
     })
     .optional(),
@@ -3363,6 +3483,7 @@ export const cliDataSchemas = {
   'lead-note': leadDataSchema,
   'lead-end': leadDataSchema,
   'release-done': leadDataSchema,
+  'lead-outline': outlineDataSchema,
   'preview-start': previewStartDataSchema,
   'preview-stop': previewStopDataSchema,
   'preview-list': previewListDataSchema,

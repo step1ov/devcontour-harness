@@ -55,6 +55,25 @@ export class TaskFailure extends Error {
 }
 
 /**
+ * Хвост вывода упавшего шага окружения в тексте отказа (0.1.0-alpha.68):
+ * в скобках `⟦вывод: …⟧`. Класс отказа, его причина и отпечаток по тексту его
+ * не читают — вывод шага (например, «timeout» в логе службы) не меняет, как
+ * судится попытка; людям и ведущему он показывает, почему шаг упал.
+ */
+export function stepOutputText(tail: string) {
+  const line = tail
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean)
+    .join(' | ')
+    .replaceAll('⟦', '[')
+    .replaceAll('⟧', ']');
+  return line ? ` ⟦вывод: ${line}⟧` : '';
+}
+/** Текст отказа без хвостов вывода шагов (`stepOutputText`). */
+export const withoutStepOutput = (message: string) => message.replace(/ ?⟦вывод: [^⟧]*⟧/g, '');
+
+/**
  * Отпечаток отказа: одинаковые сбои должны совпадать, разные — расходиться.
  *
  * Из сообщения убирается всё, что меняется от попытки к попытке, — SHA, id
@@ -63,7 +82,7 @@ export class TaskFailure extends Error {
  * повторов не сработал бы ни разу.
  */
 export function failureFingerprint(kind: FailureKind, message: string) {
-  const normalized = message
+  const normalized = withoutStepOutput(message)
     .toLowerCase()
     // UUID раньше SHA: шаблон SHA съедает его восьми- и двенадцатисимвольные
     // группы, после чего целого UUID уже не видно, а середина остаётся

@@ -417,18 +417,20 @@ export const LEAD_LOGGED_COMMANDS = [
 /** Команды, которые по договору подаёт только ведущий: `diagnose` — его разбор. */
 const LEAD_ONLY_COMMANDS: readonly string[] = ['diagnose'];
 /**
- * Команды, которые движок без `--by lead` исполняет как действие оператора
- * (`retry` — повтор оператора, удержание gate не снимает): они оператора и
- * при активной сессии ведущего, иначе журнал ведущего записал бы чужое
- * решение. `cancel` пути ведущего не имеет (`--by` нет) — решает сессия.
+ * Команды, которые без явного `--by lead` / `--actor lead` — действие
+ * оператора: `retry` (повтор оператора; в открытой сессии ведущего CLI без
+ * `--by` отказывает), `input-answer` (ответ без `--actor` — ответ человека,
+ * который ведущий передаёт). Иначе журнал ведущего записал бы чужое решение
+ * (0.1.0-alpha.68). `cancel` пути ведущего не имеет (`--by` нет) — решает
+ * сессия.
  */
-const OPERATOR_UNLESS_LEAD: readonly string[] = ['retry'];
+const OPERATOR_UNLESS_LEAD: readonly string[] = ['retry', 'input-answer'];
 
 /**
  * Кто подал команду: явный `--by`/`--actor` решает сам — `lead` это ведущий,
  * любое другое значение (`operator`, имя человека у `reapprove --by`) —
- * оператор; команда только ведущего (`diagnose`) — ведущий; `retry` без
- * `--by lead` — оператор, как его исполняет движок. Иначе
+ * оператор; команда только ведущего (`diagnose`) — ведущий; `retry` и
+ * `input-answer` без явного `lead` — оператор, как их исполняет движок. Иначе
  * `undefined`: решает сессия ведущего (`recordLeadCommand`).
  */
 export function leadCommandActor(
@@ -463,4 +465,16 @@ export function recordLeadCommand(
     result: undefined,
   }));
   return true;
+}
+
+/**
+ * Открыта ли сейчас сессия ведущего (`lead begin` без `lead end`, аренда не
+ * истекла; alpha.68, P6-17). `retry` без `--by` внутри открытой сессии —
+ * отказ: ведущий называет роль явно (`--by lead` или `--by operator`).
+ * `input-answer` без `--actor` остаётся ответом оператора: ответ владельца,
+ * который передаёт ведущий, не записывается решением ведущего.
+ */
+export function leadSessionOpen(engine: Engine): boolean {
+  const log = engine.read((v) => v.local('lead', WORKSPACE_OWNER, 'log'));
+  return !!log && activeAt(log, engine.clock());
 }

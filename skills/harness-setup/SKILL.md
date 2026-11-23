@@ -40,13 +40,24 @@ write new executable code during setup:
   through the normal loop with review-code, attempts and the forecast;
 - inherited setup debts (a known bridge defect, a missing acceptance test)
   are listed as infra tasks too, not fixed silently by you;
+- keep each infra task to one deliverable with its own check (a bridge, a
+  wrapper, a fixture set, one smoke): a task that lists many independent
+  deliverables does not fit one attempt and ends `unfinished`; after two
+  `unfinished` attempts split it (`diagnose --cause split`) rather than
+  retrying the same order;
+- a compose file whose services publish ports while attached only to
+  `internal: true` networks is reported by `doctor`
+  (`compose-internal-ports`): Docker does not publish those ports — fix the
+  compose model before `smoke`;
 - declare where infra code lives: `repositories[0].infra.paths` (for
   example `.harness/acceptance/`, `.harness/infra/`), inside
   `protectedPaths`; files that `lifecycle` or `prepare` steps run stay
   outside it.
 
-**Setup budget: about 30 minutes.** Setup time counts from the first setup
-file or record to the first registered graph. Over the budget, `doctor`
+**Setup budget: about 30 minutes.** Setup time counts from this setup's
+first record (the manifest `init` writes for this directory, the first
+`smoke` or `gates` of this state) to the first registered graph; files
+inherited from an earlier project do not start the clock. Over the budget, `doctor`
 prints `SETUP_OVER_BUDGET: …` and `status`/`harness view` show the setup
 progress line with «бюджет 30 мин — превышен»: stop adding code, write down
 what is left as infra tasks and hand over to planning. `harness view`
@@ -609,7 +620,8 @@ edits, controller mode, the connector check and snapshot (`graphId`,
 `graphDigest`, eligibility per task), the commit SHA, the setup time against
 the budget, and the infra tasks for the first plan (new code and inherited
 debts, each with its paths and the gate files it would change). Then continue with the
-`harness` skill: brief → `plan-request` → draft → `plan-check` → `validate`
+`harness` skill: release outline (`lead outline`: infra, product and deploy
+stages with rough sizes) → brief → `plan-request` → draft → `plan-check` → `validate`
 → `run` (for Relay: `review-plan` and `run --source`). A live `run` or
 `review-plan` calls paid models: start it when the user asks.
 
