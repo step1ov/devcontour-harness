@@ -10,7 +10,14 @@ import './temp-scope.ts';
  */
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -28,7 +35,11 @@ import { redactor } from '../src/environment/redaction.ts';
 import { gatesText } from '../src/control/gates-check.ts';
 import { classifyLifecycleFailure, smokeText } from '../src/control/lifecycle-smoke.ts';
 import { runGate } from '../src/verification/gates.ts';
-import { failureSummary, WITHHELD_NOTE } from '../src/verification/failure-summary.ts';
+import {
+  commandReports,
+  failureSummary,
+  WITHHELD_NOTE,
+} from '../src/verification/failure-summary.ts';
 import { executionPolicySchema } from '../src/contracts/index.ts';
 import { example } from './fixtures.ts';
 import { repo } from './git-fixture.ts';
@@ -178,6 +189,35 @@ test('gate со скрытым выводом: имена из JUnit, котор
     logs: '/logs',
   });
   assert.match(text, /\n\s+причина: gate не назвал причину провала/);
+});
+
+test('отчёт команды: граница по настоящему пути — родитель-ссылка наружу и сам отчёт-ссылка отклонены, ссылка внутри дерева принята; размер — по открытому файлу', async () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'harness-reports-')));
+  const outside = realpathSync(mkdtempSync(join(tmpdir(), 'harness-outside-')));
+  const xml = '<testsuite><testcase name="t"><failure>x</failure></testcase></testsuite>';
+  writeFileSync(join(outside, 'junit.xml'), xml);
+  const since = Date.now() - 10_000;
+  const read = (arg: string) =>
+    commandReports(['node', `--test-reporter-destination=${arg}`], root, root, since);
+  // Родитель-ссылка наружу: лексически путь внутри дерева, по настоящему — нет.
+  symlinkSync(outside, join(root, '.artifacts'));
+  assert.deepEqual(await read('.artifacts/junit.xml'), []);
+  // Сам отчёт — ссылка (внутрь или наружу).
+  mkdirSync(join(root, 'out'));
+  symlinkSync(join(outside, 'junit.xml'), join(root, 'out', 'link.xml'));
+  assert.deepEqual(await read('out/link.xml'), []);
+  writeFileSync(join(root, 'out', 'real.xml'), xml);
+  symlinkSync(join(root, 'out', 'real.xml'), join(root, 'out', 'inner-link.xml'));
+  assert.deepEqual(await read('out/inner-link.xml'), []);
+  // Родитель-ссылка внутрь дерева и обычный файл — читаются.
+  symlinkSync(join(root, 'out'), join(root, 'alias'));
+  assert.deepEqual(await read('alias/real.xml'), [{ path: join('alias', 'real.xml'), xml }]);
+  assert.deepEqual(await read('out/real.xml'), [{ path: join('out', 'real.xml'), xml }]);
+  // Больше предела — не читается; каталог с именем отчёта — тоже.
+  writeFileSync(join(root, 'out', 'big.xml'), Buffer.alloc(5 * 1024 * 1024 + 1, 0x20));
+  assert.deepEqual(await read('out/big.xml'), []);
+  mkdirSync(join(root, 'out', 'dir.xml'));
+  assert.deepEqual(await read('out/dir.xml'), []);
 });
 
 test('отчёт gate с общим провалом обёртки: текст называет упавшие тесты по выводу; подсказка исполнителю — выжимку', async () => {

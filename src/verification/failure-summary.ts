@@ -14,8 +14,9 @@
  * должен печатать безопасную выжимку сам.
  */
 
-import { lstat, readFile } from 'node:fs/promises';
-import { relative, resolve, sep } from 'node:path';
+import { constants } from 'node:fs';
+import { lstat, open, realpath } from 'node:fs/promises';
+import { dirname, relative, resolve, sep } from 'node:path';
 import type { GateFailureSummary } from '../contracts/index.ts';
 import { assertionMarkers, failedBlocks } from './process-list.ts';
 
@@ -179,6 +180,14 @@ const reportFlag =
  * (`--test-reporter-destination=x.xml`, `--outputFile x.xml`, `mocha-file=x.xml`),
  * внутри дерева, кроме отчёта gate. Читаются только записанные этим запуском
  * (`since`) обычные файлы до 5 МБ; отказ чтения — пустой список.
+ *
+ * Граница — по настоящим путям: путь отчёта и каждый его родитель после
+ * разрешения ссылок лежат внутри настоящего корня дерева (родитель-ссылка
+ * наружу отклоняется), сам отчёт ссылкой не бывает. Файл открывается один
+ * раз (`O_NOFOLLOW`, `O_NONBLOCK`), тип, размер и время берутся `fstat`
+ * открытого дескриптора, он же — тот файл, что проверен по пути (то же
+ * устройство и inode), и читается не больше предела из этого дескриптора:
+ * подмена пути между проверкой и чтением не подсовывает чужой файл.
  */
 export async function commandReports(
   argv: readonly string[],
@@ -198,20 +207,65 @@ export async function commandReports(
     if (value) paths.add(value);
   });
   const out: { path: string; xml: string }[] = [];
+  let realRoot: string;
+  try {
+    realRoot = await realpath(root);
+  } catch {
+    return out;
+  }
   for (const p of paths) {
     const full = resolve(cwd, p);
     if (full !== root && !full.startsWith(root + sep)) continue;
     if (exclude && full === exclude) continue;
-    try {
-      const st = await lstat(full);
-      if (!st.isFile() || st.size > REPORT_BYTES || st.mtimeMs < since - 1000) continue;
-      out.push({ path: relative(root, full), xml: await readFile(full, 'utf8') });
-    } catch {
-      continue;
-    }
+    const xml = await readReportFile(full, root, realRoot, since).catch(() => undefined);
+    if (xml === undefined) continue;
+    out.push({ path: relative(root, full), xml });
     if (out.length >= 5) break;
   }
   return out;
+}
+
+const inside = (path: string, root: string) => path === root || path.startsWith(root + sep);
+
+/**
+ * Отчёт команды по пути `full` внутри `root` (настоящий корень — `realRoot`)
+ * или undefined: ссылка, выход за дерево по настоящему пути, не обычный файл,
+ * больше предела, старее запуска.
+ */
+async function readReportFile(full: string, root: string, realRoot: string, since: number) {
+  // Каждый родитель внутри дерева — по настоящему пути.
+  for (let dir = dirname(full); inside(dir, root); dir = dirname(dir)) {
+    if (!inside(await realpath(dir), realRoot)) return undefined;
+    if (dir === root) break;
+  }
+  const real = await realpath(full);
+  if (!inside(real, realRoot)) return undefined;
+  const checked = await lstat(full);
+  if (checked.isSymbolicLink()) return undefined;
+  const handle = await open(real, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const st = await handle.stat();
+    if (
+      !st.isFile() ||
+      st.dev !== checked.dev ||
+      st.ino !== checked.ino ||
+      st.size > REPORT_BYTES ||
+      st.mtimeMs < since - 1000
+    )
+      return undefined;
+    const buffer = Buffer.alloc(Math.min(st.size, REPORT_BYTES) + 1);
+    let length = 0;
+    while (length < buffer.length) {
+      const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length);
+      if (!bytesRead) break;
+      length += bytesRead;
+    }
+    // Файл изменился после fstat (вырос) — не читается.
+    if (length > st.size) return undefined;
+    return buffer.subarray(0, length).toString('utf8');
+  } finally {
+    await handle.close();
+  }
 }
 
 /** Текст для сообщения отказа, когда gate не назвал причину. */
