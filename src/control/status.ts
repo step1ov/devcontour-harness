@@ -1,6 +1,7 @@
 import type { z } from 'zod';
 import {
   STATE_VERSION,
+  WORKSPACE_OWNER,
   inputPolicyOf,
   type statusDataSchema,
   type AttemptState,
@@ -298,8 +299,38 @@ export function statusOf(
       }))(reviewSummaryRows(v, source.policy, graphId === undefined ? {} : { graphId })),
       ...(options.detail ? { detail: statusDetail(source, v, graphId) } : {}),
       decisions: decisionSettingsView(source.policy),
+      ...((o) => (o ? { outline: o } : {}))(graphId === undefined ? outlineStatus(v) : undefined),
     };
   });
+}
+
+/**
+ * План выпуска ведущего (alpha.68): записан — редакция и объём; нет, а
+ * работы есть и выпуск не закрыт — подсказка `RELEASE_OUTLINE_MISSING`
+ * (прогноз тогда по зарегистрированным работам; `run` не блокируется).
+ */
+function outlineStatus(v: ExecutionView) {
+  const outline = v.local('release-outline', WORKSPACE_OWNER, 'outline');
+  if (outline)
+    return {
+      state: 'recorded' as const,
+      revision: outline.revision,
+      units: outline.units,
+      stages: outline.stages.length,
+      line: `План выпуска: редакция ${outline.revision}, ${ruCount(outline.stages.length, ['этап', 'этапа', 'этапов'])}, ~${ruCount(outline.units, ['задача', 'задачи', 'задач'])}.`,
+      lineEn: `Release outline: revision ${outline.revision}, ${outline.stages.length} stage(s), ~${outline.units} task(s).`,
+    };
+  const works = v.works();
+  if (!works.length) return undefined;
+  const open = works.some((w) => w.status !== 'done' && w.status !== 'cancelled');
+  if (!open && v.local('lead', WORKSPACE_OWNER, 'log')?.release) return undefined;
+  return {
+    state: 'missing' as const,
+    code: 'RELEASE_OUTLINE_MISSING' as const,
+    line: 'Плана выпуска нет — прогноз по одному графу: ведущий записывает этапы и компоненты выпуска командой harness lead outline --file F (run не блокируется).',
+    lineEn:
+      'No release outline — the forecast covers the registered works only: the lead records the release stages and components with harness lead outline --file F (run is not blocked).',
+  };
 }
 
 /**

@@ -33,5 +33,6 @@ export * from './operator-view.ts';
 export * from './decisions.ts';
 export * from './update.ts';
 export * from './lead.ts';
+export * from './outline.ts';
 export * from './view-resources.ts';
 export * from './preview.ts';

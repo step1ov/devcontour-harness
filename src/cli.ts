@@ -113,6 +113,7 @@ import {
   recordLeadCommand,
   releaseDone,
 } from './control/lead.ts';
+import { leadOutline } from './control/outline.ts';
 import { parseDurationFlag } from './control/duration.ts';
 
 const usage = `harness ${HARNESS_VERSION}
@@ -337,8 +338,10 @@ const forecastLines = (state: string): string | undefined => {
           line: string;
           added?: { line: string }[];
           works?: { line: string; percent: number; attempt?: unknown }[];
+          growth?: { line: string; reason?: string };
         };
         time: { line: string };
+        outline?: { line: string };
       };
       sourceReviews?: { line: string }[];
     };
@@ -346,6 +349,14 @@ const forecastLines = (state: string): string | undefined => {
     const out = [
       ...(f ? [`Прогноз выпуска: ${f.progress.line}; ${f.time.line}.`] : []),
       ...(f?.progress.added ?? []).map((a) => `  ${a.line}`),
+      // План выпуска (alpha.68): записан — его строка, нет — подсказка ведущему.
+      ...(f?.outline ? [`  ${f.outline.line}`] : []),
+      ...(f?.progress.growth
+        ? [
+            `  ${f.progress.growth.line}` +
+              (f.progress.growth.reason ? `: ${f.progress.growth.reason}` : ''),
+          ]
+        : []),
       // Готовность незаконченных работ: принятые уже видны строками работ.
       ...(f?.progress.works ?? [])
         .filter((w) => w.percent < 100 && w.attempt)
@@ -517,6 +528,7 @@ const options = {
   recovery: { type: 'string' },
   'diagnose-after': { type: 'string' },
   'lead-resets': { type: 'string' },
+  file: { type: 'string' },
 } as const;
 
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
@@ -561,6 +573,7 @@ const flagOwners = {
   text: ['input-answer', 'lead-begin', 'lead-note', 'lead-end'],
   ttl: ['lead-begin', 'preview-start'],
   summary: ['release-done'],
+  file: ['lead-outline'],
   option: ['input-answer'],
   kind: ['input-answer'],
   actor: ['input-answer', 'input-carry', 'review-plan', 'review-contract', 'review-accept'],
@@ -1540,6 +1553,23 @@ async function run(
         h.close();
       }
     }
+    case 'lead-outline': {
+      // План выпуска ведущего (0.1.0-alpha.68): локальная запись состояния.
+      const input = readJson(resolve(need('file')), 'outline');
+      const h = open(need('state'), binding(need('state')), false);
+      try {
+        return {
+          command,
+          data: leadOutline(
+            h.engine,
+            input,
+            optional('reason', typeof v.reason === 'string' ? v.reason : undefined),
+          ),
+        };
+      } finally {
+        h.close();
+      }
+    }
     case 'diagnose': {
       const cause = need('cause');
       if (!(leadDiagnosisCauses as readonly string[]).includes(cause))
@@ -2335,6 +2365,7 @@ function leadAlias(args: string[]): string[] {
     rest[0] !== undefined && !rest[0].startsWith('--') ? [flag, rest[0], ...rest.slice(1)] : rest;
   if (a === 'lead' && (b === 'begin' || b === 'end')) return [`lead-${b}`, ...rest];
   if (a === 'lead' && b === 'note') return ['lead-note', ...lifted('--text')];
+  if (a === 'lead' && b === 'outline') return ['lead-outline', ...rest];
   if (a === 'release' && b === 'done') return ['release-done', ...lifted('--summary')];
   return args;
 }

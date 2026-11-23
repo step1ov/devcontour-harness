@@ -230,8 +230,10 @@ test(
           assert.equal(b.actor, null, 'blocker ' + String(b.code));
         }
       // Настройки решений (alpha.66) — аддитивное поле статуса.
-      const { decisions: _d, ...nowRest } = nowStatus as Record<string, unknown>;
+      // План выпуска ведущего (alpha.68) — тоже аддитивное поле.
+      const { decisions: _d, outline: _o, ...nowRest } = nowStatus as Record<string, unknown>;
       void _d;
+      void _o;
       const stripped = {
         ...nowRest,
         works: works.map(
