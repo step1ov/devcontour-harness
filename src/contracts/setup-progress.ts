@@ -40,7 +40,11 @@ export const setupStepSchema = z.strictObject({
 export type SetupStep = z.infer<typeof setupStepSchema>;
 
 export const setupProgressSchema = z.strictObject({
-  /** Начало настройки: самая ранняя запись (файлы `.harness/`, первый smoke или gates). */
+  /**
+   * Начало настройки: первая запись этой настройки — manifest `init` этого
+   * каталога (`root` совпадает), первый smoke или gates; время унаследованных
+   * файлов `.harness/` (профиль, политика) в счёт не идёт (alpha.68).
+   */
   since: isoTimeSchema.optional(),
   elapsedMs: z.number().int().min(0).optional(),
   budgetMs: z.number().int().positive(),
