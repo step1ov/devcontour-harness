@@ -21,6 +21,7 @@ import {
 import { credentialPaths, isolationSupport } from '../environment/isolation.ts';
 import { chooseCheckoutRoot } from '../environment/checkout-root.ts';
 import { inspectPort, PORT_ADVICE } from '../environment/port-probe.ts';
+import { composeChecks } from '../environment/compose-check.ts';
 import { leadSandboxCheck, type LeadSandboxProbe } from '../environment/lead-sandbox.ts';
 import { defaultResourceDatabase, ResourcePool, resourceKey } from '../environment/resources.ts';
 import { HARNESS_VERSION } from '../package.ts';
@@ -259,6 +260,15 @@ export async function doctor(
       : [];
   }))
     notes.push(note);
+  // Модель compose шагов lifecycle (alpha.68, P6-16): сервис с опубликованными
+  // портами только во внутренних сетях — проблема до smoke; файл вне
+  // разбираемого подмножества YAML — заметка, проверка пропущена.
+  const composeBase = toolchain?.baseDir ?? checkouts?.baseDir;
+  if (policy && composeBase) {
+    const compose = composeChecks(policy, composeBase);
+    problems.push(...compose.problems);
+    notes.push(...compose.notes);
+  }
   const models = policy ? policyModels(policy) : [];
   if (policy) warnings.push(...codexModelWarnings(models));
   // Закреплённый toolchain: каталог и версия, сверка с node первым в PATH
