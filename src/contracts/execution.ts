@@ -832,6 +832,22 @@ export const leadDiagnosisSchema = z.strictObject({
   epoch: z.number().int().min(0),
   /** Человек решил по ней (сброс оператора): удержание снято. */
   resolved: z.strictObject({ by: z.literal('operator'), at: isoTimeSchema }).optional(),
+  /**
+   * Дополнения ведущего к этому разбору (`harness diagnose --addendum`,
+   * 0.1.0-alpha.68): вторая причина или заметка к тому же засчитанному
+   * отказу — следующая попытка получает их вместе с разбором. Причину,
+   * гипотезу, счёт разборов и право на сброс дополнение не меняет.
+   */
+  addenda: z
+    .array(
+      z.strictObject({
+        at: isoTimeSchema,
+        text: z.string().min(1).max(2000),
+        evidence: z.array(z.string().min(1).max(1000)).max(10),
+      }),
+    )
+    .max(5)
+    .optional(),
 });
 export type LeadDiagnosis = z.infer<typeof leadDiagnosisSchema>;
 

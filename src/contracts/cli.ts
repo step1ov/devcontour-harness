@@ -540,15 +540,24 @@ export const cliCommands = {
     description:
       'Записать разбор ведущего повторных засчитанных отказов работы: причина (coverage — добавить случаи, approach — новая гипотеза, split — разделить с ревью плана, contradiction — вопрос человеку, environment, other), гипотеза (обязательна для coverage и approach, не повторяет прежние) и доказательства. Следующая попытка получает гипотезу; при исчерпанных попытках техническая причина даёт ведущему право на сброс (retry --reset --by lead). Модель не вызывается',
     writes: true,
-    idempotency: 'Каждый вызов — новый разбор D<n>; повтор той же гипотезы — отказ',
+    idempotency:
+      'Каждый вызов — новый разбор D<n>; повтор той же гипотезы — отказ. С --addendum — дополнение свежего разбора (до 5), не новый разбор',
     args: [
       state,
       work,
       {
         name: '--cause',
         value: 'text',
-        required: true,
-        description: 'coverage | approach | split | contradiction | environment | other',
+        required: false,
+        description:
+          'coverage | approach | split | contradiction | environment | other (обязательна без --addendum)',
+      },
+      {
+        name: '--addendum',
+        value: 'text',
+        required: false,
+        description:
+          'Дополнить свежий разбор того же засчитанного отказа (вторая причина, заметка ведущего; 10–2000 знаков): следующая попытка получит его вместе с разбором; граф не перерегистрируется, новый предел не даётся. Без --cause и --hypothesis',
       },
       {
         name: '--hypothesis',
@@ -2367,8 +2376,13 @@ export const workActionDataSchema = z.strictObject({
 export const diagnoseDataSchema = z.strictObject({
   workId: idSchema,
   diagnosis: leadDiagnosisSchema,
-  next: z.enum(['attempt', 'diagnose', 'replan', 'user-decision', 'lead-reset', 'user-reset']),
-  mode: z.enum(['lead', 'user']),
+  /** Нет у дополнения (`--addendum`): что дальше, оно не меняет. */
+  next: z
+    .enum(['attempt', 'diagnose', 'replan', 'user-decision', 'lead-reset', 'user-reset'])
+    .optional(),
+  mode: z.enum(['lead', 'user']).optional(),
+  /** Дополнение свежего разбора записано (`--addendum`, 0.1.0-alpha.68). */
+  amended: z.literal(true).optional(),
 });
 
 export const approveDataSchema = z.strictObject({

@@ -179,6 +179,8 @@ const ADDITIVE_EVENT_TYPES = new Set([
   'work.diagnosed',
   // alpha.67: сверка записи окружения smoke (`harness cleanup LS-…`).
   'environment.reconciled',
+  // alpha.68: дополнение разбора ведущего (`harness diagnose --addendum`).
+  'work.diagnosis-amended',
 ]);
 /** Аддитивные флаги прежних команд после H2. */
 const ADDITIVE_ARGS = new Set([
@@ -524,6 +526,27 @@ test('H3-01: прежние команды и схемы их данных не 
       // Ревью раунда 2: актёр шага пути (`track.steps[].actor`).
       if ('label' in o && 'state' in o && 'rework' in o) delete o.actor;
       if (Object.keys(o).length !== before) v = o;
+    }
+    // alpha.68: изменённые необязательные документы у run --source
+    // (`documentsDrift`), дополнения разбора (`addenda`), предел раундов
+    // ревью предмета (`rounds.remaining/free/since`, `used` с нуля).
+    if (k === 'properties' && v && typeof v === 'object') {
+      const o = { ...(v as Record<string, unknown>) };
+      const before = Object.keys(o).length;
+      if ('resumed' in o && 'works' in o) delete o.documentsDrift;
+      if ('failures' in o && 'epoch' in o) delete o.addenda;
+      if ('reviewerBinding' in o && 'findings' in o) {
+        delete o.planDigest;
+        delete o.counted;
+        delete o.changes;
+      }
+      if ('used' in o && 'max' in o) {
+        delete o.remaining;
+        delete o.free;
+        delete o.since;
+        o.used = { type: 'integer', exclusiveMinimum: 0, maximum: 9007199254740991 };
+      }
+      if (Object.keys(o).length !== before || 'used' in o) v = o;
     }
     // Ревью раунда 2: событие снятия удержания при отклонённом повторе.
     if (k === 'oneOf' && Array.isArray(v))

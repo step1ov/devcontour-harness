@@ -294,6 +294,16 @@ export const eventPayloads = {
     evidence: z.number().int().min(0),
   }),
   /**
+   * Ведущий дополнил разбор (`harness diagnose --addendum`, 0.1.0-alpha.68):
+   * номер разбора, номер дополнения и длина текста (текста нет).
+   */
+  'work.diagnosis-amended': z.strictObject({
+    diagnosis: z.string(),
+    addendum: z.number().int().min(1),
+    textLength: z.number().int().min(0),
+    evidence: z.number().int().min(0),
+  }),
+  /**
    * Принятое поручение получило изменённую постановку новой редакцией графа
    * (`WorkState.rework`): доработка `revision` после приёмки `acceptedSha`.
    * `budget: fresh` — у неё свой предел попыток, `carried` — сверх

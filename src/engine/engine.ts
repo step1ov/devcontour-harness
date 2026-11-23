@@ -6122,6 +6122,72 @@ export class Engine {
   }
 
   /**
+   * Дополнить свежий разбор ведущего (`harness diagnose --addendum`,
+   * 0.1.0-alpha.68): вторая причина или заметка к тому же засчитанному
+   * отказу, найденная после разбора, — без перерегистрации графа и без
+   * нового разбора. Следующая попытка получает разбор вместе с
+   * дополнениями. Причина, гипотеза, счёт разборов и право на сброс не
+   * меняются: тот же разбор второй предел не даёт. Отказ: идёт попытка,
+   * свежего разбора нет (засчитанный отказ после него — нужен новый разбор),
+   * больше пяти дополнений. Модель не вызывается.
+   */
+  amendDiagnosis(workId: string, input: { text: string; evidence?: readonly string[] }) {
+    return this.tx('task.retry', (tx) => {
+      this.assertNoUpdate(tx);
+      const w = tx.work(workId);
+      if (!w) throw new HarnessError('NOT_FOUND', 'Поручение не найдено: ' + workId);
+      if (w.status === 'done' || w.status === 'cancelled')
+        throw new HarnessError('NOT_READY', `Поручение ${workId} ${w.status}: дополнять нечего`);
+      if (w.activeRunId)
+        throw new HarnessError(
+          'NOT_READY',
+          `Идёт попытка ${w.activeRunId}: дополнение — после её окончания`,
+        );
+      const attempts = tx.attempts(workId);
+      const fresh = freshDiagnosis(w, attempts);
+      if (!fresh)
+        throw new HarnessError(
+          'NOT_READY',
+          pendingFailures(w, attempts).length
+            ? `Свежего разбора нет: засчитанный отказ после последнего разбора — новый разбор (harness diagnose --work ${workId} --cause … --hypothesis "…")`
+            : 'Свежего разбора последнего засчитанного отказа нет: дополнять нечего',
+        );
+      const text = maskSecrets(input.text).trim();
+      if (text.length < 10 || text.length > 2000)
+        throw new HarnessError('INVALID_INPUT', '--addendum: от 10 до 2000 знаков', [
+          { path: ['--addendum'], message: String(text.length) },
+        ]);
+      const evidence = (input.evidence ?? []).map((e) => maskSecrets(e).trim()).filter(Boolean);
+      if (evidence.length > 10 || evidence.some((e) => e.length > 1000))
+        throw new HarnessError('INVALID_INPUT', '--evidence: не больше 10, каждая до 1000 знаков');
+      const addenda = fresh.addenda ?? [];
+      if (addenda.length >= 5)
+        throw new HarnessError(
+          'INVALID_INPUT',
+          `У разбора ${fresh.id} уже 5 дополнений: новая причина — после следующего отказа новым разбором`,
+        );
+      const diagnosis: LeadDiagnosis = {
+        ...fresh,
+        addenda: [...addenda, { at: iso(this.now()), text, evidence }],
+      };
+      const diagnoses = w.leadRecovery!.diagnoses.map((d) => (d.id === fresh.id ? diagnosis : d));
+      tx.putWork({ ...w, leadRecovery: { ...w.leadRecovery!, diagnoses } });
+      tx.emit({
+        type: 'work.diagnosis-amended',
+        graphId: w.graphId,
+        workId,
+        payload: {
+          diagnosis: diagnosis.id,
+          addendum: diagnosis.addenda!.length,
+          textLength: text.length,
+          evidence: evidence.length,
+        },
+      });
+      return { workId, diagnosis };
+    });
+  }
+
+  /**
    * Решение ведущего или оператора по открытым находкам ревью кода поручения
    * (`review-accept`, docs/review-protocol.md §10): находки принимаются
    * известным ограничением с основанием. Решение — не одобрение и не повтор:

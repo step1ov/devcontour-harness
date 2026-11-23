@@ -512,6 +512,7 @@ const options = {
   summary: { type: 'string' },
   cause: { type: 'string' },
   hypothesis: { type: 'string' },
+  addendum: { type: 'string' },
   evidence: { type: 'string', multiple: true },
   diagnosis: { type: 'string' },
   recovery: { type: 'string' },
@@ -567,6 +568,7 @@ const flagOwners = {
   by: ['reapprove', 'retry'],
   cause: ['diagnose'],
   hypothesis: ['diagnose'],
+  addendum: ['diagnose'],
   evidence: ['diagnose'],
   diagnosis: ['retry'],
   recovery: ['init'],
@@ -1541,6 +1543,29 @@ async function run(
       }
     }
     case 'diagnose': {
+      if (v.addendum !== undefined) {
+        if (v.cause !== undefined || v.hypothesis !== undefined)
+          throw new HarnessError(
+            'INVALID_INPUT',
+            '--addendum дополняет свежий разбор: без --cause и --hypothesis (новый разбор — без --addendum)',
+            [{ path: ['--addendum'], message: 'exclusive' }],
+          );
+        const h = open(need('state'), binding(need('state')), true);
+        try {
+          return {
+            command,
+            data: {
+              ...h.engine.amendDiagnosis(need('work'), {
+                text: v.addendum,
+                ...(v.evidence ? { evidence: v.evidence } : {}),
+              }),
+              amended: true as const,
+            },
+          };
+        } finally {
+          h.close();
+        }
+      }
       const cause = need('cause');
       if (!(leadDiagnosisCauses as readonly string[]).includes(cause))
         throw new HarnessError('INVALID_INPUT', `--cause: ${leadDiagnosisCauses.join(' | ')}`, [

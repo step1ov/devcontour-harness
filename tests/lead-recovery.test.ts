@@ -633,3 +633,48 @@ test('doctor: действующее правило решений словам�
   assert.equal(usual.decisions?.items.find((i) => i.key === 'recovery.mode')?.source, 'derived');
   assert.ok(!usual.warnings?.some((w) => w.includes('recovery.mode')));
 });
+
+test('A68-1a: дополнение свежего разбора — без второго разбора и перерегистрации; исполнитель получает его; предела оно не даёт', async () => {
+  const { leadDiagnosisNote } = await import('../src/engine/runner.ts');
+  const ctx = setup({ mode: 'lead' });
+  const e = ctx.engine;
+  failOnce(e);
+  retryAuto(e);
+  failOnce(e);
+  // Дополнять нечего, пока разбора нет.
+  refused(() => e.amendDiagnosis('a', { text: 'вторая причина отказа' }), 'NOT_READY');
+  e.diagnose('a', { cause: 'environment', hypothesis: 'конфигурация gate не та' });
+  // Второй разбор того же отказа — отказ, как раньше.
+  refused(
+    () => e.diagnose('a', { cause: 'approach', hypothesis: 'другая гипотеза теста' }),
+    'NOT_READY',
+  );
+  const amended = e.amendDiagnosis('a', {
+    text: 'Ошибка очистки теста маскирует исходный отказ: token=abcdefabcdefabcdefabcdef',
+    evidence: ['лог gate'],
+  });
+  assert.equal(amended.diagnosis.id, 'D1');
+  assert.equal(amended.diagnosis.addenda?.length, 1);
+  assert.doesNotMatch(
+    amended.diagnosis.addenda[0]!.text,
+    /abcdefabcdefabcdef/,
+    'секрет замаскирован',
+  );
+  const d = work(e).leadRecovery!;
+  assert.equal(d.diagnoses.length, 1, 'нового разбора нет');
+  assert.equal(d.seq, 1);
+  const note = leadDiagnosisNote(d.diagnoses[0]!);
+  assert.match(note, /Lead addendum 1 to D1/);
+  assert.match(note, /маскирует исходный отказ/);
+  const events = ctx.store.events(0, 1000).filter((x) => x.type === 'work.diagnosis-amended');
+  assert.deepEqual((events[0]!.payload as { addendum: number }).addendum, 1);
+  for (let i = 2; i <= 5; i++) e.amendDiagnosis('a', { text: `ещё заметка ведущего ${i}` });
+  refused(
+    () => e.amendDiagnosis('a', { text: 'шестая заметка ведущего' }),
+    'INVALID_INPUT',
+    /5 дополнений/,
+  );
+  // После дополнения работа идёт дальше обычным повтором.
+  retryAuto(e);
+  assert.equal(e.claim('c1')?.attempt, 3);
+});
