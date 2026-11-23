@@ -126,11 +126,24 @@ export type ContextLimit = (typeof contextLimits)[number];
 /**
  * Причины отказа окружения, при которых повтор даст тот же отказ
  * (0.1.0-alpha.66): `sandbox-process-list` — gate запускает `ps`, а
- * песочница ОС проверок его не даёт. Попытка их не засчитывает, автоматического
- * повтора нет: ход ведущего — поменять gate или команду.
+ * песочница ОС проверок его не даёт; `sandbox-signal` — gate шлёт сигнал
+ * процессу вне песочницы (`kill EPERM`), `sandbox-browser` — gate запускает
+ * браузер, который в песочнице не стартует (0.1.0-alpha.68). Попытка их не
+ * засчитывает, автоматического повтора нет: ход ведущего — поменять gate или
+ * команду.
  */
-export const noRetryEnvironmentCauses = ['sandbox-process-list'] as const;
+export const noRetryEnvironmentCauses = [
+  'sandbox-process-list',
+  'sandbox-signal',
+  'sandbox-browser',
+] as const;
 export type NoRetryEnvironmentCause = (typeof noRetryEnvironmentCauses)[number];
+/** Код отказа gate, с которого начинается сводка evidence отказа без повтора. */
+export const NO_RETRY_GATE_CODES: Record<NoRetryEnvironmentCause, string> = {
+  'sandbox-process-list': 'GATE_SANDBOX_PROCESS_LIST',
+  'sandbox-signal': 'GATE_SANDBOX_SIGNAL',
+  'sandbox-browser': 'GATE_SANDBOX_BROWSER',
+};
 
 /**
  * Живость исполняющейся попытки по периодическому обходу controller
@@ -965,7 +978,7 @@ export const workStateSchema = z.strictObject({
   /**
    * Удержание gate по отказу окружения без повтора (0.1.0-alpha.66):
    * попытка этой работы упала `sandbox-process-list` на вызове `ps`, который
-   * есть уже в базе. Пока определение gate (`gateDigest`) то же и ведущий не
+   * есть уже в базе (или `sandbox-signal`, `sandbox-browser` — 0.1.0-alpha.68). Пока определение gate (`gateDigest`) то же и ведущий не
    * повторил эту работу (`retry --by lead`), работы репозитория, которым
    * нужен этот gate, не выдаются (`ENVIRONMENT_GATE_HELD`): тот же gate в той
    * же песочнице откажет снова. Держит, пока работа не принята и не отменена.
@@ -983,6 +996,12 @@ export const workStateSchema = z.strictObject({
        * (состояние до этого поля) — `os`.
        */
       isolation: z.enum(['os', 'none']).optional(),
+      /**
+       * Причина отказа без повтора, удержавшего gate (0.1.0-alpha.68):
+       * `sandbox-process-list`, `sandbox-signal`, `sandbox-browser`. Нет поля
+       * (состояние до этого поля) — `sandbox-process-list`.
+       */
+      cause: z.enum(noRetryEnvironmentCauses).optional(),
     })
     .optional(),
 });

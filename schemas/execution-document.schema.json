@@ -2063,6 +2063,14 @@
                   "os",
                   "none"
                 ]
+              },
+              "cause": {
+                "type": "string",
+                "enum": [
+                  "sandbox-process-list",
+                  "sandbox-signal",
+                  "sandbox-browser"
+                ]
               }
             },
             "required": [
@@ -2251,7 +2259,9 @@
           "environmentCause": {
             "type": "string",
             "enum": [
-              "sandbox-process-list"
+              "sandbox-process-list",
+              "sandbox-signal",
+              "sandbox-browser"
             ]
           },
           "failureFingerprint": {

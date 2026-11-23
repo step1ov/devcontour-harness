@@ -63,6 +63,8 @@ const causeLabels: Record<string, string> = {
   'sandbox-filesystem': 'sandbox denied file access',
   'sandbox-policy': 'sandbox policy not built, or protected paths changed before work',
   'sandbox-process-list': 'gate needs the process list (ps), unavailable in the OS sandbox',
+  'sandbox-signal': 'gate signals (kill) a process outside its OS sandbox',
+  'sandbox-browser': 'gate launches a browser, which does not start in the OS sandbox',
   'dependency-network': 'dependency install network or registry',
   'provider-auth': 'provider login',
   'provider-limit': 'provider limit or balance',

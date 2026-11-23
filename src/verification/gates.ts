@@ -69,6 +69,15 @@ import {
   processListSeen,
   type ProcessListCapability,
 } from './process-list.ts';
+import {
+  sandboxSignatureCall,
+  sandboxSignatureCodeMessage,
+  sandboxSignatureFailure,
+  sandboxSignatureMessage,
+  sandboxSignaturePartial,
+  sandboxSignaturePartialNote,
+  type SandboxSignatureCause,
+} from './sandbox-signatures.ts';
 import { sameNode, toolchainFacts, toolchainText, usesPnpm } from '../environment/toolchain-pin.ts';
 
 /** Длинное имя testcase заменяется хешем, а не обрезается: обрезка дала бы ложные совпадения. */
@@ -829,6 +838,19 @@ export async function processListAdded(
   base: string,
   sha: string,
 ): Promise<string[]> {
+  return addedCallFiles(repoPath, base, sha, processListCall);
+}
+
+/**
+ * Файлы, в которые изменение `base..sha` добавило строку, распознанную
+ * `isCall` (до 10). Те же исключения, что у `processListAdded`.
+ */
+export async function addedCallFiles(
+  repoPath: string,
+  base: string,
+  sha: string,
+  isCall: (line: string) => boolean,
+): Promise<string[]> {
   let out: string;
   try {
     out = await gitRawOutput(
@@ -854,7 +876,7 @@ export async function processListAdded(
       file = line.startsWith('+++ b/') ? line.slice(6) : undefined;
       continue;
     }
-    if (file && line.startsWith('+') && processListCall(line.slice(1))) files.add(file);
+    if (file && line.startsWith('+') && isCall(line.slice(1))) files.add(file);
   }
   return [...files].slice(0, 10);
 }
@@ -1101,6 +1123,8 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
   let reaped: ReapFailure | undefined;
   /** Провал назван только ненулевым кодом выхода, без иной причины. */
   let exitOnly = false;
+  /** Пометки к засчитанному провалу: часть упавших тестов закрыла песочница. */
+  const partialNotes: string[] = [];
   let passed = false,
     summary = '',
     log = `# harness gate ${gate.id}: cwd=${relative(root, gateCwd) || '.'} argv=${JSON.stringify(gate.command.map(redact))}${gate.kind === 'test' ? ` fresh=${redact(JSON.stringify(freshness))}` : ''}\n# toolchain: ${toolchainText(toolchain)}\n`,
@@ -1272,19 +1296,17 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       // (`process-list.ts`). Признак — в выводе, а при упавших testcases — в
       // тексте каждого из них; отказ подтверждает собственная проба harness
       // в той же песочнице, а не только напечатанное проверкой.
+      const failureTexts = counts?.failures
+        ? {
+            total: counts.failures,
+            texts: junitFailures(counts.xml, redact, Math.min(counts.failures, 200)).map(
+              (f) => `${f.message}\n${f.body}`,
+            ),
+          }
+        : undefined;
       const listing =
         run.policy.isolation.mode === 'os'
-          ? processListFailure(
-              result.stdout + '\n' + result.stderr,
-              counts?.failures
-                ? {
-                    total: counts.failures,
-                    texts: junitFailures(counts.xml, redact, Math.min(counts.failures, 200)).map(
-                      (f) => `${f.message}\n${f.body}`,
-                    ),
-                  }
-                : undefined,
-            )
+          ? processListFailure(result.stdout + '\n' + result.stderr, failureTexts)
           : undefined;
       if (listing && (await processListBackend.probe()).status === 'unavailable') {
         const tail = `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`;
@@ -1303,6 +1325,38 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
         kind = 'environment';
         cause = 'sandbox-process-list';
         throw new Error(processListMessage({ ...listing, line: redact(listing.line) }, tail));
+      }
+      // Сигнал процессу вне песочницы (`kill EPERM`) и браузер, который в
+      // песочнице ОС не стартует (0.1.0-alpha.68): те же правила, что у
+      // списка процессов, — признак у каждого упавшего теста, вызов не из
+      // изменения задачи. Часть упавших с признаком — пометка к провалу.
+      if (run.policy.isolation.mode === 'os') {
+        const output = result.stdout + '\n' + result.stderr;
+        for (const sandboxCause of [
+          'sandbox-signal',
+          'sandbox-browser',
+        ] as SandboxSignatureCause[]) {
+          const line = sandboxSignatureFailure(sandboxCause, output, failureTexts);
+          if (!line) continue;
+          const tail = `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`;
+          const base = run.trustedBase;
+          const added =
+            base && base !== sha
+              ? await addedCallFiles(cwd, base, sha, (l) => sandboxSignatureCall(sandboxCause, l))
+              : [];
+          if (added.length)
+            throw new Error(sandboxSignatureCodeMessage(sandboxCause, redact(line), added, tail));
+          kind = 'environment';
+          cause = sandboxCause;
+          throw new Error(sandboxSignatureMessage(sandboxCause, redact(line), tail));
+        }
+        for (const sandboxCause of [
+          'sandbox-signal',
+          'sandbox-browser',
+        ] as SandboxSignatureCause[]) {
+          const line = sandboxSignaturePartial(sandboxCause, output, failureTexts);
+          if (line) partialNotes.push(sandboxSignaturePartialNote(sandboxCause, redact(line)));
+        }
       }
       // Установка зависимостей, закреплённая политикой, упала на сети или
       // реестре пакетов, а признаков ошибки проекта нет: правка кода её не
@@ -1333,7 +1387,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
           diagnostic(result.stderr, result.stdout, redact),
         ]
           .filter(Boolean)
-          .join(': '),
+          .join(': ') + partialNotes.map((n) => '; ' + n).join(''),
       );
     }
     if (reportPath) {

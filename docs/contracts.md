@@ -1425,9 +1425,10 @@ hadAttempt}`. `engine.cancel(workId, reason?, by?)` (CLI `cancel` — `operator`
 `attempt.failed` (и `attempt.expired`) в той же транзакции под fencing.
 `cause` (`environmentCauses`): `sandbox-launch`, `sandbox-network`,
 `sandbox-filesystem`, `sandbox-policy`, `sandbox-process-list`,
-`dependency-network` — ставит gate в точке обнаружения
-(`TaskFailure.diagnosis`; `sandbox-process-list` — см. «Список процессов в
-песочнице проверок» ниже); `transport`, `preflight`
+`sandbox-signal`, `sandbox-browser`, `dependency-network` — ставит gate в
+точке обнаружения (`TaskFailure.diagnosis`; `sandbox-process-list`,
+`sandbox-signal`, `sandbox-browser` — см. «Список процессов в песочнице
+проверок» ниже); `transport`, `preflight`
 (`BlockedError` до работы), `provider-auth`, `provider-limit`, `stalled`,
 `shutdown` (прерывание штатной остановкой), `lease-expired` — по классу отказа
 и его признакам; `process-reap` — потомков сдерживаемой команды (gate,
@@ -2634,6 +2635,32 @@ none` снимает песочницу со всех проверок и не �
   смотрятся). Недоступен и такие файлы есть — предупреждение
   `sandbox-process-list: <файлы> вызывают ps/pgrep/top; …`; `--human`
   печатает строку возможности или это предупреждение.
+
+С 0.1.0-alpha.68 то же правило (признак у каждого упавшего теста, ни одного
+проваленного утверждения, только под `isolation.mode: os`, вызов не из
+добавленных строк изменения задачи) классифицирует ещё два отказа песочницы
+ОС проверок — без собственной пробы harness:
+
+- `sandbox-signal` (`GATE_SANDBOX_SIGNAL`) — проверка шлёт сигнал процессу
+  вне своей песочницы (обёртке gate, процессу хоста): `Error: kill EPERM`,
+  `kill: (…) - Operation not permitted`, объект ошибки с `syscall: 'kill'` и
+  `EPERM`. Вызов изменения — `process.kill(`, `os.kill(`, `kill` в shell.
+- `sandbox-browser` (`GATE_SANDBOX_BROWSER`) — проверка запускает браузер или
+  его демон, а он не стартует в песочнице: «browser daemon unavailable»,
+  отказ запуска Puppeteer/Playwright/Chrome (`BROWSER_LAUNCH`),
+  `bootstrap_check_in … Permission denied (1100)`. Вызов изменения —
+  `agent-browser`, `chromium.launch(`, импорт `playwright`/`puppeteer`.
+
+Общий провал обёртки gate без своей причины («Gate execution failed»),
+дописанный в JUnit к тестам с признаком, классификацию не отменяет, если
+вывод `node --test` (spec/TAP) сам называет упавшие тесты и итог прогона
+сходится. Признак лишь у части упавших тестов оставляет провал засчитанным, а
+текст называет эту часть пометкой «среди упавших есть признак отказа среды
+…». Семантика — та же, что у `sandbox-process-list`: попытка не засчитана
+(предел незасчитанных отказов работы), автоматического повтора нет, gate
+удержан (`ENVIRONMENT_GATE_HELD`, `WorkState.environmentHold.cause`) до смены
+определения gate или среды либо до `retry --by lead`; проба `ps` удержание по
+этим причинам не снимает.
 
 **`review-code`.** Технический обзор ветки, написанной вне harness: reviewer —
 по правилу ревью кода роли (`--role`; одна роль репозитория — по умолчанию) и

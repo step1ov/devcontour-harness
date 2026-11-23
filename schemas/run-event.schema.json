@@ -1252,6 +1252,8 @@
                 "sandbox-filesystem",
                 "sandbox-policy",
                 "sandbox-process-list",
+                "sandbox-signal",
+                "sandbox-browser",
                 "dependency-network",
                 "provider-auth",
                 "provider-limit",

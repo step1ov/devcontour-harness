@@ -1,10 +1,11 @@
 // Удержание gate отказом окружения без повтора (0.1.0-alpha.66,
 // `WorkState.environmentHold`): gate зовёт `ps` из базы, а в песочнице ОС
-// проверок список процессов недоступен. Чистые правила над записанным
+// проверок список процессов недоступен; с 0.1.0-alpha.68 — и сигнал процессу
+// вне песочницы (`sandbox-signal`), и браузер в ней (`sandbox-browser`). Чистые правила над записанным
 // состоянием: движок по ним не выдаёт, explain и представление называют
 // ход ведущего. Без node:* и zod.
 
-import type { WorkState } from '../contracts/execution.ts';
+import type { NoRetryEnvironmentCause, WorkState } from '../contracts/execution.ts';
 
 export type EnvironmentGateHold = NonNullable<WorkState['environmentHold']> & { workId: string };
 
@@ -12,8 +13,8 @@ export type EnvironmentGateHold = NonNullable<WorkState['environmentHold']> & { 
  * Действующие удержания: работа с удержанием не принята и не отменена,
  * определение gate в политике то же (`currentDigest` — `gateDigest` gate
  * репозитория; gate убран — удержания нет) и среда та же, что сделала отказ
- * отказом среды: режим изоляции проверок прежний (`os`), а проба списка
- * процессов этого процесса не ответила `available`.
+ * отказом среды: режим изоляции проверок прежний (`os`), а у отказа списка
+ * процессов — проба `ps` этого процесса не ответила `available`.
  */
 export function environmentGateHolds(
   works: readonly Pick<WorkState, 'id' | 'status' | 'environmentHold'>[],
@@ -24,10 +25,30 @@ export function environmentGateHolds(
     const h = w.environmentHold;
     if (!h || w.status === 'done' || w.status === 'cancelled') return [];
     if ((h.isolation ?? 'os') !== environment.isolation) return [];
-    if (environment.processList === 'available') return [];
+    if (environment.processList === 'available' && holdCause(h) === 'sandbox-process-list')
+      return [];
     return currentDigest(h.repositoryId, h.gate) === h.digest ? [{ ...h, workId: w.id }] : [];
   });
 }
+
+/** Причина удержания: у записей до 0.1.0-alpha.68 — список процессов. */
+export const holdCause = (h: { cause?: NoRetryEnvironmentCause }): NoRetryEnvironmentCause =>
+  h.cause ?? 'sandbox-process-list';
+
+const HELD_BECAUSE: Record<NoRetryEnvironmentCause, { ru: string; en: string }> = {
+  'sandbox-process-list': {
+    ru: 'зовёт ps, а в песочнице проверок список процессов недоступен',
+    en: 'it runs ps, and the check sandbox has no process list',
+  },
+  'sandbox-signal': {
+    ru: 'шлёт сигнал (kill) процессу вне песочницы проверок, а песочница это запрещает',
+    en: 'it signals (kill) a process outside the check sandbox, which the sandbox forbids',
+  },
+  'sandbox-browser': {
+    ru: 'запускает браузер, а в песочнице проверок он не стартует',
+    en: 'it launches a browser, which does not start in the check sandbox',
+  },
+};
 
 /** Удержания, которые касаются работы: тот же репозиторий и gate из её обязательных. */
 export const gateHoldsFor = (
@@ -43,15 +64,16 @@ export const gateHoldsFor = (
  * (человек или разбор ведущего), и строка называет его командой.
  */
 export function gateHoldLine(
-  h: Pick<EnvironmentGateHold, 'gate' | 'workId'>,
+  h: Pick<EnvironmentGateHold, 'gate' | 'workId' | 'cause'>,
   workId?: string,
   route?: RetryRoute,
 ): { ru: string; en: string } {
   const own = workId === h.workId;
   const lift = `harness retry --work ${h.workId} --by lead`;
+  const because = HELD_BECAUSE[holdCause(h)];
   const head = {
-    ru: `gate ${h.gate} удержан: зовёт ps, а в песочнице проверок список процессов недоступен${own ? '' : ` (отказ работы ${h.workId})`}`,
-    en: `gate ${h.gate} is held: it runs ps, and the check sandbox has no process list${own ? '' : ` (failure of ${h.workId})`}`,
+    ru: `gate ${h.gate} удержан: ${because.ru}${own ? '' : ` (отказ работы ${h.workId})`}`,
+    en: `gate ${h.gate} is held: ${because.en}${own ? '' : ` (failure of ${h.workId})`}`,
   };
   if (!route?.limit)
     return {
@@ -92,7 +114,7 @@ export interface RetryRoute {
  * (`MAX_NEUTRAL_FAILURES`) не исчерпаны, повторяет ведущий
  * (`harness retry --work <id> --by lead`); исчерпаны — ход по исчерпанию
  * (`exhaustedStep`): разбор или новый предел ведущим либо сброс человеком.
- * Отказ `sandbox-process-list` — одиночный прогон, а не цикл, но предел
+ * Отказ без повтора (`sandbox-process-list` и др.) — одиночный прогон, а не цикл, но предел
  * незасчитанных отказов он тратит: исправление ведущего, которое снова
  * падает, заканчивается у человека исчерпанным бюджетом.
  */
