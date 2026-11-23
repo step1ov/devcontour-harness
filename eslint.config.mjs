@@ -110,10 +110,10 @@ export default tseslint.config(
             },
             {
               regex:
-                '^\\.\\./(?!contracts/(errors|repair-policy|input-state|review-loop|operator-view-limits|plural|attempt-line|decision-rules)\\.ts$)',
+                '^\\.\\./(?!contracts/(errors|repair-policy|input-state|review-loop|operator-view-limits|plural|attempt-line|decision-rules|outline-weights)\\.ts$)',
               allowTypeImports: true,
               message:
-                'Проекции импортируют из harness только типы и листы contracts/errors, repair-policy, input-state, review-loop, operator-view-limits, plural, attempt-line, decision-rules.',
+                'Проекции импортируют из harness только типы и листы contracts/errors, repair-policy, input-state, review-loop, operator-view-limits, plural, attempt-line, decision-rules, outline-weights.',
             },
           ],
         },

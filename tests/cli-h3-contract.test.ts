@@ -85,6 +85,8 @@ const laterCommands: readonly string[] = [
   'preview-list',
   // Разбор ведущего повторных отказов (0.1.0-alpha.66).
   'diagnose',
+  // План выпуска ведущего (0.1.0-alpha.68).
+  'lead-outline',
 ];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [
@@ -874,6 +876,8 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.setup;
       // Обновления по последней проверке `harness update --check` (0.1.0-alpha.60).
       delete rest.updates;
+      // План выпуска ведущего или подсказка, что его нет (0.1.0-alpha.68).
+      delete rest.outline;
       return rest;
     }
     // Аддитивные поля находки плана или контракта: счёт раундов и решение

@@ -36,6 +36,7 @@ import { updateDataSchema, updateCheckStates } from './update.ts';
 import { sourceRefSchema } from './work.ts';
 import { setupProgressSchema } from './setup-progress.ts';
 import { leadDataSchema } from './lead.ts';
+import { outlineDataSchema } from './outline.ts';
 import { profilePinSchema, resolvedProfileSchema } from './profiles.ts';
 import {
   filePlanEntrySchema,
@@ -1698,6 +1699,31 @@ export const cliCommands = {
     ],
     refusals: ['NOT_FOUND', 'NOT_READY'],
   },
+  'lead-outline': {
+    description:
+      'План выпуска ведущего до первого графа: этапы × компоненты с грубым размером (S/M/L или число задач) и тем, кто их делает (writers, environment, owner). Прогноз считает незарегистрированные части плана объёмом выпуска; без плана status и панель подсказывают RELEASE_OUTLINE_MISSING, run не блокируется (0.1.0-alpha.68). Синоним: harness lead outline --file F',
+    writes: true,
+    idempotency:
+      'Тот же план — без изменений (changed: false); другой — новая редакция с причиной («план вырос: +…») и строкой журнала ведущего',
+    args: [
+      state,
+      {
+        name: '--file',
+        value: 'path',
+        required: true,
+        description:
+          'JSON {stages:[{id, title, kind: infra|product|deploy|other, components:[{id, title, size: S|M|L, tasks?, actor: writers|environment|owner, works?}]}], reason?}',
+      },
+      {
+        name: '--reason',
+        value: 'text',
+        required: false,
+        description:
+          'Почему план изменился (главнее reason файла); нет — «план вырос: +…» по разнице',
+      },
+    ],
+    refusals: ['NOT_FOUND'],
+  },
   'preview-start': {
     description:
       'Превью результата (docs/previews.md): собрать и запустить приложение по previews[] репозитория на принятом коммите в своём рабочем дереве каталога состояния, на свободном loopback-порту за loopback-прокси, с lifecycle репозитория при services; ждёт health и возвращает адрес. Harness сам останавливает превью по сроку (--ttl) и простою без запросов (--idle). Запускает только оператор или ведущий по его просьбе: внутри попытки и gate — отказ NOT_READY; run превью не запускает',
@@ -2253,6 +2279,24 @@ export const statusDataSchema = z.strictObject({
    * раскладка проекта harness (`.harness/`) неизвестна.
    */
   setupProgress: setupProgressSchema.optional(),
+  /**
+   * 0.1.0-alpha.68: план выпуска ведущего (`harness lead outline`). Записан —
+   * `recorded` с редакцией и объёмом (задач); нет, а работы есть и выпуск не
+   * закрыт, — `missing` с кодом `RELEASE_OUTLINE_MISSING`: прогноз тогда по
+   * зарегистрированным работам. Подсказка, а не блокировка: `run` идёт.
+   * Нет поля — работ нет, выпуск закрыт или `status --graph`.
+   */
+  outline: z
+    .strictObject({
+      state: z.enum(['recorded', 'missing']),
+      code: z.literal('RELEASE_OUTLINE_MISSING').optional(),
+      revision: z.number().int().positive().optional(),
+      units: z.number().int().positive().optional(),
+      stages: z.number().int().positive().optional(),
+      line: z.string().min(1).max(300),
+      lineEn: z.string().min(1).max(300),
+    })
+    .optional(),
   /**
    * Только `status --detail`: время снимка, почему стоит выдача и активные
    * попытки (стадия, длительность, владение, gates). Без флага поля нет.
@@ -3411,6 +3455,7 @@ export const cliDataSchemas = {
   'lead-note': leadDataSchema,
   'lead-end': leadDataSchema,
   'release-done': leadDataSchema,
+  'lead-outline': outlineDataSchema,
   'preview-start': previewStartDataSchema,
   'preview-stop': previewStopDataSchema,
   'preview-list': previewListDataSchema,

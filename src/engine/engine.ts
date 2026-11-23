@@ -46,6 +46,7 @@ import {
   type ExecutionTransaction,
   type ExecutionView,
   type LeadLog,
+  type ReleaseOutline,
   type FailureKind,
   type GraphState,
   type InputActor,
@@ -627,6 +628,10 @@ export class Engine {
             : {}),
         });
         if (reopen) reopened.push({ workId: order.id, rework: reopen });
+        // Первое появление работы в выпуске (alpha.68): по нему прогноз
+        // называет рост плана. Новая редакция прежнюю запись не трогает.
+        if (!prior && !tx.local('work-seen', WORKSPACE_OWNER, order.id))
+          tx.putLocal('work-seen', WORKSPACE_OWNER, order.id, { at, graphId: graph.id });
       }
       for (const prior of existing ? tx.works(graph.id) : [])
         if (!graph.orders.some((o) => o.id === prior.id) && prior.status !== 'done') {
@@ -4668,6 +4673,27 @@ export class Engine {
       const prev = tx.local('lead', WORKSPACE_OWNER, 'log') ?? { entries: [] };
       const { log, result } = fn(prev, this.now(), tx);
       tx.putLocal('lead', WORKSPACE_OWNER, 'log', log);
+      return result;
+    });
+  }
+
+  /**
+   * План выпуска ведущего (alpha.68): одна локальная запись `release-outline`
+   * у `@workspace`; `fn` получает прежний план и решает, что записать
+   * (`outline: undefined` — ничего не менять).
+   */
+  recordReleaseOutline<T>(
+    fn: (
+      prev: ReleaseOutline | undefined,
+      now: number,
+      view: ExecutionView,
+    ) => { outline?: ReleaseOutline; result: NotPromise<T> },
+  ): T {
+    return this.tx('lead.recorded', (tx) => {
+      this.assertNoUpdate(tx);
+      const prev = tx.local('release-outline', WORKSPACE_OWNER, 'outline');
+      const { outline, result } = fn(prev, this.now(), tx);
+      if (outline) tx.putLocal('release-outline', WORKSPACE_OWNER, 'outline', outline);
       return result;
     });
   }

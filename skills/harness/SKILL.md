@@ -785,6 +785,19 @@ connector — is invisible unless you say it:
   `--actor` run as yours (`--by lead` / `--actor lead`, with the same limits
   and refusals; the answer says `bySource`/`actorSource: lead-session`); a
   human's decision you pass on still needs `--by operator` / `--actor operator`.
+- **Declare the whole release first** — before the first graph, record the
+  release outline: stages × components with a rough size and who does them,
+  not only the next graph:
+  `$H lead outline --state <state> --file outline.json` with
+  `{"stages":[{"id":"infra","title":"Инфраструктура","kind":"infra","components":[{"id":"api-infra","title":"API: сборка и gates","size":"S","actor":"writers"}]},{"id":"product","title":"Продукт","kind":"product","components":[{"id":"site","title":"Сайт","size":"M","actor":"writers","works":["site-form"]}]},{"id":"deploy","title":"Выкладка","kind":"deploy","components":[{"id":"staging","title":"Стенд","size":"S","actor":"owner"}]}]}`
+  (`kind`: infra | product | deploy | other; `size`: S = 1, M = 2, L = 4 tasks,
+  or `tasks: N`; `actor`: writers | environment | owner; optional `works`
+  names the work IDs or task keys of a component). The forecast then counts
+  the unregistered parts as release volume instead of reading one graph as
+  100 %; without an outline `status`/`view` show `RELEASE_OUTLINE_MISSING`
+  (a hint — `run` is not blocked). When the plan changes, record it again
+  with `--reason "<why>"`: the view says «план вырос: +…» instead of an
+  unexplained drop.
 - At each step outside harness, one short line in plain words, the way you
   would tell a non-developer: `$H lead note "Обновляю документ DOC-2 в источнике задач"
 --state <state>` (up to 200 characters; no secrets, no paths, no logs).
@@ -845,7 +858,7 @@ not copy acceptance logs or attempt state into notes.
   (`profiles/*.json`); `--profile ./file.json --repository <dir>` resolves a
   profile kept in the repository. Profile resolution only reads manifests and
   never runs project commands.
-- **Lead log**: `$H lead begin|note|end`, `$H release done --summary` (see «Lead log»).
+- **Lead log**: `$H lead begin|note|end`, `$H lead outline --file`, `$H release done --summary` (see «Lead log»).
 - **Queue control**: `$H status`, `pause`, `resume`, `cancel`, `retry`
   (bounded by the policy), `deliver` (repeats delivery without models or Git
   integration); with a connector, `source-deliver --reprove` re-proves the

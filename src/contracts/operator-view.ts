@@ -10,6 +10,12 @@ import {
 
 import { resourcesViewSchema } from './view-resources.ts';
 import { setupProgressSchema } from './setup-progress.ts';
+import {
+  OUTLINE_ACTORS,
+  OUTLINE_LIMITS,
+  OUTLINE_SIZES,
+  OUTLINE_STAGE_KINDS,
+} from './outline-weights.ts';
 
 export * from './operator-view-limits.ts';
 
@@ -632,6 +638,55 @@ const decisionSchema = z
       need(d.findingId !== undefined, 'findingId', 'accepted-limitation требует findingId');
   });
 
+/** alpha.68: заполнение части плана выпуска работами. */
+const outlineFillSchema = z.enum(['registered', 'partial', 'unregistered']);
+
+/**
+ * alpha.68: план выпуска ведущего в прогнозе (`forecast.outline`) или
+ * подсказка `RELEASE_OUTLINE_MISSING`, что его нет (`run` не блокируется).
+ */
+const forecastOutlineSchema = z.strictObject({
+  state: z.enum(['recorded', 'missing']),
+  code: z.literal('RELEASE_OUTLINE_MISSING').optional(),
+  revision: z.number().int().positive().optional(),
+  recordedAt: isoTimeSchema.optional(),
+  units: count.optional(),
+  registered: count.optional(),
+  unregistered: count.optional(),
+  beyond: z.number().int().positive().optional(),
+  stages: z
+    .array(
+      z.strictObject({
+        id,
+        title: freeText(T.title).optional(),
+        kind: z.enum(OUTLINE_STAGE_KINDS),
+        state: outlineFillSchema,
+        units: count,
+        registered: count,
+        percent: z.number().int().min(0).max(100),
+        components: z
+          .array(
+            z.strictObject({
+              id,
+              title: freeText(T.title).optional(),
+              size: z.enum(OUTLINE_SIZES).optional(),
+              tasks: z.number().int().positive().optional(),
+              actor: z.enum(OUTLINE_ACTORS),
+              state: outlineFillSchema,
+              units: count,
+              registered: count,
+              percent: z.number().int().min(0).max(100),
+              works: z.array(id).max(OUTLINE_LIMITS.viewWorks).optional(),
+            }),
+          )
+          .max(OUTLINE_LIMITS.componentsPerStage),
+      }),
+    )
+    .max(OUTLINE_LIMITS.stages)
+    .optional(),
+  line: z.string().min(1).max(T.line),
+});
+
 /**
  * Прогноз выпуска (ревизия 4, P11): готовность всего объёма и время; те же
  * строки, что в `status --human`. Неизвестное время — без поля `remaining`
@@ -680,10 +735,45 @@ const forecastSchema = z.strictObject({
           retry: z.enum(['repair', 'answer']).optional(),
           /** Доработка после приёмки: `percent` — готовность доработки, работа уже в `done`. */
           rework: z.literal(true).optional(),
+          /**
+           * alpha.68: этап идущей попытки к приёмке — доли попытки на начале
+           * (`from`) и конце (`to`) этапа, начало этапа, типичная длительность.
+           */
+          stageProgress: z
+            .strictObject({
+              stage: z.enum(['code', 'checks', 'review', 'integration']),
+              from: z.number().min(0).max(1),
+              to: z.number().min(0).max(1),
+              since: isoTimeSchema.optional(),
+              typicalMs: count.optional(),
+              samples: z.number().int().positive().optional(),
+            })
+            .optional(),
           line: z.string().min(1).max(T.line),
         }),
       )
       .max(L.forecastWorks)
+      .optional(),
+    /** alpha.68: последний рост плана — что добавлено, готовность без него и с ним. */
+    growth: z
+      .strictObject({
+        at: isoTimeSchema,
+        added: z.array(z.string().min(1).max(200)).max(10),
+        before: z.number().int().min(0).max(100),
+        after: z.number().int().min(0).max(100),
+        by: z.enum(['works', 'outline']),
+        reason: freeText(OUTLINE_LIMITS.reason).optional(),
+        line: z.string().min(1).max(T.line),
+      })
+      .optional(),
+    /** alpha.68: «если ведущий не добавит задач» — последний отрезок при открытой сессии ведущего. */
+    conditional: z.literal(true).optional(),
+    /** alpha.68: плана нет, все работы — инфраструктура: её доля выпуска (оценка). */
+    infraShare: z
+      .strictObject({
+        share: z.number().min(0).max(1),
+        line: z.string().min(1).max(T.line),
+      })
       .optional(),
     /**
      * Ревизия 6: планируемые задачи (вес 0) — ещё не утверждённые; `line` —
@@ -771,8 +861,29 @@ const forecastSchema = z.strictObject({
       })
       .optional(),
     humanWait: z.strictObject({ works: count, ms: count, since: isoTimeSchema.optional() }),
+    /** alpha.68: незарегистрированные части плана выпуска — оценка по размеру. */
+    outline: z
+      .strictObject({
+        units: count,
+        ownerUnits: z.number().int().positive().optional(),
+        loMs: count.optional(),
+        hiMs: count.optional(),
+        basis: z.enum(['attempts', 'default']),
+        line: z.string().min(1).max(T.line),
+      })
+      .optional(),
+    /** alpha.68: код принят, ведущий завершает — начало отрезка, сколько идёт, превышена ли его доля. */
+    finishing: z
+      .strictObject({
+        since: isoTimeSchema.optional(),
+        elapsedMs: count.optional(),
+        exceeded: z.literal(true).optional(),
+      })
+      .optional(),
     line: z.string().min(1).max(T.line),
   }),
+  /** alpha.68: план выпуска ведущего или подсказка, что его нет. */
+  outline: forecastOutlineSchema.optional(),
   assumptions: z.array(z.string().min(1).max(400)).max(10),
 });
 

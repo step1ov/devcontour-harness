@@ -30,6 +30,16 @@ import { sha256Hex } from './sha256.ts';
 import { resourcesOf, type ResourcesInput, type ResourcesView } from './view-resources.ts';
 import { decisionSettingsView, type Bilingual, type DecisionSetting } from './decisions.ts';
 import { causeShort, type TrackStep } from './track.ts';
+import {
+  INFRA_DEFAULT_SHARE,
+  OUTLINE_DEFAULT_TASK_MS,
+  type OutlineActor,
+  type OutlineSize,
+  type OutlineStageKind,
+} from '../contracts/outline-weights.ts';
+import { fitOutline, type OperatorOutlineInput, type OutlineFillState } from './outline.ts';
+
+export type { OperatorOutlineInput } from './outline.ts';
 
 export {
   OPERATOR_VIEW_VERSION,
@@ -220,8 +230,21 @@ export interface ForecastView {
       retry?: 'repair' | 'answer';
       /** Доработка после приёмки: `percent` — её готовность. */
       rework?: true;
+      /**
+       * alpha.68: этап идущей попытки к приёмке — доля попытки на начале
+       * этапа (`from`) и на его конце (`to`), начало этапа и типичная
+       * длительность (p50 закончившихся этапов). Панель: `from + (to − from) ×
+       * min(0.95, (сейчас − since) / typicalMs)`.
+       */
+      stageProgress?: ForecastStageProgress;
       line: string;
     }[];
+    /** alpha.68: последний рост плана — что добавлено и как изменилась готовность. */
+    growth?: ForecastGrowth;
+    /** alpha.68: «если ведущий не добавит задач» — последний отрезок при открытой сессии ведущего. */
+    conditional?: true;
+    /** alpha.68: без плана выпуска и только с инфраструктурой — её доля выпуска (оценка). */
+    infraShare?: { share: number; line: string };
     /**
      * Ревизия 6: планируемые задачи — ещё не утверждённые (задачи
      * несогласованных снимков, задачи выпуска вне снимков, зарегистрированные
@@ -282,9 +305,92 @@ export interface ForecastView {
     lead?: { ms: number; samples: number; line: string };
     /** Ожидание людей и ведущего сейчас (`ms` — самое долгое) — в прогноз не входит. */
     humanWait: { works: number; ms: number; since?: string };
+    /** alpha.68: незарегистрированные части плана выпуска — оценка по размеру. */
+    outline?: ForecastOutlineTime;
+    /**
+     * alpha.68: код принят, ведущий завершает: с конца последней попытки
+     * (`since`), сколько идёт (`elapsedMs`) и превысил ли он свою обычную
+     * долю (`exceeded` — оценка ведущего тогда не показывается).
+     */
+    finishing?: { since?: string; elapsedMs?: number; exceeded?: true };
     line: string;
   };
+  /** alpha.68: план выпуска ведущего или подсказка, что его нет. */
+  outline?: ForecastOutlineView;
   assumptions: string[];
+}
+
+/** alpha.68: этап идущей попытки к приёмке (карточка работы). */
+export interface ForecastStageProgress {
+  stage: 'code' | 'checks' | 'review' | 'integration';
+  from: number;
+  to: number;
+  since?: string;
+  typicalMs?: number;
+  samples?: number;
+}
+
+/** alpha.68: последний рост плана выпуска. */
+export interface ForecastGrowth {
+  at: string;
+  /** Что добавлено: ключи задач, ID работ или компоненты плана. */
+  added: string[];
+  /** Готовность без добавленного и с ним, %. */
+  before: number;
+  after: number;
+  /** Работы (`works`) или план выпуска (`outline`). */
+  by: 'works' | 'outline';
+  reason?: string;
+  line: string;
+}
+
+/** alpha.68: время незарегистрированных частей плана. */
+export interface ForecastOutlineTime {
+  /** Задач у исполнителей и окружения (входят во время). */
+  units: number;
+  /** Задач у владельца (во время не входят). */
+  ownerUnits?: number;
+  loMs?: number;
+  hiMs?: number;
+  /** По попыткам выпуска или по типичной длительности задачи (нет попыток). */
+  basis: 'attempts' | 'default';
+  line: string;
+}
+
+/** alpha.68: план выпуска в прогнозе. */
+export interface ForecastOutlineView {
+  state: 'recorded' | 'missing';
+  /** `RELEASE_OUTLINE_MISSING` — плана нет (подсказка, не блокировка). */
+  code?: 'RELEASE_OUTLINE_MISSING';
+  revision?: number;
+  recordedAt?: string;
+  /** Объём плана, зарегистрированная и незарегистрированная части (задач), работы сверх плана. */
+  units?: number;
+  registered?: number;
+  unregistered?: number;
+  beyond?: number;
+  stages?: {
+    id: string;
+    title?: string;
+    kind: OutlineStageKind;
+    state: OutlineFillState;
+    units: number;
+    registered: number;
+    percent: number;
+    components: {
+      id: string;
+      title?: string;
+      size?: OutlineSize;
+      tasks?: number;
+      actor: OutlineActor;
+      state: OutlineFillState;
+      units: number;
+      registered: number;
+      percent: number;
+      works?: string[];
+    }[];
+  }[];
+  line: string;
 }
 
 /** Принятые работы связки, оставленные на проверку человеку в источнике (ревизия 5). */
@@ -747,6 +853,8 @@ export interface OperatorWorkInput {
   restoredFrom?: 'cancelled-rework';
   /** Ревизия 7: работа инфраструктуры harness (`kind: infra`). */
   kind?: 'infra';
+  /** alpha.68: первое появление работы в выпуске (`work-seen`); нет — до alpha.68. */
+  seenAt?: string;
   resultSha?: string;
   dependsOn?: readonly string[];
   stage: {
@@ -1324,6 +1432,8 @@ export interface OperatorViewInput {
   updates?: UpdatesView;
   /** Журнал ведущего (ревизия 6, `harness lead …`, `release done`); нет — ведущий не записывал. */
   lead?: OperatorLeadInput;
+  /** План выпуска ведущего (alpha.68, `harness lead outline`); нет — не записан. */
+  outline?: OperatorOutlineInput;
   /** Что задействовано (ревизия 6, P4-8); нет — поля нет. */
   resources?: ResourcesInput;
   /** Живые превью результата (receipt `harness preview-start`); нет — поля нет. */
@@ -1552,6 +1662,13 @@ export function viewToken(view: OperatorView | WorkDetailView): string {
     const wait: Record<string, unknown> = { ...view.forecast.time.humanWait };
     delete wait.ms;
     time.humanWait = wait;
+    // Отрезок ведущего (alpha.68): в токене — его начало, а не сколько идёт.
+    if (view.forecast.time.finishing) {
+      const finishing: Record<string, unknown> = { ...view.forecast.time.finishing };
+      delete finishing.elapsedMs;
+      delete finishing.exceeded;
+      time.finishing = finishing;
+    }
     rest.forecast = { ...view.forecast, time };
   }
   if ('stage' in view && view.stage?.progress) rest.stage = stageTokenBody(view.stage);
@@ -2367,6 +2484,28 @@ function forecastOf(
     const k = name ? (STAGE_ORDER as readonly string[]).indexOf(name) : -1;
     return k < 0 ? 0 : k / STAGE_ORDER.length;
   };
+  // Этап идущей попытки к приёмке (alpha.68, карточка работы): доли попытки
+  // на начале и конце этапа — те же веса этапов, что у готовности.
+  const stageGroup: Record<string, ForecastStageProgress['stage']> = {
+    prepare: 'code',
+    writer: 'code',
+    gates: 'checks',
+    review: 'review',
+    integration: 'integration',
+  };
+  const stageProgressOf = (w: OperatorWorkInput): ForecastStageProgress | undefined => {
+    const stage = stageGroup[w.stage.name];
+    if (!stage) return undefined;
+    const from = stageWeight(w.stage.name);
+    const typical = i.stageTypical?.[w.stage.name];
+    return {
+      stage,
+      from: round4(from),
+      to: round4(from + 1 / STAGE_ORDER.length),
+      ...(w.stage.since ? { since: w.stage.since } : {}),
+      ...(typical ? { typicalMs: typical.p50Ms, samples: typical.samples } : {}),
+    };
+  };
   // Наибольший дошедший этап всех попыток работы: повтор не роняет готовность.
   // У доработки после приёмки — только попытки её редакции.
   const reached = new Map<string, number>();
@@ -2468,6 +2607,33 @@ function forecastOf(
   ).length;
   const left = total - done;
   const codeAccepted = left === 0 && !reworks.length;
+  // План выпуска ведущего (alpha.68): незарегистрированные части плана —
+  // объём выпуска с весом 0. Появление единицы в выпуске — первая
+  // регистрация работы или первый снимок задачи; неизвестно — раньше всех.
+  const seenOf = (u: Unit) => {
+    const xs = [ms(u.work?.seenAt), ms(u.firstSeenAt)].filter(Number.isFinite);
+    return xs.length ? Math.min(...xs) : -Infinity;
+  };
+  const fit = i.outline
+    ? fitOutline(
+        i.outline,
+        live.map((u) => ({
+          id: u.id,
+          ...(u.key ? { key: u.key } : {}),
+          ...(u.work ? { workId: u.work.id } : {}),
+          infra: u.work?.kind === 'infra',
+          at: seenOf(u),
+          weight: unitWeight(u),
+        })),
+      )
+    : undefined;
+  const extra = fit?.unregistered ?? 0;
+  // Без плана, когда все известные работы — инфраструктура: она — 30 %
+  // выпуска (оценка), продукт ещё не спланирован.
+  const infraOnly = !i.outline && live.every((u) => u.work?.kind === 'infra');
+  const codeScale = infraOnly ? INFRA_DEFAULT_SHARE : 1;
+  // Весь выпуск принят: код зарегистрированных работ и ничего сверх них по плану.
+  const wholeAccepted = codeAccepted && extra === 0 && !infraOnly;
   // Шаги ведущего (ревизия 6): план и согласование, вопросы, доставка в
   // источник, итоговый отчёт — вместе доля выпуска `LEAD_SHARE`, поровну между
   // шагами. Шаг без предмета (вопросов не было, связки нет) в объём не входит.
@@ -2498,7 +2664,11 @@ function forecastOf(
     {
       step: 'plan',
       weight: LEAD_STEP,
-      done: !plannedUnits.length && !live.some((u) => u.work?.status === 'draft'),
+      done:
+        !plannedUnits.length &&
+        !live.some((u) => u.work?.status === 'draft') &&
+        extra === 0 &&
+        !infraOnly,
     },
     ...(i.questions.length || sourceQuestions
       ? [
@@ -2531,10 +2701,17 @@ function forecastOf(
   // Код — (1 − LEAD_SHARE) выпуска, шаги ведущего — LEAD_SHARE. Пока задачи,
   // доработки или шаги ведущего остаются, «100 %» не показывается.
   // Итоговый отчёт ведущего закрывает выпуск: 100 %.
-  const percentOf = (w: number, t: number, finished: boolean) =>
+  // Незарегистрированный объём плана (`more`) — в знаменателе; без плана и
+  // только с инфраструктурой код весит `INFRA_DEFAULT_SHARE` выпуска.
+  const percentOf = (w: number, t: number, finished: boolean, more = extra) =>
     finished
       ? 100
-      : Math.min(99, Math.round(100 * ((t ? ((1 - LEAD_SHARE) * w) / t : 0) + leadWeighted)));
+      : Math.min(
+          99,
+          Math.round(
+            100 * ((t + more ? ((1 - LEAD_SHARE) * codeScale * w) / (t + more) : 0) + leadWeighted),
+          ),
+        );
   const percent = percentOf(weighted, total, releaseDone);
   // Попытки всех работ выпуска, в том числе отменённых: длительность попытки
   // — по ним (P4-7: «ни одна не закончилась» не говорится при закончившихся).
@@ -2554,7 +2731,9 @@ function forecastOf(
     ends.length &&
     own.every((a) => a.status !== 'active') &&
     live.every((u) => unitWeight(u) === 1) &&
-    !reworks.length
+    !reworks.length &&
+    extra === 0 &&
+    !infraOnly
       ? Math.max(startedAt, ...ends)
       : undefined;
   const elapsedMs =
@@ -2747,6 +2926,7 @@ function forecastOf(
       : en
         ? `${name}: accepted earlier; rework ${started ? '' : '— '}${status}`
         : `${name}: принято ранее; доработка ${started ? '' : '— '}${status}`;
+    const stageProgress = running ? stageProgressOf(w) : undefined;
     return {
       workId: w.id,
       ...(u.key ? { key: name } : {}),
@@ -2754,6 +2934,7 @@ function forecastOf(
       ...(n > 0 ? { attempt: { n, max } } : {}),
       ...(retry ? { retry } : {}),
       ...(rework ? { rework: true as const } : {}),
+      ...(stageProgress ? { stageProgress } : {}),
       line: line.slice(0, T.line),
     };
   });
@@ -2770,7 +2951,7 @@ function forecastOf(
     const t = approvedUnits.length;
     const w = approvedUnits.reduce((n, u) => n + unitWeight(u), 0);
     const d = approvedUnits.filter((u) => unitWeight(u) === 1).length;
-    const pct = percentOf(w, t, false);
+    const pct = percentOf(w, t, false, 0);
     const est = estimateOf(approvedUnits);
     const r = est.remaining ?? est.rough;
     return {
@@ -2803,7 +2984,7 @@ function forecastOf(
   const lastNote = i.lead?.entries.filter((e) => e.kind === 'note').at(-1);
   const releaseState: 'in-work' | 'code-accepted' | 'done' = releaseDone
     ? 'done'
-    : codeAccepted
+    : wholeAccepted
       ? 'code-accepted'
       : 'in-work';
   const releaseLine =
@@ -2818,9 +2999,147 @@ function forecastOf(
         : en
           ? 'code is in work'
           : 'код в работе';
+  // Последний отрезок (alpha.68): всё зарегистрированное принято или идёт,
+  // плана сверх него нет, сессия ведущего открыта — он ещё может добавить задачи.
+  const leadSession = i.lead?.session;
+  const leadActive = !!leadSession && !leadSession.endedAt && ms(leadSession.until) > i.now;
+  const conditional =
+    !releaseDone &&
+    extra === 0 &&
+    !infraOnly &&
+    leadActive &&
+    live.every(
+      (u) =>
+        unitWeight(u) === 1 ||
+        reopened(u.work) ||
+        (u.work !== undefined && runningStages.has(u.work.stage.name)),
+    );
+  // Рост плана (alpha.68): последние добавленные работы или задачи сверх
+  // плана выпуска (первое появление позже начала выпуска) или запись плана
+  // с большим объёмом — что выросло и готовность без этого и с ним.
+  const growth = ((): ForecastGrowth | undefined => {
+    if (releaseDone) return undefined;
+    const firstAt = live.reduce((n, u) => Math.min(n, seenOf(u)), Infinity);
+    const late = live.filter(
+      (u) => Number.isFinite(seenOf(u)) && seenOf(u) > firstAt && (!fit || fit.beyond.has(u.id)),
+    );
+    const lateAt = late.reduce((n, u) => Math.max(n, seenOf(u)), -Infinity);
+    const change = [...(i.outline?.changes ?? [])].reverse().find((x) => x.after > x.before);
+    const changeAt = change ? ms(change.at) : -Infinity;
+    const name = (u: Unit) => text(c, u.key, 200) ?? u.work?.id ?? u.id;
+    const say = (added: string[], before: number) => {
+      const list = added.map((x) => `+${x}`).join(', ');
+      return (
+        en
+          ? `plan grew: ${list} (was ${before} % → now ${percent} %)`
+          : `план вырос: ${list} (было ${before} % → стало ${percent} %)`
+      ).slice(0, T.line);
+    };
+    if (Number.isFinite(lateAt) && lateAt >= changeAt) {
+      const group = late.filter((u) => seenOf(u) === lateAt);
+      const before = percentOf(
+        weighted - group.reduce((n, u) => n + unitWeight(u), 0),
+        total - group.length,
+        false,
+      );
+      const added = group.map(name).slice(0, 10);
+      return {
+        at: iso(lateAt),
+        added,
+        before,
+        after: percent,
+        by: 'works',
+        line: say(added, before),
+      };
+    }
+    if (change && Number.isFinite(changeAt)) {
+      const before = percentOf(
+        weighted,
+        total,
+        false,
+        Math.max(0, extra - (change.after - change.before)),
+      );
+      const added = change.added.map((x) => text(c, x, 120) ?? x).slice(0, 10);
+      return {
+        at: change.at,
+        added,
+        before,
+        after: percent,
+        by: 'outline',
+        reason: text(c, change.reason, 300) ?? change.reason,
+        line: say(added.length ? added : [`~${change.after - change.before}`], before),
+      };
+    }
+    return undefined;
+  })();
+  const outlineView = ((): ForecastOutlineView | undefined => {
+    if (!i.outline || !fit) {
+      if (releaseDone) return undefined;
+      return {
+        state: 'missing',
+        code: 'RELEASE_OUTLINE_MISSING',
+        line: en
+          ? 'no release outline — the forecast covers the registered works only: the lead records it with harness lead outline --file F'
+          : 'плана выпуска нет — прогноз по одному графу: ведущий записывает его командой harness lead outline --file F',
+      };
+    }
+    const o = i.outline;
+    const registered = fit.stages.reduce(
+      (n, st) => n + st.components.reduce((m, x) => m + Math.min(x.units, x.registered), 0),
+      0,
+    );
+    const ttl = (x: string) => (c.titles ? { title: text(c, x, T.title)! } : {});
+    return {
+      state: 'recorded',
+      revision: o.revision,
+      recordedAt: o.recordedAt,
+      units: o.units,
+      registered,
+      unregistered: extra,
+      ...(fit.beyond.size ? { beyond: fit.beyond.size } : {}),
+      stages: fit.stages.map((st) => ({
+        id: st.id,
+        ...ttl(st.title),
+        kind: st.kind,
+        state: st.state,
+        units: st.units,
+        registered: st.registered,
+        percent: st.percent,
+        components: st.components
+          .map((x) => ({ ...x, ...ttl(x.title) }))
+          .map((x) => {
+            if (!c.titles) delete (x as { title?: string }).title;
+            return x;
+          }),
+      })),
+      line: (en
+        ? `release outline: ${o.stages.length} stage(s), ~${o.units} task(s); registered ~${registered}, not yet ~${extra}` +
+          (fit.beyond.size ? `, beyond the outline ${fit.beyond.size}` : '')
+        : `план выпуска: ${ruCount(o.stages.length, ['этап', 'этапа', 'этапов'])}, ~${ruCount(o.units, ['задача', 'задачи', 'задач'])}; зарегистрировано ~${registered}, ещё нет ~${extra}` +
+          (fit.beyond.size ? `, сверх плана ${fit.beyond.size}` : '')
+      ).slice(0, T.line),
+    };
+  })();
+  const infraLine = en
+    ? `infrastructure is ${Math.round(INFRA_DEFAULT_SHARE * 100)} % of the release (estimate), the product is not planned yet`
+    : `инфраструктура — ${Math.round(INFRA_DEFAULT_SHARE * 100)} % выпуска (оценка), продукт ещё не спланирован`;
+  const outlineTail = extra
+    ? en
+      ? `, not registered by the release outline: ~${extra}`
+      : `, по плану выпуска ещё не зарегистрировано: ~${extra}`
+    : '';
+  const qualifier = conditional
+    ? en
+      ? ' — unless the lead adds tasks'
+      : ' — если ведущий не добавит задач'
+    : '';
+  const tail =
+    outlineTail +
+    (infraOnly ? `; ${infraLine}` : '') +
+    (releaseState === 'code-accepted' ? '' : qualifier);
   const progressLine =
-    releaseState === 'code-accepted'
-      ? `${en ? 'done' : 'готово'} ~${percent} % · ${releaseLine}`
+    (releaseState === 'code-accepted'
+      ? `${en ? 'done' : 'готово'} ~${percent} %${qualifier} · ${releaseLine}`
       : en
         ? `done ~${percent} %, ${left} of ${total} task(s) left` +
           (inWork ? `, ${inWork} in work` : '') +
@@ -2829,34 +3148,106 @@ function forecastOf(
         : `готово ~${percent} %, осталось задач: ${left} из ${total}` +
           (inWork ? `, в работе: ${inWork}` : '') +
           (reworks.length ? `, доработок после приёмки: ${reworks.length}` : '') +
-          (plannedUnits.length ? `, планируемых (не утверждены): ${plannedUnits.length}` : '');
+          (plannedUnits.length ? `, планируемых (не утверждены): ${plannedUnits.length}` : '')) +
+    tail;
   const elapsedText =
     elapsedMs === undefined
       ? en
         ? 'not started yet'
         : 'ещё не начиналось'
       : (en ? 'elapsed ' : 'прошло ') + durationText(elapsedMs, c.lang);
-  const remainingText =
-    estimate === 'nothing'
+  // Код принят, ведущий завершает (alpha.68): «осталось немного», сколько
+  // идёт его отрезок; оценку ведущего, которую он уже превысил, не показывать.
+  const finishSince = Number.isFinite(lastEnd) ? lastEnd : undefined;
+  const finishElapsed = finishSince !== undefined ? Math.max(0, i.now - finishSince) : undefined;
+  const finishing =
+    releaseState === 'code-accepted'
+      ? {
+          ...(finishSince !== undefined
+            ? { since: iso(finishSince), elapsedMs: finishElapsed! }
+            : {}),
+          ...(leadTime && finishElapsed !== undefined && finishElapsed > leadTime.ms
+            ? { exceeded: true as const }
+            : {}),
+        }
+      : undefined;
+  // Незарегистрированные части плана (alpha.68): объём × длительность задачи
+  // (по попыткам выпуска, без них — типичная), нижняя — параллельно.
+  const outlineTime = ((): ForecastOutlineTime | undefined => {
+    if (!fit || !extra) return undefined;
+    const precise = samples.length >= OPERATOR_VIEW_TYPICAL_MIN_SAMPLES;
+    const per = precise
+      ? { lo: rank(samples, 0.5), hi: rank(samples, 0.9) }
+      : samples.length
+        ? { lo: samples[0]!, hi: samples[samples.length - 1]! }
+        : OUTLINE_DEFAULT_TASK_MS;
+    const basis = samples.length ? ('attempts' as const) : ('default' as const);
+    const n = fit.timedUnits;
+    const span =
+      n > 0
+        ? {
+            loMs: Math.round(Math.max(n / concurrency, 1) * per.lo * attemptsPerTask),
+            hiMs: Math.round(n * per.hi * attemptsPerTask),
+          }
+        : undefined;
+    const owner = fit.ownerUnits;
+    const line = en
+      ? (span
+          ? `by the release outline ~${n} more task(s): ~${spanText(span)} (estimate by size)`
+          : 'by the release outline nothing more for the writers') +
+        (owner ? `, owner steps ~${owner} — not in the estimate` : '')
+      : (span
+          ? `по плану выпуска ещё ~${ruCount(n, ['задача', 'задачи', 'задач'])}: ~${spanText(span)} (оценка по размеру)`
+          : 'по плану выпуска у исполнителей больше ничего') +
+        (owner ? `, шагов владельца ~${owner} — в оценку не входят` : '');
+    return {
+      units: n,
+      ...(owner ? { ownerUnits: owner } : {}),
+      ...(span ?? {}),
+      basis,
+      line: line.slice(0, T.line),
+    };
+  })();
+  const remainingText = finishing
+    ? (en
+        ? 'code accepted · a little left: the lead is finishing'
+        : 'код принят · осталось немного: ведущий завершает') +
+      (finishElapsed !== undefined
+        ? en
+          ? ` (for ${durationText(finishElapsed, c.lang)}` +
+            (leadTime && !finishing.exceeded
+              ? `, usually ~${durationText(leadTime.ms, c.lang)})`
+              : ')')
+          : ` (идёт ${durationText(finishElapsed, c.lang)}` +
+            (leadTime && !finishing.exceeded
+              ? `, обычно ~${durationText(leadTime.ms, c.lang)})`
+              : ')')
+        : '')
+    : estimate === 'nothing' && (extra || infraOnly)
       ? en
-        ? 'nothing left'
-        : 'осталось: ничего'
-      : remaining
-        ? (en ? 'left ~' : 'осталось ~') + spanText(remaining)
-        : rough
-          ? (en ? 'left ~' : 'осталось ~') +
-            spanText(rough) +
-            (en
-              ? ` (rough, from ${byAttempts(rough.samples, true)})`
-              : ` (грубо, по ${byAttempts(rough.samples, false)})`)
-          : en
-            ? 'time left unknown (no attempt has finished yet)'
-            : 'сколько осталось — неизвестно (ещё ни одна попытка не закончилась)';
-  const leadText = leadTime
-    ? en
-      ? ` + lead work ~${durationText(leadTime.ms, c.lang)}`
-      : ` + работа ведущего ~${durationText(leadTime.ms, c.lang)}`
-    : '';
+        ? 'registered works: nothing left'
+        : 'по зарегистрированным работам — ничего'
+      : estimate === 'nothing'
+        ? en
+          ? 'nothing left'
+          : 'осталось: ничего'
+        : remaining
+          ? (en ? 'left ~' : 'осталось ~') + spanText(remaining)
+          : rough
+            ? (en ? 'left ~' : 'осталось ~') +
+              spanText(rough) +
+              (en
+                ? ` (rough, from ${byAttempts(rough.samples, true)})`
+                : ` (грубо, по ${byAttempts(rough.samples, false)})`)
+            : en
+              ? 'time left unknown (no attempt has finished yet)'
+              : 'сколько осталось — неизвестно (ещё ни одна попытка не закончилась)';
+  const leadText =
+    leadTime && !finishing
+      ? en
+        ? ` + lead work ~${durationText(leadTime.ms, c.lang)}`
+        : ` + работа ведущего ~${durationText(leadTime.ms, c.lang)}`
+      : '';
   // «до 45 мин», но «меньше минуты» — без «до».
   const upTo =
     waitMs < 30_000
@@ -2867,7 +3258,14 @@ function forecastOf(
       ? `; waiting for people now: ${humanWait.works} work(s), ${upTo} — not in the estimate`
       : `; ждут людей сейчас: ${humanWait.works}, ${upTo} — в прогноз не входит`
     : '';
-  const timeLine = `${elapsedText} · ${remainingText}${leadText}${waitText}`;
+  const outlineText = outlineTime
+    ? ` + ${outlineTime.line}`
+    : infraOnly
+      ? en
+        ? ' · the product is not planned yet — not in the estimate'
+        : ' · продукт ещё не спланирован — в оценку не входит'
+      : '';
+  const timeLine = `${elapsedText} · ${remainingText}${outlineText}${leadText}${waitText}`;
   const assumptions = en
     ? [
         basis === 'scope'
@@ -2899,6 +3297,9 @@ function forecastOf(
       ...(reworks.length ? { rework: reworks.length } : {}),
       ...(added.length ? { added } : {}),
       ...(works.length ? { works } : {}),
+      ...(growth ? { growth } : {}),
+      ...(conditional ? { conditional: true as const } : {}),
+      ...(infraOnly ? { infraShare: { share: INFRA_DEFAULT_SHARE, line: infraLine } } : {}),
       ...(approvedProgress && plannedLine
         ? {
             planned: {
@@ -2944,8 +3345,11 @@ function forecastOf(
           }
         : {}),
       humanWait,
+      ...(outlineTime ? { outline: outlineTime } : {}),
+      ...(finishing ? { finishing } : {}),
       line: timeLine.slice(0, T.line),
     },
+    ...(outlineView ? { outline: outlineView } : {}),
     assumptions,
   };
 }

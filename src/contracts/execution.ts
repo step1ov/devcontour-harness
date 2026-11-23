@@ -12,6 +12,7 @@ import {
 } from './primitives.ts';
 import { workGraphSchema, workOrderSchema } from './work.ts';
 import { leadLogSchema } from './lead.ts';
+import { releaseOutlineSchema, workSeenSchema } from './outline.ts';
 import { contextPinSchema, contextSnapshotSchema } from './context.ts';
 import { toolchainFactsSchema } from './toolchain.ts';
 import {
@@ -1502,6 +1503,16 @@ export const localSchemas = {
    * журнала (`lead.recorded`).
    */
   lead: leadLogSchema,
+  /**
+   * План выпуска ведущего (0.1.0-alpha.68): одна запись `outline` у
+   * `@workspace` (`releaseOutlineSchema`). Пишет только `harness lead outline`.
+   */
+  'release-outline': releaseOutlineSchema,
+  /**
+   * Первое появление работы в выпуске (0.1.0-alpha.68): запись по ID работы у
+   * `@workspace` (`workSeenSchema`). Пишет регистрация графа для новой работы.
+   */
+  'work-seen': workSeenSchema,
 } as const;
 export type LocalNamespace = keyof typeof localSchemas;
 export type LocalValue<N extends LocalNamespace> = z.infer<(typeof localSchemas)[N]>;
