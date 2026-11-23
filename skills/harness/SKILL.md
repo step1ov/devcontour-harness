@@ -757,7 +757,11 @@ connector — is invisible unless you say it:
   refused; each of your records extends it). Your harness commands are
   written to your log only while your session is active, or when they say
   `--by lead` / `--actor lead` (`diagnose` is always yours); a command with `--actor operator` (or
-  `--by <human>`) is the operator's and does not extend your lease.
+  `--by <human>`) is the operator's and does not extend your lease. Inside
+  your open session, `retry` without `--by` and `input-answer` without
+  `--actor` run as yours (`--by lead` / `--actor lead`, with the same limits
+  and refusals; the answer says `bySource`/`actorSource: lead-session`); a
+  human's decision you pass on still needs `--by operator` / `--actor operator`.
 - At each step outside harness, one short line in plain words, the way you
   would tell a non-developer: `$H lead note "Обновляю документ DOC-2 в источнике задач"
 --state <state>` (up to 200 characters; no secrets, no paths, no logs).

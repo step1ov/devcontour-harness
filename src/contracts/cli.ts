@@ -517,7 +517,7 @@ export const cliCommands = {
         value: 'text',
         required: false,
         description:
-          'lead — сброс ведущего по свежему техническому разбору (policy.recovery.mode: lead, предел leadResets); operator или без флага — решение оператора (operator явно не пишется в журнал ведущего и при его активной сессии)',
+          'lead — сброс ведущего по свежему техническому разбору (policy.recovery.mode: lead, предел leadResets); operator — решение оператора (operator явно не пишется в журнал ведущего и при его активной сессии); без флага — lead в открытой сессии ведущего (те же права и отказы), иначе operator',
       },
       {
         name: '--diagnosis',
@@ -1174,7 +1174,7 @@ export const cliCommands = {
         value: 'text',
         required: false,
         description:
-          'Кто отвечает: operator (по умолчанию; словами человека) или lead — только на неблокирующие запросы или с разрешения inputPolicy.leadAnswers (technical: технические вопросы с --reason; maxSeverity: до порога серьёзности)',
+          'Кто отвечает: operator (словами человека) или lead — только на неблокирующие запросы или с разрешения inputPolicy.leadAnswers (technical: технические вопросы с --reason; maxSeverity: до порога серьёзности); без флага — lead в открытой сессии ведущего (те же права и отказы), иначе operator',
       },
       {
         name: '--reason',
@@ -2340,6 +2340,13 @@ export const workActionDataSchema = z.strictObject({
       granted: z.number().int().min(1).optional(),
     })
     .optional(),
+  /**
+   * `retry` (0.1.0-alpha.68): кем исполнен повтор и откуда актёр — `flag`
+   * (`--by`), `lead-session` (без `--by` в открытой сессии ведущего: как
+   * `--by lead`) или `default` (без флага и без сессии: оператор).
+   */
+  by: z.enum(['lead', 'operator']).optional(),
+  bySource: z.enum(['flag', 'lead-session', 'default']).optional(),
 });
 
 /** `harness diagnose`: записанный разбор, что дальше и действующее правило. */
@@ -3250,6 +3257,12 @@ export const inputAnswerDataSchema = z.strictObject({
   request: inputRequestSchema,
   answer: inputAnswerSchema,
   changed: z.boolean(),
+  /**
+   * Откуда актёр ответа (0.1.0-alpha.68): `flag` (`--actor`), `lead-session`
+   * (без `--actor` в открытой сессии ведущего: как `--actor lead`) или
+   * `default` (без флага и без сессии: оператор).
+   */
+  actorSource: z.enum(['flag', 'lead-session', 'default']).optional(),
 });
 export const inputContextDataSchema = z.strictObject({
   requestId: requestIdSchema,
