@@ -8,6 +8,8 @@ import {
   WORKSPACE_OWNER,
   contextDigest,
   contextDigestMatches,
+  canonicalContext,
+  canonicalContextDigest,
   contextChanges,
   contextChangeText,
   contextIssues,
@@ -288,7 +290,41 @@ export class Harness {
     const absent = needed.filter((id) => !context.sources.some((s) => s.id === id));
     if (absent.length)
       throw new HarnessError('NOT_READY', 'В снимке нет нужного контекста: ' + absent.join(', '));
-    return context;
+    return this.knownContext(graph.id, context);
+  }
+
+  /**
+   * Входящий снимок в форме, которую harness исполняет (0.1.0-alpha.68):
+   * уже записанный снимок (тот же digest) — как есть; снимок с тем же
+   * содержанием, что у действующего согласования графа или последнего раунда
+   * ревью его плана (в любом порядке источников; в том числе записанный
+   * прежней версией), — тот записанный снимок; иначе — каноническая форма
+   * (источники по ID). Так порядок источников не порождает новый digest, а
+   * согласования, закрепления попыток и раунды прежних версий остаются
+   * теми же байтами.
+   */
+  private knownContext(graphId: string, snapshot: ContextSnapshot): ContextSnapshot;
+  private knownContext(
+    graphId: string,
+    snapshot: ContextSnapshot | undefined,
+  ): ContextSnapshot | undefined;
+  private knownContext(graphId: string, snapshot: ContextSnapshot | undefined) {
+    if (!snapshot) return snapshot;
+    const stored = (digest: string | null | undefined) =>
+      digest
+        ? this.engine.read((v) => v.local('context-snapshots', WORKSPACE_OWNER, digest))
+        : undefined;
+    if (stored(contextDigest(snapshot))) return snapshot;
+    const canonical = canonicalContextDigest(snapshot);
+    const candidates = [
+      this.engine.read((v) => v.graph(graphId)?.approval?.context?.digest),
+      this.engine.reviews('plan', graphId).at(-1)?.contextDigest,
+    ];
+    for (const digest of candidates) {
+      const known = stored(digest);
+      if (known && canonicalContextDigest(known) === canonical) return known;
+    }
+    return canonicalContext(snapshot);
   }
 
   /**
@@ -635,7 +671,10 @@ export class Harness {
         `Запрос ${id} (${request.kind}, ${request.lifecycle}): снимок с ответом строится для вопроса в answered или заменённого (superseded)`,
       );
     const base = this.contextOf(request.graphId);
-    const snapshot = withInput(base, inputContextSource(request, answer, options.messages));
+    const snapshot = this.knownContext(
+      request.graphId,
+      withInput(base, inputContextSource(request, answer, options.messages)),
+    );
     const issues = contextIssues(snapshot);
     if (issues.length)
       throw new HarnessError('INVALID_INPUT', 'Снимок контекста: ' + issues.join('; '));
@@ -888,7 +927,9 @@ export class Harness {
     // они переносятся в него, и новый снимок проходит обычное ревью плана
     // вместе с ними — иначе правка контекста молча вернула бы ответ в
     // «ждёт применения».
-    return carried && contextDigest(carried) === contextDigest(approved) ? approved : carried;
+    return carried && canonicalContextDigest(carried) === canonicalContextDigest(approved)
+      ? approved
+      : carried;
   }
 
   /**
@@ -979,7 +1020,8 @@ export class Harness {
     }
     // Снимок с неприменённым ответом на вопрос исполнителя запуск не
     // активирует — до платного ревью: продолжение после ответа — applyInput.
-    const unapplied = this.engine.read((v) => this.engine.unappliedInputs(v, input.context));
+    const incoming = this.knownContext(graph.id, input.context);
+    const unapplied = this.engine.read((v) => this.engine.unappliedInputs(v, incoming));
     if (unapplied.length)
       throw new HarnessError(
         'INPUT_REQUIRED',
@@ -989,7 +1031,7 @@ export class Harness {
       );
     // Применённые ответы действующего согласования остаются в нём: запуск с
     // тем же снимком без них — не смена контекста.
-    const context = this.withAppliedInputs(graph.id, input.context);
+    const context = this.knownContext(graph.id, this.withAppliedInputs(graph.id, incoming));
     // Снимок с новым ответом не активируется под идущими попытками графа —
     // отказ до платного ревью.
     const busy = this.engine.read((v) => this.engine.inputActivationRefusal(v, graph.id, context));

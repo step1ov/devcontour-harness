@@ -5,6 +5,7 @@ import {
   HarnessError,
   CONTEXT_LIMITS,
   contextDigest,
+  canonicalContext,
   contextIssues,
   contextSnapshotSchema,
   digestOf,
@@ -1040,11 +1041,12 @@ export function buildSnapshot(input: {
       })),
     );
   const graph = parsed.data;
-  const context: ContextSnapshot = {
+  // Каноническая форма (alpha.68): порядок источников не меняет снимок.
+  const context: ContextSnapshot = canonicalContext({
     apiVersion: API_VERSION,
     sources: [...sources, ...(input.local ?? [])],
     missing,
-  };
+  });
   // Пределы снимка контекста проверяются здесь, а не только при запуске:
   // source-snapshot и source-check называют их как отказ eligibility.
   for (const issue of contextLimitIssues(context))

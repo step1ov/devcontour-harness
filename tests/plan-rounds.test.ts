@@ -13,7 +13,7 @@ import {
   contextChanges,
   contextDigest,
   contextDigestMatches,
-  legacyContextDigest,
+  canonicalContextDigest,
   roundBudget,
   sha256,
   sourceDigest,
@@ -103,15 +103,15 @@ const open = (maxAttempts = 3) => {
   return { h, requests };
 };
 
-test('A68-1b: digest снимка не зависит от порядка источников; прежний digest узнаётся', () => {
+test('A68-1b: каноническая форма снимка не зависит от порядка источников', () => {
   const a = source('alpha', 'A');
   const b = source('beta', 'B');
   const one = snap(a, b);
   const two = snap(b, a);
-  assert.equal(contextDigest(one), contextDigest(two));
-  assert.notEqual(legacyContextDigest(one), legacyContextDigest(two));
-  assert.ok(contextDigestMatches(legacyContextDigest(two), two), 'digest прежней версии узнаётся');
-  assert.ok(contextDigestMatches(contextDigest(one), two));
+  assert.equal(canonicalContextDigest(one), canonicalContextDigest(two));
+  assert.notEqual(contextDigest(one), contextDigest(two), 'digest — байты снимка, как прежде');
+  assert.ok(contextDigestMatches(contextDigest(two), two));
+  assert.ok(contextDigestMatches(contextDigest(one), two), 'каноническая форма узнаётся');
   assert.ok(!contextDigestMatches(contextDigest(snap(a)), two));
   const changes = contextChanges(snap(a, b), snap(source('beta', 'B2'), source('gamma', 'G')));
   assert.deepEqual(

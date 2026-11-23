@@ -3599,7 +3599,7 @@ export class Engine {
         // остановка уже не держится; иначе продолжение — только applyInput.
         // Сведение для истории: решает перенос его чтение (`carryAllowed`).
         ...(lifecycle === 'superseded'
-          ? { carry: this.carryMovedOn(tx, { ...request, lifecycle: 'superseded' }) }
+          ? { carry: this.carryAllowed(tx, { ...request, lifecycle: 'superseded' }) }
           : {}),
         // Снятие устаревшего переноса не стирает запись замены (преемник,
         // перенос, причина): она остаётся прежним закрытием.
@@ -3743,20 +3743,6 @@ export class Engine {
       : this.host.basis.orderDigest(work, view) !== basis.orderDigest;
   }
 
-  /**
-   * Сведение для истории замены (`closed.carry`): работа уже ушла из
-   * исходной остановки (или изменилась постановка) — правило переноса до
-   * 0.1.0-alpha.68. Решает перенос `carryAllowed`.
-   */
-  private carryMovedOn(view: ExecutionView, request: InputRequest) {
-    if (request.lifecycle !== 'superseded') return false;
-    const answer = latestAnswer(request);
-    if (!answer) return false;
-    const orderChanged = this.orderMoved(view, view.work(request.workId), request.originBasis);
-    if (answer.kind === 'requirement-change') return orderChanged;
-    return orderChanged || !this.originHolds(view, request);
-  }
-
   carryAllowed(view: ExecutionView, request: InputRequest) {
     if (request.lifecycle !== 'superseded') return false;
     const answer = latestAnswer(request);
@@ -3766,13 +3752,25 @@ export class Engine {
     // трекера одной ревизией перенос не открывает.
     const orderChanged = this.orderMoved(view, work, request.originBasis);
     if (answer.kind === 'requirement-change') return orderChanged;
-    // Уточнение заменённого запроса переносится всегда (0.1.0-alpha.68):
-    // `applyInput` берёт только `answered`, и заменённый вопрос, чья
-    // остановка снова держится (новая редакция вернула работу в готовую с той
-    // же постановкой и попыткой вопроса), иначе не имел бы публичного пути к
-    // работе, ради которой его задали. Перенос в держащуюся остановку — то же
-    // продолжение: ревью снимка с ответом, основание и обычный повтор.
-    return true;
+    return orderChanged || !this.originHolds(view, request);
+  }
+
+  /**
+   * Перенос, который принимают `proposeCarry` и `carryInput` (0.1.0-alpha.68):
+   * правило переноса (`carryAllowed`) или уточнение заменённого вопроса, чья
+   * исходная остановка снова держится (новая редакция вернула работу в
+   * готовую с той же постановкой и попыткой вопроса). `applyInput` берёт
+   * только `answered`, и без этого у такого вопроса не было бы публичного
+   * пути к работе. Правило неприменённых ответов (`unappliedInputs`) — прежнее.
+   */
+  private carryPermitted(view: ExecutionView, request: InputRequest) {
+    if (this.carryAllowed(view, request)) return true;
+    const answer = latestAnswer(request);
+    return (
+      request.lifecycle === 'superseded' &&
+      answer?.kind === 'clarification' &&
+      this.originHolds(view, request)
+    );
   }
 
   /** Неприменённые источники ответов снимка с правилом переноса этого движка. */
@@ -4186,7 +4184,7 @@ export class Engine {
         problems.push(`запрос ${request.lifecycle}, нужен superseded`);
       const answer = latestAnswer(request);
       if (!answer) return { request, problems: [...problems, 'ответа нет'] };
-      if (!this.carryAllowed(v, request))
+      if (!this.carryPermitted(v, request))
         problems.push('правило переноса не позволяет перенести ответ');
       if (!this.carriesAnswer(v, request, answer, contextDigest))
         problems.push('снимок контекста не содержит последний ответ');
@@ -4255,7 +4253,7 @@ export class Engine {
       )
         return { carried: true as const, changed: false, request };
       this.expectVersion(request, options.expectedVersion);
-      if (!this.carryAllowed(tx, request))
+      if (!this.carryPermitted(tx, request))
         throw new HarnessError(
           'INPUT_REQUIRED',
           answer.kind === 'requirement-change'
@@ -4270,7 +4268,9 @@ export class Engine {
       const snapshot =
         this.host.input?.snapshot?.(options.contextDigest, tx) ??
         tx.local('context-snapshots', WORKSPACE_OWNER, options.contextDigest);
-      const unapplied = this.unappliedInputs(tx, snapshot);
+      // Ответ, который переносится этим вызовом, — не «неприменённый»: его
+      // правило — `carryPermitted` выше; другие неприменённые ответы — отказ.
+      const unapplied = this.unappliedInputs(tx, snapshot).filter((u) => u.requestId !== id);
       if (unapplied.length)
         throw new HarnessError(
           'INPUT_REQUIRED',

@@ -98,10 +98,10 @@ export const sourceDigest = (entry: Omit<ContextSourceEntry, 'digest'>) =>
 
 /**
  * Каноническая форма снимка (0.1.0-alpha.68): источники и отсутствующие — по
- * ID. Порядок, в котором их собрал ведущий или источник, не меняет снимок:
- * те же источники в другом порядке — тот же digest и то же согласование.
- * Порядок файлов внутри источника — часть его digest (`sourceDigest`) и не
- * меняется.
+ * ID. Harness приводит к ней снимки, которые получает (`run`, `review`,
+ * снимок с ответом, снимок задач): те же источники в другом порядке — тот же
+ * снимок, тот же digest и то же согласование. Порядок файлов внутри
+ * источника — часть его digest (`sourceDigest`) и не меняется.
  */
 export const canonicalContext = (snapshot: ContextSnapshot): ContextSnapshot => ({
   ...snapshot,
@@ -109,24 +109,30 @@ export const canonicalContext = (snapshot: ContextSnapshot): ContextSnapshot => 
   missing: [...snapshot.missing].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
 });
 
-/** Digest снимка контекста — по канонической форме (порядок источников не важен). */
-export const contextDigest = (snapshot: ContextSnapshot) => digestOf(canonicalContext(snapshot));
+/**
+ * Digest снимка — байты в его порядке, как до 0.1.0-alpha.68: им записаны
+ * согласования, закрепления попыток и ключи хранилища. Порядок не важен,
+ * потому что harness приводит входящие снимки к канонической форме или к уже
+ * записанному снимку того же содержания (`Harness`), а не потому, что digest
+ * его игнорирует.
+ */
+export const contextDigest = (snapshot: ContextSnapshot) => digestOf(snapshot);
+
+/** Digest канонической формы: одинаков у снимков с теми же источниками в любом порядке. */
+export const canonicalContextDigest = (snapshot: ContextSnapshot) =>
+  digestOf(canonicalContext(snapshot));
 
 /**
- * Digest снимка по правилу до 0.1.0-alpha.68 (байты в переданном порядке).
- * Им записаны раунды и согласования прежних версий: сверка с ними
- * (`contextDigestMatches`) не требует нового раунда после обновления.
+ * Относится ли записанный digest к этому снимку: тот же снимок или его
+ * каноническая форма.
  */
-export const legacyContextDigest = (snapshot: ContextSnapshot) => digestOf(snapshot);
-
-/** Относится ли записанный digest к этому снимку (канонический или прежний). */
 export const contextDigestMatches = (
   digest: string | null | undefined,
   snapshot: ContextSnapshot | undefined,
 ) =>
   snapshot === undefined
     ? digest === undefined || digest === null
-    : digest === contextDigest(snapshot) || digest === legacyContextDigest(snapshot);
+    : digest === contextDigest(snapshot) || digest === canonicalContextDigest(snapshot);
 
 /**
  * Что изменилось в снимке против прежнего: добавленные, убранные и
