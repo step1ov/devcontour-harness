@@ -241,7 +241,7 @@ async function mergeEnvFile(file: string, env: Record<string, string>) {
   // переменные политики с тем же префиксом (`HX_DB_USER`) не трогаются.
   const prior =
     typeof current[SERVICE_PORT_KEYS] === 'string'
-      ? (current[SERVICE_PORT_KEYS]).split(',').filter(Boolean)
+      ? current[SERVICE_PORT_KEYS].split(',').filter(Boolean)
       : [];
   const keys = [...new Set([...prior, ...Object.keys(env)])].sort().join(',');
   const tmp = `${file}.${process.pid}.tmp`;
