@@ -38,8 +38,8 @@ const role = schema?.properties?.approved
   : schema?.properties?.verdicts
     ? 'refuter'
     : schema?.properties?.action
-    ? 'lead'
-    : 'writer';
+      ? 'lead'
+      : 'writer';
 const counterPath = `${scenarioPath}.${runtime}.${role}.count`;
 const index = existsSync(counterPath) ? Number(readFileSync(counterPath, 'utf8')) : 0;
 writeFileSync(counterPath, String(index + 1));
