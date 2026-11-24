@@ -10,6 +10,7 @@ import {
   type ExecutionPolicy,
   type WorkState,
   gateTimeoutMs,
+  strictSandbox,
 } from '../contracts/index.ts';
 import { OversizedFile, readBounded } from '../environment/bounded-read.ts';
 import {
@@ -395,7 +396,7 @@ async function decide(
     const deadline = Date.now() + limitMs;
     const signal = AbortSignal.timeout(limitMs);
     const prepared = preparation.guard(
-      ctx.policy.isolation.mode === 'os',
+      strictSandbox(ctx.policy),
       dir,
       preparesTree(repo.lifecycle ?? ctx.policy.lifecycle, repo.prepare, repo.dependencyStore),
     );

@@ -33,6 +33,7 @@ import {
   type AttemptState,
   INPUT_SOURCE_KIND,
   latestAnswer,
+  strictSandbox,
 } from '../contracts/index.ts';
 import { inputContextSource, withInput, type InputMessageRef } from '../engine/input-requests.ts';
 import { cliAdapter } from '../agents/cli-adapter.ts';
@@ -959,7 +960,7 @@ export class Harness {
     // Удержание gate отказом `ps` снимается, когда список процессов в
     // песочнице стал доступен: проба (одна на процесс) — до выдачи.
     if (
-      this.policy.isolation.mode === 'os' &&
+      strictSandbox(this.policy) &&
       this.engine.read((v) => this.engine.environmentGateHolds(v)).length
     )
       await processListBackend.probe().catch(() => undefined);

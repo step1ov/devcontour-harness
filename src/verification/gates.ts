@@ -25,7 +25,10 @@ import {
   type ToolchainFacts,
   gateTimeoutMs,
   gateTimeoutText,
+  strictSandbox,
+  writeGuardActive,
 } from '../contracts/index.ts';
+import { guardEntries, guardedArgv } from '../environment/write-guard.ts';
 import { ReapFailure, command, git, gitOutput, gitRawOutput } from '../environment/process.ts';
 import {
   isolation,
@@ -59,6 +62,7 @@ import {
   type CheckManifest,
 } from './property.ts';
 import { keepGateArtifacts } from './gate-artifacts.ts';
+import { uiFailureArtifacts, uiGateEnvironment } from './ui-gates.ts';
 import { ReapedGate } from './reaped.ts';
 import {
   processListCall,
@@ -487,7 +491,11 @@ export async function prepareReportPath(root: string, path: string, escape: stri
  */
 export async function runCheck(
   // Нужна только политика изоляции: проверки ревьюера исполняются вне сервера.
-  h: { config: Pick<ExecutionPolicy, 'isolation'> },
+  // Режим и граница записи (alpha.69): нет режима — облегчённый.
+  h: {
+    config: Pick<ExecutionPolicy, 'isolation'> &
+      Partial<Pick<ExecutionPolicy, 'harnessMode' | 'writeGuard'>>;
+  },
   options: {
     argv: string[];
     cwd: string;
@@ -552,7 +560,15 @@ export async function runCheck(
   /** Первый запуск, чьи потомки не остановлены или не пересчитаны. */
   let reaped: ReapFailure | undefined;
   try {
-    if (h.config.isolation.mode === 'os') {
+    if (writeGuardActive(h.config)) {
+      // Облегчённый режим: одна граница — запись только в свои каталоги
+      // проверки и кеши инструментов; Docker, сеть, браузер, порты и
+      // процессы открыты. Временный каталог — свой (scratch).
+      assertExecutable(argv[0]!, env.PATH, options.cwd);
+      // Нет механизма — отказ среды, как недоступная изоляция строгого режима.
+      argv = guardedArgv(argv, guardEntries(h.config, [...options.write, scratch, marks]));
+      env = { ...env, TMPDIR: scratch };
+    } else if (strictSandbox(h.config)) {
       const support = isolationBackend.check();
       if (!support.ok)
         throw new Error(
@@ -1364,7 +1380,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
   try {
     // Снимок защищённых путей до проверки: запреты песочницы видят только
     // путь операции, перенос готового каталога ими не закрыт.
-    const before = run.policy.isolation.mode === 'os' ? protectedSnapshot(root) : undefined;
+    const before = strictSandbox(run.policy) ? protectedSnapshot(root) : undefined;
     // Нагрузка до запуска: gate, который сам перегрузил процессор (пул
     // потоков без предела), не должен заработать повтор своей нагрузкой.
     loadBefore = hostLoad.read();
@@ -1388,6 +1404,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
           ...Object.fromEntries(
             Object.entries(propertyEnv).map(([k, v]) => [k.replace(/^DEVCONTOUR_/, 'HARNESS_'), v]),
           ),
+          ...('ui' in gate && gate.ui ? uiGateEnvironment(gate.ui) : {}),
         },
         redact,
         timeoutMs: gateTimeoutMs(gate, run.policy),
@@ -1475,10 +1492,9 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
         manifest = counts;
         await keepReport(counts.xml);
       }
-      const blocked =
-        run.policy.isolation.mode === 'os'
-          ? sandboxBlockedHosts(result.stdout + '\n' + result.stderr, run.policy.isolation.domains)
-          : [];
+      const blocked = strictSandbox(run.policy)
+        ? sandboxBlockedHosts(result.stdout + '\n' + result.stderr, run.policy.isolation.domains)
+        : [];
       if (blocked.length) {
         kind = 'environment';
         cause = 'sandbox-network';
@@ -1527,10 +1543,9 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
             ),
           }
         : undefined;
-      const listing =
-        run.policy.isolation.mode === 'os'
-          ? processListFailure(result.stdout + '\n' + result.stderr, failureTexts)
-          : undefined;
+      const listing = strictSandbox(run.policy)
+        ? processListFailure(result.stdout + '\n' + result.stderr, failureTexts)
+        : undefined;
       if (listing && (await processListBackend.probe()).status === 'unavailable') {
         const tail = `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`;
         // Вызов ps добавил исполнитель: добавленные строки изменения
@@ -1555,7 +1570,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       // собственная проба harness в той же песочнице подтвердила
       // ограничение. Проба не подтвердила — засчитанный провал с пометкой о
       // предполагаемой причине. Часть упавших со следом — пометка к провалу.
-      if (run.policy.isolation.mode === 'os') {
+      if (strictSandbox(run.policy)) {
         const output = result.stdout + '\n' + result.stderr;
         const causes = ['sandbox-signal', 'sandbox-browser'] as SandboxSignatureCause[];
         const noted = new Set<SandboxSignatureCause>();
@@ -1816,10 +1831,15 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
   // Artifacts gate (снимки экрана, отчёты) сохраняются при любом исходе:
   // провал — тот случай, когда они нужнее всего. Пропуски и отказы копирования
   // названы в evidence и на исход gate не влияют.
-  const artifactFiles = gate.artifacts?.length
+  // UI gate (alpha.69): отчёты и трассы раннера — при провале.
+  const artifactPaths = [
+    ...(gate.artifacts ?? []),
+    ...(!passed && 'ui' in gate && gate.ui ? uiFailureArtifacts(gate.ui) : []),
+  ];
+  const artifactFiles = artifactPaths.length
     ? await keepGateArtifacts({
         root,
-        paths: gate.artifacts,
+        paths: [...new Set(artifactPaths)],
         // Точки в ID нет: имя не совпадёт с каталогом другого gate или фазы.
         dest: join(artifactDir, `${gate.id}.artifacts`),
         redact,
@@ -2088,7 +2108,7 @@ export async function prepareWriterDependencies(
   const { signal } = run;
   const redact = run.execution.redact;
   const root = await realpath(run.cwd);
-  const os = run.policy.isolation.mode === 'os';
+  const os = strictSandbox(run.policy);
   const manifests: string[] = [];
   for (const gate of run.gates) {
     const dir = gate.cwd ? relative(root, resolve(root, gate.cwd)) : '';

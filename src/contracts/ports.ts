@@ -225,6 +225,15 @@ export interface SandboxSpec {
    */
   checkouts?: string[];
   network: { domains: string[] };
+  /**
+   * Облегчённый режим (alpha.69, только исполнитель): собственная песочница
+   * runtime снята — сеть, Docker, браузер, процессы открыты. `guard` —
+   * граница записи: пути, куда процесс runtime и его потомки могут писать
+   * (рабочее дерево, временный каталог, кеши); адаптер добавляет состояние
+   * своего CLI. Нет `guard` — без границы (`writeGuard.off` или
+   * `isolation.mode: none`). Нет поля — прежняя изоляция.
+   */
+  light?: { guard?: string[] };
 }
 
 export interface RuntimeRequest {

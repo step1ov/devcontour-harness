@@ -53,6 +53,9 @@ import {
   type WorkState,
   hostStepFiles,
   infraViolations,
+  strictSandbox,
+  harnessModeOf,
+  writeGuardActive,
 } from '../contracts/index.ts';
 import { changedFacts, resolvedHostFiles } from './infra-guard.ts';
 import { git, hostGitArgs } from '../environment/process.ts';
@@ -169,6 +172,12 @@ import {
 } from '../verification/dependencies.ts';
 import { CleanupFailure, cleanupEnvironment } from '../environment/lifecycle.ts';
 import { defaultResourceDatabase, withResources } from '../environment/resources.ts';
+import { guardEntries } from '../environment/write-guard.ts';
+import {
+  allocateAttemptPorts,
+  attemptVariables,
+  type AttemptPorts,
+} from '../environment/attempt-ports.ts';
 import { REQUIREMENT_GATE, assertRequirements } from '../verification/requirements.ts';
 import {
   BlockedError,
@@ -374,6 +383,8 @@ export class Runner {
   private placement?: CheckoutRoot;
   /** Когда истекает текущий предел времени попытки: от остатка считается бюджет хранилища. */
   private phaseDeadlines = new Map<string, number>();
+  /** Порты попытки облегчённого режима (alpha.69, `attemptEnv.ports`). */
+  private attemptPorts = new Map<string, Record<string, number>>();
   /**
    * Текст провала gates попытки-источника для writer продолжения (по ID
    * попытки): собирается при наложении черновика, расходуется запросом.
@@ -818,6 +829,11 @@ export class Runner {
           ...Object.fromEntries(dependencies.map((d) => [d.repositoryId, d.path])),
           [repo.id]: cwd,
         }),
+        // Облегчённый режим (alpha.69): своё имя проекта compose, свои порты
+        // и шлюз gates — исполнителю и gates одинаково.
+        ...(harnessModeOf(this.policy) === 'light'
+          ? attemptVariables(attempt.id, this.attemptPorts.get(attempt.id) ?? {}, repo.gateway)
+          : {}),
       },
       this.options.environment ?? process.env,
       this.policy.toolchain,
@@ -921,6 +937,20 @@ export class Runner {
               : []),
           ],
           network: { domains: this.policy.isolation.domains },
+          // Облегчённый режим (alpha.69): исполнитель как обычный разработчик,
+          // одна граница — запись в своё дерево, свой TMPDIR и кеши.
+          ...(!review && harnessModeOf(this.policy) === 'light'
+            ? {
+                light: writeGuardActive(this.policy)
+                  ? {
+                      guard: guardEntries(this.policy, [
+                        input.cwd,
+                        ...(scratch ? [scratch] : []),
+                      ]).map((e) => ('subpath' in e ? e.subpath : e.prefix)),
+                    }
+                  : {},
+              }
+            : {}),
         },
         timeoutMs: Math.min(this.policy.runTimeoutMs, input.timeoutMs ?? Infinity),
         env: Object.fromEntries(
@@ -1632,7 +1662,22 @@ export class Runner {
     const worktrees: string[] = [];
     const snapshots: DependencySnapshot[] = [];
     let preserve = false;
+    let ports: AttemptPorts | undefined;
     try {
+      // Облегчённый режим: свои порты попытки — до любой фазы; нет
+      // свободного — отказ среды, попытка не засчитывается.
+      if (harnessModeOf(this.policy) === 'light' && this.policy.attemptEnv?.ports?.length) {
+        try {
+          ports = await allocateAttemptPorts(
+            this.policy.attemptEnv,
+            this.options.resourceDatabase ?? defaultResourceDatabase(),
+            `${this.options.stateDir}:${attempt.id}`,
+          );
+        } catch (error) {
+          throw new BlockedError(error instanceof Error ? error.message : String(error));
+        }
+        this.attemptPorts.set(attempt.id, ports.ports);
+      }
       // Ресурсы поручения, gates его репозитория и выбранных проверок
       // потребителей — одним резервированием на всю попытку.
       const reserve = [
@@ -1744,7 +1789,7 @@ export class Runner {
           const gates = ordered(repo.gates, attempt.requiredGates ?? repo.gates.map((g) => g.id));
           const execution = this.environment(attempt, 'candidate', cwd);
           const prepared = preparation.guard(
-            this.policy.isolation.mode === 'os',
+            strictSandbox(this.policy),
             cwd,
             preparesTree(
               repo.lifecycle ?? this.policy.lifecycle,
@@ -1839,7 +1884,7 @@ export class Runner {
                     // его ещё не трогал.
                     let guarded: Map<string, string> | undefined;
                     try {
-                      if (this.policy.isolation.mode === 'os') guarded = protectedSnapshot(cwd);
+                      if (strictSandbox(this.policy)) guarded = protectedSnapshot(cwd);
                     } catch (error) {
                       if (error instanceof SandboxPolicyError)
                         throw new TaskFailure(
@@ -2306,6 +2351,12 @@ export class Runner {
       clearInterval(heartbeat);
       this.selfChecks.delete(attempt.id);
       this.portWarnings.delete(attempt.id);
+      this.attemptPorts.delete(attempt.id);
+      try {
+        ports?.release();
+      } catch {
+        /* аренда умершего процесса снимется при следующем выделении */
+      }
       this.gateFeedback.delete(attempt.id);
       // Рабочие деревья попытки убираются; ветка попытки и объекты остаются —
       // по ним recovery и следующая попытка видят кандидата. Снимки
@@ -3108,7 +3159,7 @@ export class Runner {
           dependencies,
         );
         const prepared = preparation.guard(
-          this.policy.isolation.mode === 'os',
+          strictSandbox(this.policy),
           dir,
           preparesTree(repo.lifecycle ?? this.policy.lifecycle, repo.prepare, repo.dependencyStore),
         );
@@ -3262,6 +3313,8 @@ export class Runner {
       readable: [cwd, ...boundary.readable],
       ...(boundary.checkouts.length ? { checkouts: boundary.checkouts } : {}),
       isolation: this.policy.isolation,
+      harnessMode: harnessModeOf(this.policy),
+      ...(this.policy.writeGuard ? { writeGuard: this.policy.writeGuard } : {}),
       commandTimeoutMs: limits.commandTimeoutMs,
       budgetMs,
       deadline,
@@ -4325,7 +4378,7 @@ export class Runner {
     else {
       const execution = this.environment(attempt, 'integration', cwd);
       const prepared = preparation.guard(
-        this.policy.isolation.mode === 'os',
+        strictSandbox(this.policy),
         cwd,
         preparesTree(repo.lifecycle ?? this.policy.lifecycle, repo.prepare, repo.dependencyStore),
       );

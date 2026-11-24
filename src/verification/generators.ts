@@ -16,7 +16,12 @@ import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { lstat, mkdir, readlink, realpath, rm, writeFile } from 'node:fs/promises';
 import { join, relative, resolve, sep } from 'node:path';
-import { gateTimeoutMs, type ExecutionPolicy, type GeneratorPolicy } from '../contracts/index.ts';
+import {
+  gateTimeoutMs,
+  type ExecutionPolicy,
+  type GeneratorPolicy,
+  strictSandbox,
+} from '../contracts/index.ts';
 import { TaskFailure } from '../engine/failure.ts';
 import { within } from '../engine/scope.ts';
 import type { executionEnvironment } from '../environment/lifecycle.ts';
@@ -197,7 +202,7 @@ async function runOne(
   const ignoredBefore = await ignoredUnder(cwd, root, generator.outputs);
   let guarded: Map<string, string> | undefined;
   try {
-    if (run.policy.isolation.mode === 'os') guarded = protectedSnapshot(root);
+    if (strictSandbox(run.policy)) guarded = protectedSnapshot(root);
   } catch (error) {
     if (error instanceof SandboxPolicyError)
       throw new TaskFailure('environment', error.message, undefined, 'sandbox-policy');

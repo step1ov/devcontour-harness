@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import { join, resolve } from 'node:path';
-import { HarnessError, TaskFailure, type ExecutionPolicy } from '../contracts/index.ts';
+import {
+  HarnessError,
+  TaskFailure,
+  type ExecutionPolicy,
+  strictSandbox,
+} from '../contracts/index.ts';
 import { CleanupFailure, type StepOutcome } from '../environment/lifecycle.ts';
 import { DEPENDENCY_NETWORK } from '../environment/dependency-network.ts';
 import { runGatesAt } from '../verification/gates-at.ts';
@@ -152,7 +157,7 @@ async function smokeProcessList(
   repoPath: string,
   sha: string,
 ): Promise<SmokeProcessList | undefined> {
-  if (input.processList === false || input.policy.isolation.mode !== 'os') return undefined;
+  if (input.processList === false || !strictSandbox(input.policy)) return undefined;
   const capability = await (input.processList ?? processListBackend.probe)();
   const callers =
     capability.status === 'unavailable' ? await processListCallers(repoPath, sha) : [];

@@ -26,6 +26,9 @@ import {
   type ProbeServer,
   TaskFailure,
   gateTimeoutMs,
+  harnessModeSchema,
+  strictSandbox,
+  writeGuardSchema,
 } from '../contracts/index.ts';
 import {
   dependencyNetworkFailure,
@@ -98,6 +101,9 @@ export const probeSpec = z.object({
     mode: z.enum(['os', 'none']),
     domains: z.array(z.string()).max(PROBE_LIST_LIMIT),
   }),
+  /** Режим и граница записи политики (alpha.69): проверки reviewer — как gates. */
+  harnessMode: harnessModeSchema.optional(),
+  writeGuard: writeGuardSchema.optional(),
   commandTimeoutMs: z.number().int().min(1000),
   budgetMs: z.number().int().min(1000),
   /** Момент, к которому ревью должно быть готово дать заключение (epoch ms). */
@@ -383,6 +389,14 @@ export class ReviewProbes {
     private readonly now = () => Date.now(),
     private readonly environment: NodeJS.ProcessEnv = process.env,
   ) {}
+  /** Изоляция проверок reviewer: режим политики (нет поля в spec — строгий, как до alpha.69). */
+  probeConfig() {
+    return {
+      isolation: this.spec.isolation,
+      harnessMode: this.spec.harnessMode ?? ('strict' as const),
+      ...(this.spec.writeGuard ? { writeGuard: this.spec.writeGuard } : {}),
+    };
+  }
   /** Сколько может длиться следующая команда: меньшее из трёх пределов. */
   limit(requested?: number) {
     return Math.max(
@@ -566,7 +580,7 @@ export class ReviewProbes {
     launch: Launch,
   ): Promise<Outcome> {
     const r = await runCheck(
-      { config: { isolation: this.spec.isolation } },
+      { config: this.probeConfig() },
       {
         argv,
         onStart: () => (launch.started = true),
@@ -734,7 +748,7 @@ export class ReviewProbes {
     let finished: Awaited<ReturnType<typeof runCheck>> | undefined;
     try {
       const r = await runCheck(
-        { config: { isolation: this.spec.isolation } },
+        { config: this.probeConfig() },
         {
           argv: gate.command,
           onStart: () => (launch.started = true),
@@ -778,7 +792,7 @@ export class ReviewProbes {
       const streams = { stdout: tail(r.stdout), stderr: tail(r.stderr) };
       const report = meta.report;
       const blocked =
-        this.spec.isolation.mode === 'os' && r.code !== 0
+        strictSandbox(this.probeConfig()) && r.code !== 0
           ? sandboxBlockedHosts(output, this.spec.isolation.domains)
           : [];
       const network =

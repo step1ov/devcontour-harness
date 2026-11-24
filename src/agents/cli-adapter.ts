@@ -26,6 +26,11 @@ import {
   type Isolation,
 } from '../environment/isolation.ts';
 import { redactor } from '../environment/redaction.ts';
+import {
+  WriteGuardUnavailable,
+  guardedArgv,
+  runtimeStateEntries,
+} from '../environment/write-guard.ts';
 import { inspectReview } from './inspect.ts';
 import { probeCallMs, probeServer, probeTool } from './review-probe.ts';
 import { acceptedStructuredOutput, claudeResult, runtimeEvents } from './runtime-events.ts';
@@ -253,8 +258,12 @@ export function cliAdapter(
       // Явный режим без интернета закрывает и инструменты runtime, которые
       // ходят в сеть мимо песочницы shell: веб-поиск codex, WebFetch и
       // WebSearch claude. Без поля `network` вызов прежний.
-      const offline = !review && (profile?.network === 'none' || profile?.network === 'loopback');
-      if (runtime === 'codex' && network === 'loopback') {
+      // Облегчённый режим (alpha.69): только исполнитель — без песочницы
+      // runtime, сеть открыта; граница записи — обёртка процесса ниже.
+      const light = review ? undefined : r.sandbox.light;
+      const offline =
+        !light && !review && (profile?.network === 'none' || profile?.network === 'loopback');
+      if (runtime === 'codex' && network === 'loopback' && !light) {
         const refused = await codexLoopbackSupport(executable, r.env);
         if (refused) throw new Error(`codex: ${refused}`);
       }
@@ -282,7 +291,9 @@ export function cliAdapter(
               ...(r.binding.model ? ['--model', r.binding.model] : []),
               ...(r.binding.effort ? ['-c', `model_reasoning_effort="${r.binding.effort}"`] : []),
               ...codexTools(profile, review, review ? r.probe : undefined),
-              ...codexPermissions(policy, review ? 'none' : (network ?? 'none')),
+              ...(light
+                ? ['--sandbox', 'danger-full-access']
+                : codexPermissions(policy, review ? 'none' : (network ?? 'none'))),
               ...(offline ? ['-c', 'web_search="disabled"'] : []),
               '-',
             ]
@@ -295,7 +306,7 @@ export function cliAdapter(
               '--json-schema',
               JSON.stringify(r.outputSchema ?? {}),
               '--permission-mode',
-              review ? 'dontAsk' : 'acceptEdits',
+              review ? 'dontAsk' : light ? 'bypassPermissions' : 'acceptEdits',
               '--tools',
               (review
                 ? [
@@ -344,13 +355,15 @@ export function cliAdapter(
                 : []),
               '--settings',
               JSON.stringify({
-                ...((
-                  review
-                    ? reviewerRunsChecks('claude', profile)
-                    : writerRunsChecks('claude', profile)
-                )
-                  ? claudeSandbox(policy, review, r.cwd)
-                  : { permissions: { deny: claudeFileDenies(policy, r.cwd) } }),
+                ...(light
+                  ? {}
+                  : (
+                        review
+                          ? reviewerRunsChecks('claude', profile)
+                          : writerRunsChecks('claude', profile)
+                      )
+                    ? claudeSandbox(policy, review, r.cwd)
+                    : { permissions: { deny: claudeFileDenies(policy, r.cwd) } }),
                 // Сроки CLI для проверок reviewer: вызов инструмента проверок
                 // не обрывается раньше controller, а собственный Bash reviewer
                 // ограничен тем же пределом команды.
@@ -372,6 +385,26 @@ export function cliAdapter(
               ...(r.binding.model ? ['--model', r.binding.model] : []),
             ];
       const redact = redactor(r.secrets ?? []);
+      // Граница записи облегчённого режима: процесс runtime и все его
+      // потомки пишут только в свои каталоги, кеши и состояние своего CLI.
+      let launch = argv;
+      if (light?.guard)
+        try {
+          launch = guardedArgv(argv, [
+            ...light.guard.map((subpath) => ({ subpath })),
+            ...runtimeStateEntries(runtime),
+          ]);
+        } catch (error) {
+          if (!(error instanceof WriteGuardUnavailable)) throw error;
+          return {
+            status: 'unavailable',
+            text: '',
+            model: null,
+            runtimeVersion: null,
+            usage: unknownUsage(),
+            diagnostics: { exitCode: null, reason: error.message.slice(0, 500), log: logPath },
+          };
+        }
       const version = await runtimeVersion(executable, r.env);
       await writeFile(logPath, `Runtime ${runtime}; started ${new Date().toISOString()}\n`);
       let logged = 0;
@@ -392,7 +425,7 @@ export function cliAdapter(
       // хвоста stdout: итоговое событие долгого вызова лежит за ними.
       const telemetry = usageStream(runtime);
       try {
-        result = await command(argv, r.cwd, {
+        result = await command(launch, r.cwd, {
           activity: { kind: 'agent', label: `${runtime} ${r.task}`.slice(0, 300) },
           contain: { dirs: review ? [] : r.sandbox.writable },
           onRawStdout: (text: string) => {

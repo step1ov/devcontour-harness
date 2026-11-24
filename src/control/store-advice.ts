@@ -1,6 +1,6 @@
 import { lstatSync, readFileSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
-import type { ExecutionPolicy } from '../contracts/index.ts';
+import { strictSandbox, type ExecutionPolicy } from '../contracts/index.ts';
 import {
   DEFAULT_REGISTRY_HOST,
   registryUrl,
@@ -198,7 +198,7 @@ export function storeAdvice(policy: ExecutionPolicy, baseDir: string): StoreAdvi
     }
   });
   // Сборка seed идёт в песочнице только в isolation.mode: os; иначе сеть та же, что у хоста.
-  if (policy.isolation.mode === 'os')
+  if (strictSandbox(policy))
     policy.repositories.forEach((repo, i) => {
       if (!repo.dependencyStore || unsupported.has(repo.id)) return;
       const dir = isAbsolute(repo.path) ? repo.path : resolve(baseDir, repo.path);

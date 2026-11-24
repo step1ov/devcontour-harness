@@ -8,10 +8,17 @@ import {
   type EvidenceRecord,
   type ExecutionPolicy,
   type RunEventPayload,
+  strictSandbox,
+  harnessModeOf,
 } from '../contracts/index.ts';
 import { livenessPayload, superviseStalls } from '../engine/stall-sweep.ts';
 import { TaskFailure } from '../engine/failure.ts';
 import { git } from '../environment/process.ts';
+import {
+  allocateAttemptPorts,
+  attemptVariables,
+  type AttemptPorts,
+} from '../environment/attempt-ports.ts';
 import {
   executionEnvironment,
   preparation,
@@ -280,6 +287,7 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
   };
   let snapshots: DependencySnapshot[] = [];
   let added = false;
+  let ports: AttemptPorts | undefined;
   const boundaryOf = ctx.boundary();
   const store: StoreContext = {
     policy: ctx.policy,
@@ -334,6 +342,15 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
           );
         await staged('worktree', () => git(path, 'worktree', 'add', '--detach', cwd, input.sha));
         added = true;
+        // Облегчённый режим (alpha.69): свои порты, имя проекта compose и
+        // шлюз — как у попытки, чтобы прогон не столкнулся с идущими.
+        const light = harnessModeOf(ctx.policy) === 'light';
+        if (light && ctx.policy.attemptEnv?.ports?.length)
+          ports = await allocateAttemptPorts(
+            ctx.policy.attemptEnv,
+            ctx.resourceDatabase ?? defaultResourceDatabase(),
+            `${ctx.stateDir}:${id}`,
+          );
         const execution = executionEnvironment(
           [ctx.policy.environment, repo.environment],
           {
@@ -346,6 +363,7 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
               ...Object.fromEntries(snapshots.map((d) => [d.repositoryId, d.path])),
               [repo.id]: cwd,
             }),
+            ...(light ? attemptVariables(id, ports?.ports ?? {}, repo.gateway) : {}),
           },
           source,
           ctx.policy.toolchain,
@@ -353,7 +371,7 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
         if (input.onStep) execution.onStep = (step) => input.onStep!(step);
         const boundary = ctx.boundary();
         const prepared = preparation.guard(
-          ctx.policy.isolation.mode === 'os',
+          strictSandbox(ctx.policy),
           cwd,
           preparesTree(repo.lifecycle ?? ctx.policy.lifecycle, repo.prepare, repo.dependencyStore),
         );
@@ -515,6 +533,11 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
     if (!reason) throw error;
     if (!interrupted) throw new HarnessError('CANCELLED', 'Проверка gates прервана: ' + reason);
   } finally {
+    try {
+      ports?.release();
+    } catch {
+      /* аренда умершего процесса снимется при следующем выделении */
+    }
     if (added) await git(path, 'worktree', 'remove', '--force', cwd).catch(() => undefined);
     await removeSnapshots(
       {

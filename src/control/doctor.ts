@@ -18,6 +18,7 @@ import {
   type RuntimeAdapter,
   type RuntimeBinding,
   type RuntimeName,
+  strictSandbox,
 } from '../contracts/index.ts';
 import { credentialPaths, isolationSupport } from '../environment/isolation.ts';
 import { chooseCheckoutRoot } from '../environment/checkout-root.ts';
@@ -140,7 +141,7 @@ export async function doctor(
     });
   }
   const sandbox = isolationSupport();
-  if (!sandbox.ok && policy?.isolation.mode === 'os') problems.push(sandbox.detail);
+  if (!sandbox.ok && (policy ? strictSandbox(policy) : false)) problems.push(sandbox.detail);
   // Список процессов в песочнице проверок: недоступен — не проблема среды
   // (gate может его не вызывать), а строка с советом до первой попытки.
   const processList = !options.processList
@@ -311,10 +312,9 @@ export async function doctor(
     const browser = (r.writerProbe ?? []).filter(isBrowserRunner).map((s) => s.id);
     // Под песочницей ОС проверок браузер не стартует и в gate (0.1.0-alpha.68):
     // такой провал — отказ среды `sandbox-browser`, ход ведущего.
-    const gate =
-      policy?.isolation.mode === 'os'
-        ? ` В gate под песочницей ОС браузер не стартует: когда след песочницы у каждого упавшего теста и проба harness это подтвердила, такой провал — отказ среды sandbox-browser (${NO_RETRY_GATE_CODES['sandbox-browser']}), попытка не засчитана, gate удержан до хода ведущего; без подтверждения пробы провал засчитан.`
-        : '';
+    const gate = (policy ? strictSandbox(policy) : false)
+      ? ` В gate под песочницей ОС браузер не стартует: когда след песочницы у каждого упавшего теста и проба harness это подтвердила, такой провал — отказ среды sandbox-browser (${NO_RETRY_GATE_CODES['sandbox-browser']}), попытка не засчитана, gate удержан до хода ведущего; без подтверждения пробы провал засчитан.`
+      : '';
     return browser.length
       ? [`browser-checks ${r.id} (${browser.join(', ')}): ${BROWSER_ADVICE}${gate}`]
       : [];

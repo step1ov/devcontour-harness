@@ -23,6 +23,7 @@ import {
   sha256,
   type DependencyStorePolicy,
   type ExecutionPolicy,
+  strictSandbox,
 } from '../contracts/index.ts';
 import { OversizedFile, readBounded } from '../environment/bounded-read.ts';
 import { checkoutPath, type CheckoutRoot } from '../environment/checkout-root.ts';
@@ -1369,8 +1370,9 @@ export async function materializeStore(
     Object.assign(input.execution.env, env);
   };
   try {
-    if (ctx.policy.isolation.mode !== 'os')
-      summary.reason = 'isolation.mode: none: граница seed не действует, установка обычная';
+    if (!strictSandbox(ctx.policy))
+      summary.reason =
+        'без песочницы ОС (облегчённый режим или isolation.mode: none): граница seed не действует, установка обычная';
     // Занятый путь — и ссылка, которую кандидат мог положить, чтобы увести
     // запись controller из дерева: туда ничего не пишется.
     else if (await lstat(dest).catch(() => undefined))

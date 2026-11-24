@@ -134,7 +134,13 @@ export const gatewaySchema = z.strictObject({
     .min(8)
     .max(300)
     .regex(/^https?:\/\//, 'Адрес шлюза — http(s)://…'),
-  env: z.record(portEnvName, z.string().max(300).regex(/^(\/|$)/, 'Суффикс — путь от /')),
+  env: z.record(
+    portEnvName,
+    z
+      .string()
+      .max(300)
+      .regex(/^(\/|$)/, 'Суффикс — путь от /'),
+  ),
 });
 export type GatewayPolicy = z.infer<typeof gatewaySchema>;
 

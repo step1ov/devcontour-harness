@@ -1187,6 +1187,26 @@ export function policyIssues(policy: ExecutionPolicy): Issue[] {
       add('INVALID_INPUT', ['repositories', r, 'id'], 'Повтор репозитория ' + repo.id);
     repos.set(repo.id, repo);
     gateChecks(repo.gates, ['repositories', r, 'gates']);
+    // Шлюз gates (alpha.69) ссылается только на объявленные порты попытки.
+    if (repo.gateway)
+      for (const [, name] of repo.gateway.url.matchAll(/\$\{([^}]*)\}/g))
+        if (!policy.attemptEnv?.ports?.includes(name!))
+          add(
+            'INVALID_INPUT',
+            ['repositories', r, 'gateway', 'url'],
+            `Шлюз ссылается на \${${name}}, а такого порта нет в attemptEnv.ports`,
+          );
+    // Пул устройств мобильного UI gate — ресурсы kind: device.
+    repo.gates.forEach((g, i) => {
+      if (g.ui?.type !== 'mobile') return;
+      for (const id of g.ui.device.pool ?? [])
+        if (!policy.resources.some((x) => x.id === id && x.kind === 'device'))
+          add(
+            'INVALID_INPUT',
+            ['repositories', r, 'gates', i, 'ui', 'device', 'pool'],
+            `Устройство ${id} пула не объявлено ресурсом kind: device`,
+          );
+    });
     if (!repo.gates.some((g) => g.kind === 'test'))
       add(
         'INVALID_INPUT',
