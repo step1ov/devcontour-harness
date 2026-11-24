@@ -19,7 +19,10 @@ import {
   type RuntimeBinding,
   type RuntimeName,
   strictSandbox,
+  harnessModeOf,
+  writeGuardActive,
 } from '../contracts/index.ts';
+import { guardCaches, writeGuardSupport } from '../environment/write-guard.ts';
 import { credentialPaths, isolationSupport } from '../environment/isolation.ts';
 import { chooseCheckoutRoot } from '../environment/checkout-root.ts';
 import { inspectPort, PORT_ADVICE } from '../environment/port-probe.ts';
@@ -340,6 +343,25 @@ export async function doctor(
   // Кто решает после отказов и на технические вопросы: те же тексты, что у
   // панели; необычное сочетание — предупреждение, шлюз не до исчерпания — заметка.
   const decisions = policy ? decisionSettingsView(policy) : undefined;
+  // Режим harness (alpha.69): одна строка — какой режим и как выбрать другой.
+  const mode = policy ? modeReport(policy) : undefined;
+  if (mode) {
+    notes.unshift(mode.line);
+    if (mode.writeGuard?.active && mode.writeGuard.reason) problems.push(mode.writeGuard.reason);
+    if (
+      mode.mode === 'strict' &&
+      (policy?.attemptEnv || policy?.repositories.some((r) => r.gateway))
+    )
+      notes.push(
+        'attemptEnv и gateway действуют только в облегчённом режиме: строгий режим заморожен и новых возможностей не получает',
+      );
+    for (const repo of policy?.repositories ?? [])
+      for (const g of repo.gates)
+        if (g.ui?.type === 'mobile')
+          notes.push(
+            `UI gate ${repo.id}/${g.id} (mobile, Maestro): в этой версии harness передаёт gate переменные платформы, устройства и приложения; выбор устройства из пула, сборку и установку приложения делают команда gate и lifecycle проекта (docs/ui-gates.md)`,
+          );
+  }
   if (decisions?.warning) warnings.push(decisions.warning.ru);
   if (policy) {
     const r = recoveryPolicyOf(policy);
@@ -375,6 +397,7 @@ export async function doctor(
     ...(notes.length ? { notes } : {}),
     ...(policy ? { questions: questionRule(policy) } : {}),
     ...(decisions ? { decisions } : {}),
+    ...(mode ? { mode } : {}),
     // Модель и effort каждого назначения: кто пишет и кто ревьюит, чем.
     ...(policy ? { models } : {}),
     // Предупреждения не делают среду негодной: порт только на wildcard, ревью
@@ -608,4 +631,37 @@ export interface DoctorToolchainPin {
   version: string;
   pathNode?: { version: string; path: string };
   matches: boolean;
+}
+
+/** Режим harness для doctor (alpha.69): строка, граница записи и её кеши. */
+export function modeReport(policy: ExecutionPolicy) {
+  const mode = harnessModeOf(policy);
+  const byDefault = policy.harnessMode === undefined;
+  const line =
+    mode === 'light'
+      ? `режим: облегчённый${byDefault ? ' (по умолчанию)' : ''}; строгий — \`harnessMode: strict\` (решение владельца: чужой код или секреты production)`
+      : 'режим: строгий (harnessMode: strict, заморожен — может быть убран после следующих пилотов); облегчённый — убрать поле harnessMode';
+  const lineEn =
+    mode === 'light'
+      ? `mode: light${byDefault ? ' (default)' : ''}; strict — \`harnessMode: strict\` (owner's decision: untrusted code or production secrets)`
+      : 'mode: strict (harnessMode: strict, frozen — may be removed after the next pilots); light — remove the harnessMode field';
+  if (mode === 'strict') return { mode, default: byDefault, line, lineEn };
+  const active = writeGuardActive(policy);
+  const support = writeGuardSupport();
+  return {
+    mode,
+    default: byDefault,
+    line,
+    lineEn,
+    writeGuard: {
+      active,
+      ...(support.ok ? { mechanism: support.mechanism } : {}),
+      ...(active && !support.ok
+        ? {
+            reason: `Граница записи облегчённого режима недоступна: ${support.detail}. Установите механизм (на Linux — bubblewrap) или снимите границу writeGuard.off: true (решение владельца)`,
+          }
+        : {}),
+      caches: active ? guardCaches(policy.writeGuard).map((c) => c.path) : [],
+    },
+  };
 }

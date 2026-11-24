@@ -743,6 +743,13 @@ export const cliCommands = {
           'Технические вопросы исполнителя (результат для пользователя не меняется) решает ведущий с записанной причиной: inputPolicy.leadAnswers.technical в новой политике; без флага на вопросы, останавливающие работу, отвечает человек. Сохранённая политика без этого правила — PATH_CONFLICT content-differs',
       },
       {
+        name: '--harness-mode',
+        value: 'text',
+        required: false,
+        description:
+          'Режим harness новой политики (alpha.69): light — по умолчанию (исполнитель и gates на хосте с Docker, браузером и сетью; одна граница — запись только в своё дерево попытки, временный каталог и кеши); strict — прежняя песочница ОС, заморожен, выбор владельца для чужого кода или секретов production (harnessMode: strict)',
+      },
+      {
         name: '--recovery',
         value: 'text',
         required: false,
@@ -2582,6 +2589,27 @@ export const doctorDataSchema = z.strictObject({
       adviceEn: z.string(),
       flags: z.string(),
       narrowFlags: z.string(),
+    })
+    .optional(),
+  /**
+   * Режим harness (alpha.69): `light` по умолчанию или `strict` (явный выбор
+   * владельца, заморожен); строка для человека и граница записи облегчённого
+   * режима — механизм и открытые на запись кеши. Есть, когда задана политика.
+   */
+  mode: z
+    .strictObject({
+      mode: z.enum(['light', 'strict']),
+      default: z.boolean(),
+      line: z.string(),
+      lineEn: z.string(),
+      writeGuard: z
+        .strictObject({
+          active: z.boolean(),
+          mechanism: z.string().optional(),
+          reason: z.string().optional(),
+          caches: z.array(z.string()).max(200),
+        })
+        .optional(),
     })
     .optional(),
   problems: z.array(z.string()),

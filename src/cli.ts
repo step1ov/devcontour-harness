@@ -531,6 +531,7 @@ const options = {
   evidence: { type: 'string', multiple: true },
   diagnosis: { type: 'string' },
   recovery: { type: 'string' },
+  'harness-mode': { type: 'string' },
   'diagnose-after': { type: 'string' },
   'lead-resets': { type: 'string' },
   file: { type: 'string' },
@@ -590,6 +591,7 @@ const flagOwners = {
   evidence: ['diagnose'],
   diagnosis: ['retry'],
   recovery: ['init'],
+  'harness-mode': ['init'],
   'diagnose-after': ['init'],
   'lead-resets': ['init'],
   'accept-limitation': ['review-plan', 'review-contract', 'review-accept'],
@@ -1097,6 +1099,15 @@ async function runUpdate(
   return { data: r.data, code: r.code };
 }
 
+/** `init --harness-mode light|strict` (alpha.69): режим новой политики. */
+function harnessModeFlag(value: string | undefined): { harnessMode?: 'light' | 'strict' } {
+  if (value === undefined) return {};
+  if (value !== 'light' && value !== 'strict')
+    throw new HarnessError('INVALID_INPUT', '--harness-mode: ожидается light или strict', [
+      { path: ['--harness-mode'], message: value },
+    ]);
+  return { harnessMode: value };
+}
 /** `init --recovery lead|user --diagnose-after N --lead-resets N` → `policy.recovery`. */
 function recoveryFlags(v: {
   recovery?: string | undefined;
@@ -1776,6 +1787,7 @@ async function run(
         ...(v.lean ? { lean: true } : {}),
         ...(v['lead-technical-answers'] ? { leadTechnicalAnswers: true } : {}),
         ...((r) => (r ? { recovery: r } : {}))(recoveryFlags(v)),
+        ...harnessModeFlag(v['harness-mode']),
       });
       // Ведущий внутри песочницы (Codex seatbelt): предупреждение с флагами запуска.
       const sandboxed = leadSandboxCheck({
