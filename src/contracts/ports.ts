@@ -245,8 +245,6 @@ export interface SandboxSpec {
      * ссылки git дерева попытки в общем каталоге репозитория и их `.lock`.
      */
     guardPrefixes?: string[];
-    /** Закрыто на запись внутри открытых путей (ревью 3: `config.worktree`). */
-    guardDenyWrite?: string[];
     /** Закрыто на чтение (ревью 3: общий stash владельца). */
     guardDenyRead?: string[];
   };

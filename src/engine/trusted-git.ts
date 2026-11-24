@@ -12,30 +12,9 @@
 // `commit-tree -p <база>`, `update-ref refs/heads/<ветка попытки> <новый>
 // <база>` — с явным `--git-dir`.
 
-import { randomUUID } from 'node:crypto';
-import { lstat, readFile, rm } from 'node:fs/promises';
+import { lstat, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { controllerTemp } from '../environment/controller-temp.ts';
-import { git, releaseControllerIndex, useControllerIndex } from '../environment/process.ts';
-
-/**
- * Свой index controller для дерева (ревью 3): git хоста в этом дереве
- * читает и пишет только его (`GIT_INDEX_FILE`), index дерева — нет.
- * Наполняется деревом `ref`.
- */
-export async function attachControllerIndex(cwd: string, ref: string) {
-  useControllerIndex(cwd, join(controllerTemp.dir(), `hx-index-${randomUUID()}`));
-  await git(cwd, 'read-tree', ref);
-  // Сведения о файлах — сразу: иначе `apply --3way` и `status` сочли бы
-  // каждый файл изменённым (у свежего index нет их stat).
-  await git(cwd, 'update-index', '-q', '--refresh').catch(() => undefined);
-}
-
-/** Снять index controller дерева и удалить его файл (создан `attachControllerIndex`). */
-export async function detachControllerIndex(cwd: string) {
-  const file = releaseControllerIndex(cwd);
-  if (file) await rm(file, { force: true }).catch(() => undefined);
-}
+import { git } from '../environment/process.ts';
 
 export interface TrustedGitMeta {
   cwd: string;
@@ -119,8 +98,9 @@ export async function gitMetaProblem(meta: TrustedGitMeta): Promise<string | und
 const explicit = (meta: TrustedGitMeta) => [`--git-dir=${meta.gitDir}`, `--work-tree=${meta.cwd}`];
 
 /**
- * Index controller — заново от базы перед записью кандидата (ревью 3): свой
- * файл controller (`attachControllerIndex`), index дерева не трогается.
+ * Index дерева — заново от базы перед записью кандидата: каталог git
+ * дерева под границей закрыт (alpha.69-граница, ревью 4), index пишет
+ * только controller; `read-tree` снимает и любые прежние флаги.
  */
 export async function resetIndex(meta: TrustedGitMeta, base: string) {
   await git(meta.cwd, ...explicit(meta), 'read-tree', base);

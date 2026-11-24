@@ -32,7 +32,6 @@ import {
   reviewPassModeOf,
 } from '../contracts/index.ts';
 import { refuteOutputSchema, reviewOutputSchema } from '../agents/schemas.ts';
-import { attachControllerIndex, detachControllerIndex } from '../engine/trusted-git.ts';
 import { redactInspection } from '../agents/inspect.ts';
 import { chooseCheckoutRoot, checkoutPath } from '../environment/checkout-root.ts';
 import { credentialPaths } from '../environment/isolation.ts';
@@ -419,9 +418,6 @@ export async function reviewBranch(
   try {
     await git(path, 'worktree', 'add', '--detach', cwd, head);
     added = true;
-    // Свой index controller: проверка дерева после reviewer не верит флагам
-    // index дерева (ревью 3).
-    await attachControllerIndex(cwd, 'HEAD');
     response = await measuredInvoke(
       engine,
       adapter,
@@ -498,7 +494,6 @@ export async function reviewBranch(
           // исчерпанном бюджете (ревью 3).
           try {
             refute = await git(path, 'worktree', 'add', '--detach', refuteCwd, head)
-              .then(() => attachControllerIndex(refuteCwd, 'HEAD'))
               .then(() =>
                 measuredInvoke(
                   engine,
@@ -553,7 +548,6 @@ export async function reviewBranch(
               )) ||
                 (await git(refuteCwd, 'rev-parse', 'HEAD').catch(() => '')) !== head);
           } finally {
-            await detachControllerIndex(refuteCwd);
             await git(path, 'worktree', 'remove', '--force', refuteCwd).catch(() => undefined);
             // Дерево создано выше этим вызовом.
             await rm(refuteCwd, { recursive: true, force: true }).catch(() => undefined);
@@ -609,7 +603,6 @@ export async function reviewBranch(
       }
     }
   } finally {
-    await detachControllerIndex(cwd);
     if (added) await git(path, 'worktree', 'remove', '--force', cwd).catch(() => undefined);
     await rm(cwd, { recursive: true, force: true }).catch(() => undefined);
     if (trees !== dir) await rmdir(trees).catch(() => undefined);

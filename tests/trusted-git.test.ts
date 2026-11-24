@@ -11,17 +11,12 @@
 import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { git } from '../src/environment/process.ts';
-import {
-  attachControllerIndex,
-  captureGitMeta,
-  commitCandidate,
-  detachControllerIndex,
-} from '../src/engine/trusted-git.ts';
+import { captureGitMeta, commitCandidate } from '../src/engine/trusted-git.ts';
 import { approve, greet, runAll, setup, target } from './runner-fixture.ts';
 
 const WORK = 'add-greeting';
@@ -52,7 +47,8 @@ for (const [name, shell] of [
     assert.equal(target(ctx), before, 'ветка владельца не сдвинута');
   });
 
-test('ревью 2: обычный кандидат — коммит на ветке попытки с родителем-базой, HEAD не трогается', async () => {
+test('ревью 2/4: обычный кандидат — коммит на ветке попытки с родителем-базой; после записи index дерева совпадает с HEAD', async () => {
+  let checked: { status: string; diff: number | null } | undefined;
   const ctx = setup({
     scenario: {
       writer: [
@@ -63,6 +59,17 @@ test('ревью 2: обычный кандидат — коммит на вет
       ],
       reviewer: approve(),
     },
+    runner: {
+      hooks: {
+        implemented: ({ attempt }) => {
+          const cwd = ctx.engine.read((v) => v.attempt(attempt.id)!.worktree!);
+          checked = {
+            status: execFileSync('git', ['-C', cwd, 'status', '--porcelain'], { encoding: 'utf8' }),
+            diff: spawnSync('git', ['-C', cwd, 'diff', '--exit-code', 'HEAD']).status,
+          };
+        },
+      },
+    },
   });
   const base = target(ctx);
   await runAll(ctx);
@@ -70,6 +77,7 @@ test('ревью 2: обычный кандидат — коммит на вет
   assert.equal(a.status, 'succeeded', a.error);
   assert.equal(ctx.repo.git('rev-parse', `${a.candidateSha}^`), base);
   assert.equal(ctx.repo.git('rev-parse', `harness/run-${a.id}`), a.candidateSha);
+  assert.deepEqual(checked, { status: '', diff: 0 }, 'git status чист, git diff --exit-code — 0');
 });
 
 test('ревью 3: index дерева — ссылка на index владельца: нарушение области, staged-состояние владельца на месте', async () => {
@@ -150,7 +158,6 @@ test('ревью 3: commitCandidate — ветка попытки двигает
   const dir = join(mkdtempSync(join(tmpdir(), 'cas-')), 'w');
   ctx.repo.git('worktree', 'add', '-q', '-b', 'harness/run-cas', dir, base);
   const meta = await captureGitMeta(dir, 'refs/heads/harness/run-cas');
-  await attachControllerIndex(dir, 'HEAD');
   writeFileSync(join(dir, 'new.txt'), 'n\n');
   await git(dir, 'add', '-A');
   // Ветку попытки кто-то сдвинул: запись кандидата отказывает.
@@ -164,10 +171,6 @@ test('ревью 3: commitCandidate — ветка попытки двигает
   const sha = await commitCandidate(meta, base, 'c');
   assert.equal(ctx.repo.git('rev-parse', `${sha}^`), base);
   assert.equal(ctx.repo.git('rev-parse', 'harness/run-cas'), sha);
-  // index дерева не тронут: в нём new.txt нет.
-  assert.doesNotMatch(
-    execFileSync('git', ['-C', dir, 'ls-files'], { encoding: 'utf8' }),
-    /new\.txt/,
-  );
-  await detachControllerIndex(dir);
+  // Index дерева совпадает с записанным кандидатом.
+  assert.equal(execFileSync('git', ['-C', dir, 'status', '--porcelain'], { encoding: 'utf8' }), '');
 });

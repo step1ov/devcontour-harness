@@ -103,6 +103,14 @@ import { sameNode, toolchainFacts, toolchainText, usesPnpm } from '../environmen
 
 /** Метка молчаливого провала gate в тексте провала и итоге `harness gates` (alpha.69). */
 export const GATE_SILENT_FAILURE = 'GATE_SILENT_FAILURE';
+/**
+ * Gate меняет состояние git (P8-1, alpha.70 ревью 4): под границей записи
+ * облегчённого режима `.git` закрыт, а gate берёт блокировку index или пишет
+ * объекты/ссылки. Засчитан исполнителю с советом, кроме случая, когда тот
+ * же gate так же падает и на базе — тогда это определение gate
+ * (`gate-definition`, удержание до хода ведущего), как молчаливый провал.
+ */
+export const GATE_GIT_WRITE = 'GATE_GIT_WRITE';
 
 /** Длинное имя testcase заменяется хешем, а не обрезается: обрезка дала бы ложные совпадения. */
 export const TEST_ID_LIMIT = 1000;
@@ -1302,6 +1310,8 @@ export interface GateRun {
    * (удержание для ведущего), а не провал кода исполнителя.
    */
   silentOnBase?: (gateId: string) => boolean;
+  /** Тот же gate падал на базе, меняя состояние git (`GATE_GIT_WRITE`, ревью 4). */
+  gitWriteOnBase?: (gateId: string) => boolean;
   /**
    * Генеративный gate (`gate.property`): попытка, от которой seed, и
    * ожидаемая проверка поручения. Без `expected` — прежний уровень (отчёт
@@ -1733,6 +1743,27 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
             partialNotes.map((n) => '; ' + n).join(''),
         );
       }
+      // Gate меняет состояние git под границей записи (P8-1, ревью 4):
+      // совет; на базе так же — определение gate, удержание для ведущего.
+      if (
+        writeGuardActive(run.policy) &&
+        !property &&
+        !reaped &&
+        GUARDED_GIT_DENIAL.test(result.stderr + '\n' + result.stdout)
+      ) {
+        if (run.gitWriteOnBase?.(gate.id)) {
+          kind = 'environment';
+          cause = 'gate-definition';
+          throw new Error(
+            `${NO_RETRY_GATE_CODES['gate-definition']}: ${GATE_GIT_WRITE}: ${GUARDED_GIT_ADVICE}; так же падает и на базе. ` +
+              `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`,
+          );
+        }
+        throw new Error(
+          `${GATE_GIT_WRITE}: ${GUARDED_GIT_ADVICE}. Если так же падает и база, ведущий проверяет gate: harness gates --sha <база> --gate ${gate.id}. ` +
+            `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`,
+        );
+      }
       // Имена не из отчёта gate (вывод, отчёт команды): отчёт gate мог
       // назвать только общий провал обёртки.
       const named =
@@ -1752,11 +1783,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
           .filter(Boolean)
           .join(': ') +
           partialNotes.map((n) => '; ' + n).join('') +
-          (failureSummary.withheld ? `; ${WITHHELD_NOTE}` : '') +
-          // git gate упёрся в границу записи (ревью alpha.70): совет, как быть.
-          (writeGuardActive(run.policy) && GUARDED_GIT_DENIAL.test(result.stderr + result.stdout)
-            ? `; ${GUARDED_GIT_ADVICE}`
-            : ''),
+          (failureSummary.withheld ? `; ${WITHHELD_NOTE}` : ''),
       );
     }
     if (reportPath) {

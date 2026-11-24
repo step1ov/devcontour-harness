@@ -1,8 +1,8 @@
 /**
- * P8-1 (0.1.0-alpha.70, ревью 2 — минимум): под границей записи открыт
- * только каталог git дерева попытки. `git status`, `git diff`,
- * `git checkout -- .` работают; `git add`, `git commit`, `git stash`,
- * ветки, общие объекты, паки и stash владельца закрыты.
+ * P8-1 (0.1.0-alpha.70, ревью 4): под границей записи git дерева попытки —
+ * как в alpha.69: каталог git закрыт, работают только команды для чтения;
+ * index, ссылки, stash, объекты и config владельца закрыты, stash владельца
+ * и на чтение. Исполнитель получает те же правила (тот же gitWorktreeGuard).
  */
 import './temp-scope.ts';
 import { test } from 'node:test';
@@ -54,12 +54,10 @@ const packs = (common: string) =>
     .filter((f) => !f.startsWith('tmp'))
     .sort();
 
-test('каталог git дерева попытки: открыт только его gitdir', () => {
+test('git дерева попытки под границей: каталог git закрыт (как alpha.69), stash владельца не читается', () => {
   const { r, tree } = attemptTree('harness/run-a1');
   const common = realpathSync(join(r.dir, '.git'));
   assert.deepEqual(gitWorktreeGuard(tree)!.entries, [
-    { subpath: join(common, 'worktrees', 'w') },
-    { denyWrite: join(common, 'worktrees', 'w', 'config.worktree') },
     { denyRead: join(common, 'refs', 'stash') },
     { denyRead: join(common, 'logs', 'refs', 'stash') },
   ]);
@@ -69,7 +67,7 @@ test('каталог git дерева попытки: открыт только 
 });
 
 test(
-  'gate под границей: status/diff/checkout -- . работают (P8-1); add, commit, stash, ветки, общие объекты и паки закрыты',
+  'под границей: git для чтения работает; add, commit, stash, checkout -- ., reset, checkout ветки, ветки, общие объекты и config закрыты; дерево попытки и владелец не тронуты',
   { skip: !supported },
   async () => {
     const { r, tree } = attemptTree('harness/run-a1');
@@ -79,33 +77,33 @@ test(
       packs: packs(common),
       other: r.git('rev-parse', 'other'),
       own: r.git('rev-parse', 'harness/run-a1'),
+      head: readFileSync(join(common, 'worktrees', 'w', 'HEAD'), 'utf8'),
     };
     const main = join(r.dir, 'src', 'a.js');
+    const ok = (name: string, cmd: string) =>
+      `${cmd} >/dev/null 2>&1 && echo ${name}=ok || echo ${name}=fail`;
     const script = [
-      'set -e',
       'echo changed > src/a.js',
-      'git status --porcelain > /dev/null',
-      'git diff --quiet && exit 9 || true',
-      'git checkout -- .',
-      'git diff --exit-code',
-      `( echo hacked > ${main} ) 2>/dev/null && echo main=open || echo main=denied`,
-      `( echo x >> ${join(common, 'config')} ) 2>/dev/null && echo config=open || echo config=denied`,
-      `( echo x > ${join(common, 'objects', 'pack', 'planted.pack')} ) 2>/dev/null && echo objects=open || echo objects=denied`,
-      'git branch -f other HEAD 2>/dev/null && echo branch=open || echo branch=denied',
-      'git update-ref refs/heads/main HEAD 2>/dev/null && echo ref=open || echo ref=denied',
-      'echo b > src/b.js',
-      'git add -A 2>/dev/null && echo add=open || echo add=denied',
-      'git -c user.name=t -c user.email=t@t commit -qam gate >/dev/null 2>&1 && echo commit=open || echo commit=denied',
-      'echo s > src/a.js',
-      'git stash -q 2>/dev/null && echo stash=open || echo stash=denied',
-      'git checkout -q -- . 2>/dev/null || true',
-      // Чистое дерево: pop/apply не видят stash владельца (чтение закрыто).
-      'git stash pop -q 2>/dev/null && echo pop=open || echo pop=denied',
-      'git stash apply -q 2>/dev/null && echo apply=open || echo apply=denied',
-      'git stash list | grep -q owner-stash && echo list=open || echo list=denied',
-      `( echo x > ${join(common, 'worktrees', 'w', 'config.worktree')} ) 2>/dev/null && echo cfgwt=open || echo cfgwt=denied`,
-      'git gc -q --prune=now 2>/dev/null || true',
-      'rm -f src/b.js',
+      ok('status', 'git status --porcelain'),
+      'git status --porcelain | grep -q "src/a.js" && echo seen=yes || echo seen=no',
+      ok('diff', 'git diff'),
+      ok('diffexit', 'git diff --exit-code'),
+      ok('log', 'git log -1'),
+      ok('show', 'git show HEAD:src/a.js'),
+      ok('add', 'git add -A'),
+      ok('commit', 'git -c user.name=t -c user.email=t@t commit -qam gate'),
+      ok('stash', 'git stash'),
+      ok('restore', 'git checkout -- .'),
+      ok('reset', 'git reset --hard'),
+      ok('switch', 'git checkout -q other'),
+      ok('branch', 'git branch -f other HEAD'),
+      ok('ref', 'git update-ref refs/heads/main HEAD'),
+      ok('pop', 'git stash pop'),
+      ok('apply', 'git stash apply'),
+      ok('cfg', `sh -c 'echo x >> ${join(common, 'config')}'`),
+      ok('objects', `sh -c 'echo x > ${join(common, 'objects', 'pack', 'planted.pack')}'`),
+      ok('main', `sh -c 'echo hacked > ${main}'`),
+      'true',
     ].join('\n');
     const result = await runCheck(light, {
       argv: ['/bin/sh', '-c', script],
@@ -118,34 +116,43 @@ test(
       settingsDir: mkdtempSync(join(tmpdir(), 'guard-git-settings-')),
     });
     assert.equal(result.code, 0, result.stdout + '|' + result.stderr);
-    for (const line of [
-      'main=denied',
-      'config=denied',
-      'objects=denied',
-      'branch=denied',
-      'ref=denied',
-      'add=denied',
-      'commit=denied',
-      'stash=denied',
-      'pop=denied',
-      'apply=denied',
-      'list=denied',
-      'cfgwt=denied',
-    ])
+    // Git для чтения: необязательное обновление index без блокировки пропускается.
+    for (const line of ['status=ok', 'seen=yes', 'diff=ok', 'diffexit=fail', 'log=ok', 'show=ok'])
       assert.match(result.stdout, new RegExp(line), result.stdout);
-    assert.equal(readFileSync(main, 'utf8'), 'a\n', 'основное дерево не тронуто');
-    // Дерево попытки не получило содержимого stash владельца (README.md).
+    for (const name of [
+      'add',
+      'commit',
+      'stash',
+      'restore',
+      'reset',
+      'switch',
+      'branch',
+      'ref',
+      'pop',
+      'apply',
+      'cfg',
+      'objects',
+      'main',
+    ])
+      assert.match(result.stdout, new RegExp(`${name}=fail`), result.stdout);
+    // Дерево попытки: правка осталась (checkout/reset/stash не прошли), stash
+    // владельца не наложен.
+    assert.equal(readFileSync(join(tree, 'src', 'a.js'), 'utf8'), 'changed\n');
     assert.equal(readFileSync(join(tree, 'README.md'), 'utf8'), 'app\n');
     assert.equal(
-      execFileSync('git', ['-C', tree, 'status', '--porcelain'], { encoding: 'utf8' }),
-      '',
+      readFileSync(join(common, 'worktrees', 'w', 'HEAD'), 'utf8'),
+      before.head,
+      'HEAD дерева не переключён',
     );
-    assert.equal(r.git('rev-parse', 'other'), before.other, 'ветка владельца на месте');
-    assert.equal(r.git('rev-parse', 'harness/run-a1'), before.own, 'ветка попытки на месте');
-    assert.match(r.git('stash', 'list'), /owner-stash/, 'stash владельца на месте');
-    assert.deepEqual(packs(common), before.packs, 'паки владельца не тронуты');
+    // Владелец: основное дерево, ветки, stash, config, паки — прежние.
+    assert.equal(readFileSync(main, 'utf8'), 'a\n');
+    assert.equal(r.git('rev-parse', 'other'), before.other);
+    assert.equal(r.git('rev-parse', 'harness/run-a1'), before.own);
+    assert.match(r.git('stash', 'list'), /owner-stash/);
+    assert.doesNotMatch(readFileSync(join(common, 'config'), 'utf8'), /^x$/m);
+    assert.deepEqual(packs(common), before.packs);
     assert.match(
-      'error: insufficient permission for adding an object to repository database .git/objects',
+      "fatal: Unable to create '/r/.git/worktrees/w/index.lock': Operation not permitted",
       GUARDED_GIT_DENIAL,
     );
   },

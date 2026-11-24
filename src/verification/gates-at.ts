@@ -585,6 +585,8 @@ export function silentGateOnSha(
   sha: string,
   gateId: string,
   definition: string,
+  /** Признаки провала в итоге (по умолчанию — молчаливый провал). */
+  markers: readonly string[] = [GATE_SILENT_FAILURE, 'GATE_DEFINITION_NO_CAUSE'],
 ): boolean {
   const root = join(stateDir, 'gates-at');
   let names: string[];
@@ -631,10 +633,6 @@ export function silentGateOnSha(
     !!g &&
     g.status === 'failed' &&
     g.definition === definition &&
-    [g.summary, g.message].some(
-      (t) =>
-        typeof t === 'string' &&
-        (t.includes(GATE_SILENT_FAILURE) || t.includes('GATE_DEFINITION_NO_CAUSE')),
-    )
+    [g.summary, g.message].some((t) => typeof t === 'string' && markers.some((m) => t.includes(m)))
   );
 }

@@ -143,6 +143,7 @@ import {
   type ProbeSpec,
 } from '../agents/review-probe.ts';
 import {
+  GATE_GIT_WRITE,
   GateTimeout,
   prepareWriterDependencies,
   ReapedGate,
@@ -190,10 +191,8 @@ import { CleanupFailure, cleanupEnvironment } from '../environment/lifecycle.ts'
 import { defaultResourceDatabase, withResources } from '../environment/resources.ts';
 import { gitWorktreeGuard, guardEntries } from '../environment/write-guard.ts';
 import {
-  attachControllerIndex,
   captureGitMeta,
   commitCandidate,
-  detachControllerIndex,
   gitMetaProblem,
   resetIndex,
   type TrustedGitMeta,
@@ -1005,16 +1004,13 @@ export class Runner {
                         [input.cwd, ...(scratch ? [scratch] : [])],
                         gitGuard?.entries ?? [],
                       );
-                      const pick = <K extends 'subpath' | 'prefix' | 'denyWrite' | 'denyRead'>(
-                        k: K,
-                      ) => entries.flatMap((e) => (k in e ? [(e as Record<K, string>)[k]] : []));
+                      const pick = <K extends 'subpath' | 'prefix' | 'denyRead'>(k: K) =>
+                        entries.flatMap((e) => (k in e ? [(e as Record<K, string>)[k]] : []));
                       const prefixes = pick('prefix');
-                      const denyWrite = pick('denyWrite');
                       const denyRead = pick('denyRead');
                       return {
                         guard: pick('subpath'),
                         ...(prefixes.length ? { guardPrefixes: prefixes } : {}),
-                        ...(denyWrite.length ? { guardDenyWrite: denyWrite } : {}),
                         ...(denyRead.length ? { guardDenyRead: denyRead } : {}),
                       };
                     })()
@@ -1589,6 +1585,10 @@ export class Runner {
   ): Promise<string | undefined> {
     if (attempt.candidateSha || !attempt.worktree || !attempt.baseSha || !work.approvedDigest)
       return;
+    // Метаданные git дерева изменены (ссылка вместо index, переключённый
+    // HEAD): черновик не снимается — git хоста писал бы не туда (ревью 4).
+    const meta = this.trustedGit.get(attempt.id);
+    if (meta && (await gitMetaProblem(meta))) return;
     try {
       const dir = join(artifacts, 'implementation');
       await mkdir(dir, { recursive: true });
@@ -1907,8 +1907,6 @@ export class Runner {
           worktrees.push(cwd);
           // Доверенные метаданные git дерева — до любого процесса попытки (ревью 2).
           this.trustedGit.set(attempt.id, await captureGitMeta(cwd, `refs/heads/${branch}`));
-          // Свой index controller: index дерева пишут исполнитель и gates (ревью 3).
-          await attachControllerIndex(cwd, 'HEAD');
           this.engine.phase(attempt.id, attempt.token, 'running', { baseSha: base, worktree: cwd });
           attempt = { ...attempt, baseSha: base, worktree: cwd };
           const gates = ordered(repo.gates, attempt.requiredGates ?? repo.gates.map((g) => g.id));
@@ -2518,7 +2516,6 @@ export class Runner {
           !persisted?.continuedFrom?.applied &&
           !persisted?.candidateSha;
         this.preparing.delete(attempt.id);
-        this.trustedGit.delete(attempt.id);
         const kind: FailureKind = preWriter ? 'environment' : classified;
         // Незакоммиченная работа сохраняется при любом отказе до кандидата:
         // по времени, «не закончил», обрыв. Иначе повтор начинал с пустого
@@ -2542,6 +2539,7 @@ export class Runner {
           if (saved) reported += `; ${artifactOnly(saved)}`;
         } else if (kind !== 'provider-auth')
           await this.keepDraft(attempt, await this.workOf(attempt), artifacts);
+        this.trustedGit.delete(attempt.id);
         // Пример reviewer — гипотеза; эталон решает, станет ли он обязательным:
         // подтверждение идёт до записи отказа, и принятие новой версии корпуса
         // ждёт окончания этой попытки. В operator mode подтверждение — ручное.
@@ -2638,7 +2636,6 @@ export class Runner {
     const errors: string[] = [];
     if (!keep) {
       for (const tree of pending.worktrees) {
-        await detachControllerIndex(tree.dir);
         await git(tree.checkout, 'worktree', 'remove', '--force', tree.dir).catch((e: unknown) => {
           if (!existsSync(tree.dir)) return;
           left.worktrees.push(tree);
@@ -3312,6 +3309,16 @@ export class Runner {
                 id,
                 gateDigest(gate),
               ),
+            // Gate меняет состояние git и на базе (P8-1, ревью 4).
+            gitWriteOnBase: (id: string) =>
+              silentGateOnSha(
+                this.options.stateDir,
+                attempt.repositoryId,
+                attempt.baseSha!,
+                id,
+                gateDigest(gate),
+                [GATE_GIT_WRITE],
+              ),
           }
         : {}),
       signal,
@@ -3804,7 +3811,6 @@ export class Runner {
     let dirty = false;
     try {
       await git(input.cwd, 'worktree', 'add', '--detach', checkout, input.sha);
-      await attachControllerIndex(checkout, 'HEAD');
       response = await this.call(
         this.adapter(attempt.reviewer),
         {
@@ -3846,7 +3852,6 @@ export class Runner {
         },
       };
     } finally {
-      await detachControllerIndex(checkout);
       await git(input.cwd, 'worktree', 'remove', '--force', checkout).catch(() => undefined);
       // Каталог создан выше этим вызовом (mkdtemp под временным каталогом controller).
       await rm(tree, { recursive: true, force: true }).catch(() => undefined);
@@ -4786,8 +4791,6 @@ export class Runner {
     const base = await git(repoPath, 'rev-parse', repo.targetRef);
     await git(repoPath, 'worktree', 'add', '--detach', cwd, base);
     worktrees.push(cwd);
-    // Свой index controller и в дереве интеграции (ревью 3).
-    await attachControllerIndex(cwd, 'HEAD');
     try {
       await git(
         cwd,

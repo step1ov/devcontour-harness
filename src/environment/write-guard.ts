@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync } from 'node:fs';
 import { readBoundedHandle } from './bounded-read.ts';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -31,18 +31,10 @@ import {
 export type GuardEntry =
   | { subpath: string }
   | { prefix: string }
-  /** Закрыто на запись и внутри открытого каталога (ревью 3: `config.worktree`). */
-  | { denyWrite: string }
   /** Закрыто на чтение (ревью 3: общий stash владельца). */
   | { denyRead: string };
 const pathOf = (e: GuardEntry) =>
-  'subpath' in e
-    ? e.subpath
-    : 'prefix' in e
-      ? e.prefix
-      : 'denyWrite' in e
-        ? e.denyWrite
-        : e.denyRead;
+  'subpath' in e ? e.subpath : 'prefix' in e ? e.prefix : e.denyRead;
 
 const realOr = (path: string): string => {
   try {
@@ -112,15 +104,13 @@ export function seatbeltProfile(entries: GuardEntry[]) {
           : [],
     ),
   ];
-  const denyWrite = entries.flatMap((e) => ('denyWrite' in e ? [e.denyWrite] : []));
   const denyRead = entries.flatMap((e) => ('denyRead' in e ? [e.denyRead] : []));
   return [
     '(version 1)',
     '(allow default)',
     '(allow process-exec (literal "/bin/ps") (with no-sandbox))',
     `(deny file-write* (require-not (require-any ${allowed.join(' ')})))`,
-    // Позднее правило важнее: точные запреты поверх открытых каталогов.
-    ...denyWrite.map((p) => `(deny file-write* (literal ${sbString(p)}))`),
+    // Позднее правило важнее: точные запреты чтения.
     ...denyRead.map((p) => `(deny file-read* file-write* (literal ${sbString(p)}))`),
   ].join('\n');
 }
@@ -169,9 +159,7 @@ export function guardedArgv(
       ? { subpath: realOr(e.subpath) }
       : 'prefix' in e
         ? { prefix: realOr(e.prefix) }
-        : 'denyWrite' in e
-          ? { denyWrite: realOr(e.denyWrite) }
-          : { denyRead: realOr(e.denyRead) },
+        : { denyRead: realOr(e.denyRead) },
   );
   const support = writeGuardProbe.support(platform);
   if (!support.ok)
@@ -194,22 +182,11 @@ export function guardedArgv(
   const binds = entries.flatMap((e) =>
     'subpath' in e || 'prefix' in e ? ['--bind-try', pathOf(e), pathOf(e)] : [],
   );
-  // Точные запреты — после открытых привязок (позднее важнее): запись
-  // закрыта привязкой только для чтения (файл создаётся заранее, пустым),
-  // чтение — пустым файлом поверх существующего (ревью 3).
-  const denies = entries.flatMap((e) => {
-    if ('denyWrite' in e) {
-      try {
-        if (!existsSync(e.denyWrite)) writeFileSync(e.denyWrite, '', { flag: 'wx' });
-      } catch {
-        /* нет прав — путь и так закрыт корнем «только чтение» */
-      }
-      return existsSync(e.denyWrite) ? ['--ro-bind', e.denyWrite, e.denyWrite] : [];
-    }
-    if ('denyRead' in e)
-      return existsSync(e.denyRead) ? ['--ro-bind', '/dev/null', e.denyRead] : [];
-    return [];
-  });
+  // Запрет чтения — пустым файлом поверх существующего, после открытых
+  // привязок (позднее важнее; ревью 3).
+  const denies = entries.flatMap((e) =>
+    'denyRead' in e && existsSync(e.denyRead) ? ['--ro-bind', '/dev/null', e.denyRead] : [],
+  );
   // /proc — привязкой хоста, а не новым procfs: `--proc` требует своего
   // пространства PID, а PID остаются общими с хостом (ps, kill).
   return [
@@ -238,16 +215,15 @@ const gitOut = (cwd: string, args: string[]) =>
   }).trim();
 
 /**
- * Каталог git рабочего дерева попытки (0.1.0-alpha.70, P8-1; ревью 2 —
- * минимум). Под границей открыт на запись только каталог git связанного
- * дерева попытки `<common>/worktrees/<имя>` (целиком, на Linux — привязкой
- * каталога): index, `index.lock`, HEAD — этого и требовал P8-1
- * (`git status`, `git diff`, `git checkout -- .`). Общий каталог
- * репозитория закрыт целиком: `objects`, ссылки, stash, `config`, `hooks`.
- * Поэтому `git add`, `git commit` и `git stash` под границей отказывают —
- * кандидата записывает controller (docs/light-mode.md). Метаданные дерева
- * (`HEAD`, `commondir`, `gitdir`, файл `.git`) controller перед записью
- * кандидата сверяет с теми, что создал сам (`trustedGitMeta`).
+ * Git дерева попытки под границей записи (0.1.0-alpha.70, ревью 4 —
+ * граница alpha.69). Каталог git дерева (`<common>/worktrees/<имя>`) и весь
+ * общий `.git` на запись закрыты, как в alpha.69: работают только команды
+ * git для чтения (`status`, `diff`, `diff --exit-code`, `log`, `show` —
+ * необязательное обновление index git пропускает, когда не берёт его
+ * блокировку); `add`, `commit`, `stash`, `checkout -- .`, `reset`
+ * отказывают. Кандидата записывает controller. Сверх alpha.69 закрыт и на
+ * чтение stash владельца (`refs/stash`, `logs/refs/stash`): `git stash
+ * pop`/`apply` его не видят.
  */
 export interface GitWorktreeGuard {
   entries: GuardEntry[];
@@ -266,12 +242,6 @@ export function gitWorktreeGuard(cwd: string): GitWorktreeGuard | undefined {
   if (gitDir === common) return undefined;
   return {
     entries: [
-      { subpath: gitDir },
-      // `config.worktree` задаёт фильтры и `core.worktree` git хоста при
-      // `extensions.worktreeConfig` — закрыт и внутри открытого gitdir.
-      { denyWrite: join(gitDir, 'config.worktree') },
-      // stash владельца не виден: `git stash pop/apply` под границей не
-      // наложит его на дерево попытки (ревью 3).
       { denyRead: join(common, 'refs', 'stash') },
       { denyRead: join(common, 'logs', 'refs', 'stash') },
     ],
@@ -284,7 +254,7 @@ export const GUARDED_GIT_DENIAL =
 
 /** Совет к провалу gate, в выводе которого git упёрся в границу записи. */
 export const GUARDED_GIT_ADVICE =
-  'git под границей записи облегчённого режима: в дереве попытки работают git status, git diff и git checkout -- .; git add, git commit и git stash отказывают (общий .git закрыт) — кандидата записывает controller; в gate используйте git diff/git status (docs/light-mode.md)';
+  'gate меняет состояние git, а под границей записи облегчённого режима .git закрыт: работают только команды для чтения (git status, git diff, git diff --exit-code, git log, git show); git add, commit, stash, checkout -- ., reset отказывают. Gate не меняет состояние git: сгенерированные файлы убирайте файловыми операциями, проверяйте git diff --exit-code и git clean -n или генерируйте во временный каталог и сравнивайте (docs/light-mode.md)';
 
 /** Записываемые пути gate или исполнителя: свои каталоги + кеши политики. */
 export function guardEntries(

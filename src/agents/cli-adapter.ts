@@ -423,7 +423,6 @@ export function cliAdapter(
           launch = guardedArgv(argv, [
             ...light.guard.map((subpath) => ({ subpath })),
             ...(light.guardPrefixes ?? []).map((prefix) => ({ prefix })),
-            ...(light.guardDenyWrite ?? []).map((denyWrite) => ({ denyWrite })),
             ...(light.guardDenyRead ?? []).map((denyRead) => ({ denyRead })),
             ...(outDir ? [{ subpath: outDir }] : []),
             ...(runtimeHome ? [{ subpath: runtimeHome }] : []),
