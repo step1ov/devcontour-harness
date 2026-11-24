@@ -1500,6 +1500,63 @@ export const cliCommands = {
       'NOT_FOUND',
     ],
   },
+  'review-release': {
+    description:
+      'Ревью выпуска перед `release done` (0.1.0-alpha.69): независимый reviewer по правилу ревью кода роли проверяет принятую цель против договора выпуска — постановок и критериев приёмки всех работ зарегистрированных графов, ответов владельца, топологии развёртывания (`release.topology`: шлюз/прокси и окружение production, прочитанные на head) — и diff base..head в отдельном рабочем дереве, только чтение. Запись — `kind: release`, не приёмка; находки исправляют обычные работы',
+    writes: true,
+    idempotency:
+      'Предмет — репозиторий, роль и SHA базы выпуска: каждый вызов — следующий раунд, reviewer называет состояние прежних открытых находок. Тот же head, договор выпуска, автор, назначение reviewer и итог gates, уже одобренные последним раундом, — тот же раунд без вызова модели',
+    args: [
+      {
+        ...state,
+        description:
+          'Каталог состояния: постановки и ответы выпуска, запись ревью и его артефакты; политика — из него, если нет --policy',
+      },
+      { ...policy, required: false },
+      {
+        name: '--base',
+        value: 'text',
+        required: false,
+        description:
+          'База выпуска: SHA или ref; нет — база самой ранней попытки репозитория в состоянии',
+      },
+      {
+        name: '--head',
+        value: 'text',
+        required: false,
+        description: 'Проверяемая цель: SHA или ref; нет — target ref репозитория (принятая цель)',
+      },
+      {
+        name: '--role',
+        value: 'id',
+        required: false,
+        description:
+          'Роль политики, чьё правило ревью кода выбирает reviewer; нужна, если ролей несколько',
+      },
+      {
+        ...author,
+        required: false,
+        description: 'Автор кода выпуска для правила вендора; нет — writer роли',
+      },
+      {
+        name: '--repository',
+        value: 'id',
+        required: false,
+        description: 'ID репозитория политики; нужен, если их несколько',
+      },
+    ],
+    refusals: [
+      'INVALID_INPUT',
+      'REVIEW_REJECTED',
+      'CANCELLED',
+      'REVIEWER_SAME_VENDOR',
+      'REVIEWER_MISSING',
+      'ATTEMPTS_EXHAUSTED',
+      'BUDGET_EXHAUSTED',
+      'BUDGET_UNKNOWN',
+      'NOT_FOUND',
+    ],
+  },
   smoke: {
     description:
       'Поднять только окружение репозитория на коммите — снимки зависимостей, рабочее дерево, lifecycle setup/ready, хранилище зависимостей, prepare, teardown — тем же исполнением, что integration, без gates и без вызовов моделей; замер каждого шага и класс отказа (port-busy, timeout, crash, missing-tool, cleanup, tree-changed, environment)',
@@ -1693,7 +1750,7 @@ export const cliCommands = {
   },
   'release-done': {
     description:
-      'Итоговый отчёт ведущего: выпуск готов — только когда весь код принят (ни одной открытой работы или доработки); до него представление говорит «код принят, ведущий ещё работает», готовность ниже 100 % (0.1.0-alpha.66). Синоним: harness release done --summary "<отчёт>"',
+      'Итоговый отчёт ведущего: выпуск готов — только когда весь код принят (ни одной открытой работы или доработки); до него представление говорит «код принят, ведущий ещё работает», готовность ниже 100 % (0.1.0-alpha.66). Ревью выпуска (0.1.0-alpha.69): при `release.review: required` (умолчание облегчённого режима) нужен одобренный раунд `harness review-release` на текущей принятой цели без открытых блокирующих находок, иначе NOT_READY; `advisory` (умолчание строгого) — выпуск закрывается с полем warning. Синоним: harness release done --summary "<отчёт>"',
     writes: true,
     idempotency: 'Повтор заменяет итоговый отчёт новым с новым временем',
     args: [
@@ -3477,6 +3534,7 @@ export const cliDataSchemas = {
   'input-carry': inputCarryDataSchema,
   gates: gatesDataSchema,
   'review-code': codeReviewRecordSchema,
+  'review-release': codeReviewRecordSchema,
   smoke: smokeDataSchema,
   update: updateDataSchema,
   'lead-begin': leadDataSchema,
