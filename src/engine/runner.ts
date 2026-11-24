@@ -188,7 +188,14 @@ import {
 } from '../verification/dependencies.ts';
 import { CleanupFailure, cleanupEnvironment } from '../environment/lifecycle.ts';
 import { defaultResourceDatabase, withResources } from '../environment/resources.ts';
-import { gitWorktreeGuard, guardEntries, importGuardObjects } from '../environment/write-guard.ts';
+import { gitWorktreeGuard, guardEntries } from '../environment/write-guard.ts';
+import {
+  captureGitMeta,
+  commitCandidate,
+  gitMetaProblem,
+  resetIndex,
+  type TrustedGitMeta,
+} from './trusted-git.ts';
 import {
   attemptEnvFile,
   allocateAttemptPorts,
@@ -937,11 +944,11 @@ export class Runner {
       );
     }
     const scratch = temp?.dir;
-    // Исполнитель облегчённого режима под границей: свой каталог git дерева
-    // и своё хранилище объектов (P8-1, ревью alpha.70).
+    // Исполнитель облегчённого режима под границей: каталог git своего
+    // дерева (P8-1; ревью 2 — только он).
     const gitGuard =
       !review && harnessModeOf(this.policy) === 'light' && writeGuardActive(this.policy)
-        ? gitWorktreeGuard(input.cwd, execution.env)
+        ? gitWorktreeGuard(input.cwd)
         : undefined;
     // Вызов под учётом: бюджет проверяется до вызова, расход закрепляется за попыткой.
     const response = await measuredInvoke(
@@ -1001,12 +1008,9 @@ export class Runner {
             : {}),
         },
         timeoutMs: Math.min(this.policy.runTimeoutMs, input.timeoutMs ?? Infinity),
-        env: {
-          ...Object.fromEntries(
-            Object.entries(execution.env).filter((e): e is [string, string] => e[1] !== undefined),
-          ),
-          ...(gitGuard?.env ?? {}),
-        },
+        env: Object.fromEntries(
+          Object.entries(execution.env).filter((e): e is [string, string] => e[1] !== undefined),
+        ),
         artifactDir: input.dir,
         secrets: [...(execution.redact.secrets ?? [])],
         ...(review && input.probe ? { probe: input.probe } : {}),
@@ -1018,14 +1022,10 @@ export class Runner {
         runId: input.attempt.id,
         stage: input.stage ?? (review ? input.phase + '-review' : 'implementation'),
       },
-    ).finally(() => {
-      // Объекты git, записанные исполнителем, — в общее хранилище (P8-1).
-      if (gitGuard) importGuardObjects(input.cwd, gitGuard);
+    ).finally(() =>
       // Временные файлы исполнителя — не артефакт попытки: каталог свой, создан выше.
-      return scratch
-        ? rm(scratch, { recursive: true, force: true }).catch(() => undefined)
-        : undefined;
-    });
+      scratch ? rm(scratch, { recursive: true, force: true }).catch(() => undefined) : undefined,
+    );
     // Ответ «передан исполнителю» — только когда runtime вызова writer
     // попытки, выданной с ним, действительно работал (ответ не
     // `unavailable`: процесс запустился), а не по apply, claim или началу
@@ -1102,6 +1102,8 @@ export class Runner {
    * (P8-4, ревью alpha.70): отказ здесь — отказ окружения, не засчитан.
    */
   private preparing = new Set<string>();
+  /** Метаданные git деревьев попыток, созданных этим controller (ревью 2). */
+  private trustedGit = new Map<string, TrustedGitMeta>();
   /** Поддержка протокола переходов находок адаптером reviewer, по runtime. */
   private protocols = new Map<RuntimeName, Promise<boolean>>();
   /**
@@ -1877,16 +1879,19 @@ export class Runner {
           );
           attempt = { ...attempt, ...(reuse.reusedFrom ? { reusedFrom: reuse.reusedFrom } : {}) };
           await mkdir(dirname(cwd), { recursive: true });
+          const branch = `${this.options.branchPrefix ?? 'harness/run-'}${attempt.id}`;
           await git(
             repoPath,
             'worktree',
             'add',
             '-b',
-            `${this.options.branchPrefix ?? 'harness/run-'}${attempt.id}`,
+            branch,
             cwd,
             reuse.reusedFrom?.candidateSha ?? base,
           );
           worktrees.push(cwd);
+          // Доверенные метаданные git дерева — до любого процесса попытки (ревью 2).
+          this.trustedGit.set(attempt.id, await captureGitMeta(cwd, `refs/heads/${branch}`));
           this.engine.phase(attempt.id, attempt.token, 'running', { baseSha: base, worktree: cwd });
           attempt = { ...attempt, baseSha: base, worktree: cwd };
           const gates = ordered(repo.gates, attempt.requiredGates ?? repo.gates.map((g) => g.id));
@@ -2113,11 +2118,22 @@ export class Runner {
                             .map((p) => relative(cwd, p))
                             .join(', '),
                       );
+                    // Метаданные git дерева — те, что создал controller (ревью 2):
+                    // иначе запись кандидата пошла бы через чужую ветку.
+                    const meta = this.trustedGit.get(attempt.id);
+                    const metaProblem = meta ? await gitMetaProblem(meta) : undefined;
+                    if (metaProblem)
+                      throw new TaskFailure(
+                        'scope-violation',
+                        `Исполнитель изменил метаданные git попытки: ${metaProblem}; ветками и интеграцией владеет harness`,
+                      );
                     if ((await git(cwd, 'rev-parse', 'HEAD')) !== base)
                       throw new TaskFailure(
                         'scope-violation',
                         'Исполнитель изменил HEAD; интеграцией владеет harness',
                       );
+                    // Index — заново от базы: флаги index исполнителя не прячут изменения.
+                    if (meta) await resetIndex(meta, base);
                     await git(cwd, 'add', '-A');
                     const changed = (
                       await git(cwd, 'diff', '--cached', '--no-renames', '--name-only', '-z')
@@ -2277,17 +2293,21 @@ export class Runner {
                       });
                       return base;
                     }
-                    await git(
-                      cwd,
-                      '-c',
-                      'core.hooksPath=/dev/null',
-                      'commit',
-                      '--no-gpg-sign',
-                      '-q',
-                      '-m',
-                      `${work.id}: ${work.order.title}`,
-                    );
-                    const committed = await git(cwd, 'rev-parse', 'HEAD');
+                    // Кандидат — не через HEAD: write-tree, commit-tree и
+                    // update-ref ветки попытки с ожидаемым прежним значением.
+                    const committed = meta
+                      ? await commitCandidate(meta, base, `${work.id}: ${work.order.title}`)
+                      : (await git(
+                          cwd,
+                          '-c',
+                          'core.hooksPath=/dev/null',
+                          'commit',
+                          '--no-gpg-sign',
+                          '-q',
+                          '-m',
+                          `${work.id}: ${work.order.title}`,
+                        ),
+                        await git(cwd, 'rev-parse', 'HEAD'));
                     await this.options.hooks?.implemented?.({
                       attempt,
                       output: result.data,
@@ -2477,6 +2497,7 @@ export class Runner {
           !persisted?.continuedFrom?.applied &&
           !persisted?.candidateSha;
         this.preparing.delete(attempt.id);
+        this.trustedGit.delete(attempt.id);
         const kind: FailureKind = preWriter ? 'environment' : classified;
         // Незакоммиченная работа сохраняется при любом отказе до кандидата:
         // по времени, «не закончил», обрыв. Иначе повтор начинал с пустого
@@ -2624,6 +2645,7 @@ export class Runner {
    * отказ повторной очистки оставляет запись и входы.
    */
   async finishCleanup(attemptId: string) {
+    this.trustedGit.delete(attemptId);
     let attempt = this.engine.read((v) => v.attempt(attemptId));
     if (!attempt) throw new HarnessError('NOT_FOUND', 'Попытка не найдена: ' + attemptId);
     // Попытка упавшего процесса: срок владения истёк, а recovery ещё не

@@ -65,25 +65,22 @@ strict`) для чужого кода или секретов production. Стр
 - каталог своего вызова (исполнитель: файл ответа runtime и свой домашний
   каталог CLI);
 - кеши инструментов (`DEFAULT_WRITE_GUARD_CACHES`);
-- каталог git своего дерева попытки (с 0.1.0-alpha.70): открыт его
-  каталог `.git/worktrees/<имя>` (index, `index.lock`, HEAD, журналы) и
-  ссылка его собственной ветки `refs/heads/harness/run-<попытка>` с
-  журналом — точными путями (на Linux bubblewrap открывает только
-  существующие файлы, а git пишет `.lock` рядом, поэтому коммит в ветку
-  попытки там отказывает). Остальной общий `.git` репозитория закрыт целиком: ссылки веток, stash владельца, `config`,
-  `hooks`, объекты и паки. Новые объекты процесс пишет в своё хранилище
-  (`<gitdir>/hx-objects` через `GIT_OBJECT_DIRECTORY`), общее читает как
-  alternates; `gc.auto=0` и `maintenance.auto=false`, так что сборка мусора
-  паки владельца не трогает. После процесса controller переносит его
-  объекты в общее хранилище с проверкой хешей (`pack-objects |
-unpack-objects`). `git add`, `git commit`, `git checkout -- .`,
-  `git diff` работают; **`git stash` отказывает** (ссылка stash общая для
-  всех деревьев репозитория): вместо `git stash` в gate —
-  `git diff > "$TMPDIR/p" && git checkout -- . && … && git apply "$TMPDIR/p"`.
-  `git` в другом репозитории из процесса под границей видит хранилище
-  попытки как своё (`GIT_OBJECT_DIRECTORY`): `git clone` работает, а
-  команды внутри клона — с `env -u GIT_OBJECT_DIRECTORY -u
-GIT_ALTERNATE_OBJECT_DIRECTORIES`
+- каталог git своего дерева попытки (с 0.1.0-alpha.70): только
+  `.git/worktrees/<имя>` (index, `index.lock`, HEAD, журналы; на Linux —
+  привязкой каталога целиком). Этого хватает для `git status`, `git diff`,
+  `git checkout -- .` в gate и у исполнителя. Общий `.git` репозитория
+  закрыт целиком: объекты, ссылки (в том числе ветка попытки), stash,
+  `config`, `hooks`. Поэтому **`git add`, `git commit` и `git stash` под
+  границей отказывают** — кандидата записывает controller сам, а gate
+  проверяет дерево через `git diff`/`git status` (вместо stash:
+  `git diff > "$TMPDIR/p" && git checkout -- . && … && git apply "$TMPDIR/p"`).
+  Провал gate, в выводе которого git упёрся в границу, получает этот совет.
+  Перед записью кандидата controller сверяет метаданные дерева, которые
+  создал сам (файл `.git`, `commondir`, `gitdir`, HEAD на ветке
+  `harness/run-<попытка>`); расхождение — засчитанное нарушение области
+  исполнителем (`scope-violation`). Кандидат пишется не через HEAD:
+  index заново от базы, `write-tree`, `commit-tree -p <база>` и
+  `update-ref` ветки попытки с ожидаемым прежним значением
 
 **Настройки CLI пользователя закрыты.** Каждый вызов исполнителя получает
 свой каталог настроек (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`) под каталогом

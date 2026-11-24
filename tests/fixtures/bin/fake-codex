@@ -113,6 +113,9 @@ for (const [path, text] of Object.entries(step.files ?? {})) {
   mkdirSync(dirname(join(process.cwd(), path)), { recursive: true });
   writeFileSync(join(process.cwd(), path), text);
 }
+// Команда оболочки в рабочем дереве (как исполнитель, который запускает git).
+if (step.shell)
+  execFileSync('/bin/sh', ['-c', step.shell], { cwd: process.cwd(), stdio: 'ignore' });
 for (const path of step.remove ?? []) rmSync(join(process.cwd(), path), { force: true });
 // Замена файла только для чтения: снять его и записать другое содержимое.
 for (const [path, text] of Object.entries(step.replace ?? {})) {

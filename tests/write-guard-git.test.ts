@@ -1,9 +1,8 @@
 /**
- * P8-1 (0.1.0-alpha.70, ревью 1): граница записи облегчённого режима и git
- * внутри дерева попытки. Gate с `git add`, `git commit`, `git checkout -- .`
- * и `git diff --exit-code` в связанном дереве попытки работает под
- * границей; основное дерево, `.git/config`, ветки владельца, общие объекты
- * и паки, stash владельца закрыты; объекты gate переносятся после него.
+ * P8-1 (0.1.0-alpha.70, ревью 2 — минимум): под границей записи открыт
+ * только каталог git дерева попытки. `git status`, `git diff`,
+ * `git checkout -- .` работают; `git add`, `git commit`, `git stash`,
+ * ветки, общие объекты, паки и stash владельца закрыты.
  */
 import './temp-scope.ts';
 import { test } from 'node:test';
@@ -12,7 +11,11 @@ import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, readdirSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { gitWorktreeGuard, writeGuardSupport } from '../src/environment/write-guard.ts';
+import {
+  GUARDED_GIT_DENIAL,
+  gitWorktreeGuard,
+  writeGuardSupport,
+} from '../src/environment/write-guard.ts';
 import { runCheck } from '../src/verification/gates.ts';
 import { repo } from './git-fixture.ts';
 
@@ -51,58 +54,49 @@ const packs = (common: string) =>
     .filter((f) => !f.startsWith('tmp'))
     .sort();
 
-test('каталог git дерева попытки: открыт только его gitdir, объекты — в своё хранилище, общее — только чтение', () => {
-  const { r, tree } = attemptTree();
+test('каталог git дерева попытки: открыт только его gitdir', () => {
+  const { r, tree } = attemptTree('harness/run-a1');
   const common = realpathSync(join(r.dir, '.git'));
-  const guard = gitWorktreeGuard(tree, {})!;
-  assert.deepEqual(guard.entries, [{ subpath: join(common, 'worktrees', 'w') }]);
-  const own = attemptTree('harness/run-a1');
-  const ownCommon = realpathSync(join(own.r.dir, '.git'));
-  assert.deepEqual(gitWorktreeGuard(own.tree, {})!.entries, [
-    { subpath: join(ownCommon, 'worktrees', 'w') },
-    { prefix: join(ownCommon, 'refs', 'heads', 'harness', 'run-a1') },
-    { prefix: join(ownCommon, 'logs', 'refs', 'heads', 'harness', 'run-a1') },
-  ]);
-  assert.equal(guard.env.GIT_OBJECT_DIRECTORY, join(common, 'worktrees', 'w', 'hx-objects'));
-  assert.equal(guard.env.GIT_ALTERNATE_OBJECT_DIRECTORIES, join(common, 'objects'));
-  assert.equal(guard.env.GIT_CONFIG_KEY_0, 'gc.auto');
-  assert.equal(gitWorktreeGuard(tree, { GIT_CONFIG_COUNT: '2' })!.env.GIT_CONFIG_KEY_2, 'gc.auto');
+  assert.deepEqual(gitWorktreeGuard(tree)!.entries, [{ subpath: join(common, 'worktrees', 'w') }]);
   // Основной checkout и каталог вне git — ничего сверх их самих.
   assert.equal(gitWorktreeGuard(r.dir), undefined);
   assert.equal(gitWorktreeGuard(realpathSync(mkdtempSync(join(tmpdir(), 'no-git-')))), undefined);
 });
 
 test(
-  'gate под границей: add/commit/checkout/diff в дереве попытки работают; ветки, общие объекты и stash владельца закрыты',
+  'gate под границей: status/diff/checkout -- . работают (P8-1); add, commit, stash, ветки, общие объекты и паки закрыты',
   { skip: !supported },
   async () => {
-    // Как у настоящей попытки: дерево на своей ветке harness/run-<id>.
     const { r, tree } = attemptTree('harness/run-a1');
     const common = realpathSync(join(r.dir, '.git'));
     r.git('repack', '-adq');
-    const before = { packs: packs(common), other: r.git('rev-parse', 'other') };
+    const before = {
+      packs: packs(common),
+      other: r.git('rev-parse', 'other'),
+      own: r.git('rev-parse', 'harness/run-a1'),
+    };
     const main = join(r.dir, 'src', 'a.js');
     const script = [
       'set -e',
       'echo changed > src/a.js',
+      'git status --porcelain > /dev/null',
+      'git diff --quiet && exit 9 || true',
       'git checkout -- .',
-      'git diff --exit-code',
-      'echo b > src/b.js',
-      'git add -A',
-      // На Linux коммит в ветку попытки отказывает (bubblewrap — только
-      // существующие файлы, git пишет .lock рядом): docs/light-mode.md.
-      process.platform === 'darwin' ? 'git commit -qm gate' : 'git commit -qm gate || git reset -q',
       'git diff --exit-code',
       `( echo hacked > ${main} ) 2>/dev/null && echo main=open || echo main=denied`,
       `( echo x >> ${join(common, 'config')} ) 2>/dev/null && echo config=open || echo config=denied`,
       `( echo x > ${join(common, 'objects', 'pack', 'planted.pack')} ) 2>/dev/null && echo objects=open || echo objects=denied`,
       'git branch -f other HEAD 2>/dev/null && echo branch=open || echo branch=denied',
       'git update-ref refs/heads/main HEAD 2>/dev/null && echo ref=open || echo ref=denied',
-      'echo s > src/s.js; git add src/s.js',
+      'echo b > src/b.js',
+      'git add -A 2>/dev/null && echo add=open || echo add=denied',
+      'git -c user.name=t -c user.email=t@t commit -qam gate >/dev/null 2>&1 && echo commit=open || echo commit=denied',
+      'echo s > src/a.js',
       'git stash -q 2>/dev/null && echo stash=open || echo stash=denied',
+      'git checkout -q -- . 2>/dev/null || true',
       'git stash pop -q 2>/dev/null && echo pop=open || echo pop=denied',
-      'git repack -adq 2>/dev/null || true',
       'git gc -q --prune=now 2>/dev/null || true',
+      'rm -f src/b.js',
     ].join('\n');
     const result = await runCheck(light, {
       argv: ['/bin/sh', '-c', script],
@@ -114,30 +108,27 @@ test(
       controller: [],
       settingsDir: mkdtempSync(join(tmpdir(), 'guard-git-settings-')),
     });
-    assert.equal(
-      result.code,
-      0,
-      result.stdout + '|' + result.stderr + '|' + JSON.stringify(result.diagnostics),
-    );
+    assert.equal(result.code, 0, result.stdout + '|' + result.stderr);
     for (const line of [
       'main=denied',
       'config=denied',
       'objects=denied',
       'branch=denied',
       'ref=denied',
+      'add=denied',
+      'commit=denied',
       'stash=denied',
       'pop=denied',
     ])
       assert.match(result.stdout, new RegExp(line), result.stdout);
     assert.equal(readFileSync(main, 'utf8'), 'a\n', 'основное дерево не тронуто');
     assert.equal(r.git('rev-parse', 'other'), before.other, 'ветка владельца на месте');
+    assert.equal(r.git('rev-parse', 'harness/run-a1'), before.own, 'ветка попытки на месте');
     assert.match(r.git('stash', 'list'), /owner-stash/, 'stash владельца на месте');
-    assert.deepEqual(packs(common), before.packs, 'паки владельца не перепакованы');
-    if (process.platform === 'darwin') {
-      // Коммит gate перенесён в общее хранилище: обычный git его читает; своя
-      // ветка попытки сдвинута.
-      assert.equal(r.git('log', '-1', '--format=%s', 'harness/run-a1'), 'gate');
-      r.git('cat-file', '-e', `${r.git('rev-parse', 'harness/run-a1')}^{tree}`);
-    }
+    assert.deepEqual(packs(common), before.packs, 'паки владельца не тронуты');
+    assert.match(
+      'error: insufficient permission for adding an object to repository database .git/objects',
+      GUARDED_GIT_DENIAL,
+    );
   },
 );

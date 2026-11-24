@@ -32,8 +32,8 @@ import {
 import {
   WriteGuardUnavailable,
   gitWorktreeGuard,
-  importGuardObjects,
-  type GitWorktreeGuard,
+  GUARDED_GIT_ADVICE,
+  GUARDED_GIT_DENIAL,
   guardEntries,
   guardedArgv,
 } from '../environment/write-guard.ts';
@@ -544,7 +544,6 @@ export async function runCheck(
     launched = true;
     options.onStart?.();
   };
-  let gitGuard: GitWorktreeGuard | undefined;
   let argv = options.argv,
     env = options.env,
     cwd = options.cwd,
@@ -581,12 +580,12 @@ export async function runCheck(
       // Нет механизма — отказ среды, как недоступная изоляция строгого режима.
       // Метаданные git дерева попытки (P8-1): только его gitdir; новые
       // объекты — в своё хранилище, перенос — после проверки.
-      gitGuard = gitWorktreeGuard(options.cwd, env);
+      const gitGuard = gitWorktreeGuard(options.cwd);
       argv = guardedArgv(
         argv,
         guardEntries(h.config, [...options.write, scratch, marks], gitGuard?.entries ?? []),
       );
-      env = { ...env, ...toolStateEnv(env, scratch), TMPDIR: scratch, ...(gitGuard?.env ?? {}) };
+      env = { ...env, ...toolStateEnv(env, scratch), TMPDIR: scratch };
     } else if (strictSandbox(h.config)) {
       const support = isolationBackend.check();
       if (!support.ok)
@@ -695,8 +694,6 @@ export async function runCheck(
       notStarted = sandboxNotStarted(result, started, printed);
       launchFailed = notStarted && sandboxLaunchFailure(result.stderr);
     } finally {
-      // Объекты git, записанные проверкой, — в общее хранилище (P8-1).
-      if (gitGuard) importGuardObjects(options.cwd, gitGuard);
       // Факт старта читается до удаления метки — и при исключении после него.
       if (started !== undefined && existsSync(started)) confirm();
       // Отказы нужны только для разбора провала: успешной проверке ждать
@@ -1755,7 +1752,11 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
           .filter(Boolean)
           .join(': ') +
           partialNotes.map((n) => '; ' + n).join('') +
-          (failureSummary.withheld ? `; ${WITHHELD_NOTE}` : ''),
+          (failureSummary.withheld ? `; ${WITHHELD_NOTE}` : '') +
+          // git gate упёрся в границу записи (ревью alpha.70): совет, как быть.
+          (writeGuardActive(run.policy) && GUARDED_GIT_DENIAL.test(result.stderr + result.stdout)
+            ? `; ${GUARDED_GIT_ADVICE}`
+            : ''),
       );
     }
     if (reportPath) {

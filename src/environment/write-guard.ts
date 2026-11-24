@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync } from 'node:fs';
 import { readBoundedHandle } from './bounded-read.ts';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -193,35 +193,22 @@ const gitOut = (cwd: string, args: string[]) =>
   }).trim();
 
 /**
- * Метаданные git рабочего дерева попытки (0.1.0-alpha.70, P8-1; ревью 1).
- * Gate или исполнитель с `git add`, `git commit`, `git checkout -- .`
- * пишет не только в файлы дерева. Открыт на запись каталог git связанного
- * дерева попытки — `<common>/worktrees/<имя>`: index, `index.lock`, HEAD,
- * журналы — и ссылка его собственной ветки (`refs/heads/harness/run-<id>`
- * и её журнал, точными путями с `.lock`; на Linux bubblewrap открывает
- * только существующие файлы, и коммит в ветку там отказывает — git пишет
- * `.lock` рядом). Общий каталог репозитория в остальном закрыт: ни
- * `objects` (паки владельца не перепаковать и не удалить), ни другие
- * ссылки, ни stash владельца. Новые объекты процесс пишет в своё хранилище
- * попытки (`<gitdir>/hx-objects`, `GIT_OBJECT_DIRECTORY`), общее — только
- * чтение (`GIT_ALTERNATE_OBJECT_DIRECTORIES`); автосборка мусора выключена
- * (`gc.auto=0`, `maintenance.auto=false`). После процесса controller
- * переносит его объекты в общее хранилище с проверкой
- * (`importGuardObjects`: `pack-objects | unpack-objects`). `git stash`
- * под границей отказывает (ссылка stash общая) — docs/light-mode.md.
- * Не связанное дерево (сам checkout) — ничего сверх него.
+ * Каталог git рабочего дерева попытки (0.1.0-alpha.70, P8-1; ревью 2 —
+ * минимум). Под границей открыт на запись только каталог git связанного
+ * дерева попытки `<common>/worktrees/<имя>` (целиком, на Linux — привязкой
+ * каталога): index, `index.lock`, HEAD — этого и требовал P8-1
+ * (`git status`, `git diff`, `git checkout -- .`). Общий каталог
+ * репозитория закрыт целиком: `objects`, ссылки, stash, `config`, `hooks`.
+ * Поэтому `git add`, `git commit` и `git stash` под границей отказывают —
+ * кандидата записывает controller (docs/light-mode.md). Метаданные дерева
+ * (`HEAD`, `commondir`, `gitdir`, файл `.git`) controller перед записью
+ * кандидата сверяет с теми, что создал сам (`trustedGitMeta`).
  */
 export interface GitWorktreeGuard {
   entries: GuardEntry[];
-  env: Record<string, string>;
-  /** Своё хранилище объектов процесса и общее хранилище репозитория. */
-  objects: { own: string; shared: string };
 }
 
-export function gitWorktreeGuard(
-  cwd: string,
-  env: NodeJS.ProcessEnv = process.env,
-): GitWorktreeGuard | undefined {
+export function gitWorktreeGuard(cwd: string): GitWorktreeGuard | undefined {
   let gitDir: string;
   let common: string;
   try {
@@ -232,81 +219,16 @@ export function gitWorktreeGuard(
     return undefined;
   }
   if (gitDir === common) return undefined;
-  // Своя ветка дерева попытки (`harness/run-<попытка>`): только её ссылка и
-  // журнал — точными путями (с `.lock`), не каталоги ссылок.
-  let branch: string | undefined;
-  try {
-    branch = gitOut(cwd, ['symbolic-ref', '-q', 'HEAD']) || undefined;
-  } catch {
-    branch = undefined;
-  }
-  const own = join(gitDir, 'hx-objects');
-  const shared = join(common, 'objects');
-  mkdirSync(join(own, 'pack'), { recursive: true });
-  mkdirSync(join(own, 'info'), { recursive: true });
-  // Пары конфигурации git через окружение — к уже заданным процессу.
-  const count = Number(env.GIT_CONFIG_COUNT ?? 0) || 0;
-  return {
-    entries: [
-      { subpath: gitDir },
-      ...(branch?.startsWith('refs/heads/')
-        ? [{ prefix: join(common, branch) }, { prefix: join(common, 'logs', branch) }]
-        : []),
-    ],
-    env: {
-      GIT_OBJECT_DIRECTORY: own,
-      GIT_ALTERNATE_OBJECT_DIRECTORIES: shared,
-      GIT_CONFIG_COUNT: String(count + 2),
-      [`GIT_CONFIG_KEY_${count}`]: 'gc.auto',
-      [`GIT_CONFIG_VALUE_${count}`]: '0',
-      [`GIT_CONFIG_KEY_${count + 1}`]: 'maintenance.auto',
-      [`GIT_CONFIG_VALUE_${count + 1}`]: 'false',
-    },
-    objects: { own, shared },
-  };
+  return { entries: [{ subpath: gitDir }] };
 }
 
-/**
- * Перенести объекты процесса из его хранилища в общее (controller, вне
- * границы): список объектов своего хранилища, `pack-objects` из него и
- * `unpack-objects` в общее — git проверяет каждый объект по его хешу,
- * подложенный файл с чужим именем не проходит. Своё хранилище затем
- * очищается. Ошибка переноса — исключение вызывающему.
- */
-export function importGuardObjects(cwd: string, guard: GitWorktreeGuard) {
-  const ownEnv = {
-    ...process.env,
-    GIT_OBJECT_DIRECTORY: guard.objects.own,
-    GIT_ALTERNATE_OBJECT_DIRECTORIES: '',
-  };
-  const ids = execFileSync(
-    'git',
-    ['-C', cwd, 'cat-file', '--batch-all-objects', '--batch-check=%(objectname)'],
-    { env: ownEnv, encoding: 'utf8', timeout: 60_000, maxBuffer: 64 * 1024 * 1024 },
-  )
-    .split('\n')
-    .filter((l) => /^[0-9a-f]{40,64}$/.test(l));
-  if (ids.length) {
-    const pack = execFileSync('git', ['-C', cwd, 'pack-objects', '--stdout', '-q'], {
-      env: ownEnv,
-      input: ids.join('\n') + '\n',
-      timeout: 120_000,
-      maxBuffer: 1024 * 1024 * 1024,
-    });
-    const sharedEnv = { ...process.env };
-    delete sharedEnv.GIT_OBJECT_DIRECTORY;
-    delete sharedEnv.GIT_ALTERNATE_OBJECT_DIRECTORIES;
-    execFileSync('git', ['-C', cwd, 'unpack-objects', '-q'], {
-      env: sharedEnv,
-      input: pack,
-      timeout: 120_000,
-    });
-  }
-  // Своё хранилище — только каталог, созданный `gitWorktreeGuard` под gitdir попытки.
-  rmSync(guard.objects.own, { recursive: true, force: true });
-  mkdirSync(join(guard.objects.own, 'pack'), { recursive: true });
-  return ids.length;
-}
+/** Признаки отказа git под границей записи: запись в общий `.git` закрыта. */
+export const GUARDED_GIT_DENIAL =
+  /(?:unable to (?:create|write)|cannot lock ref|insufficient permission|Operation not permitted|Permission denied|Read-only file system)[^\n]*(?:\.git\/(?:objects|refs|logs\/refs)|refs\/stash|index\.lock)|unable to create temporary file: (?:Operation not permitted|Permission denied|Read-only file system)/i;
+
+/** Совет к провалу gate, в выводе которого git упёрся в границу записи. */
+export const GUARDED_GIT_ADVICE =
+  'git под границей записи облегчённого режима: в дереве попытки работают git status, git diff и git checkout -- .; git add, git commit и git stash отказывают (общий .git закрыт) — кандидата записывает controller; в gate используйте git diff/git status (docs/light-mode.md)';
 
 /** Записываемые пути gate или исполнителя: свои каталоги + кеши политики. */
 export function guardEntries(
