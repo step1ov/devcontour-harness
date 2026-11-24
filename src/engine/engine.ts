@@ -4758,7 +4758,12 @@ export class Engine {
    * выпуска — нет записи или она старше итога прежнего выпуска (`release
    * done`). Записанная база не переписывается. Возвращает записанные.
    */
-  recordReleaseBases(heads: Record<string, string>, source: 'register' | 'outline') {
+  recordReleaseBases(
+    heads: Record<string, string>,
+    source: 'register' | 'outline',
+    /** Выпуск, начатый до alpha.69: база его самой ранней попытки (не нынешняя цель). */
+    earlier: Record<string, string | undefined> = {},
+  ) {
     return this.tx('lead.recorded', (tx) => {
       const done = tx.local('lead', WORKSPACE_OWNER, 'log')?.release?.doneAt;
       const at = new Date(this.now()).toISOString();
@@ -4766,7 +4771,13 @@ export class Engine {
       for (const [repositoryId, sha] of Object.entries(heads)) {
         const prev = tx.local('release-base', WORKSPACE_OWNER, repositoryId);
         if (prev && !(done && prev.at < done)) continue;
-        tx.putLocal('release-base', WORKSPACE_OWNER, repositoryId, { sha, at, source });
+        const early = earlier[repositoryId];
+        tx.putLocal(
+          'release-base',
+          WORKSPACE_OWNER,
+          repositoryId,
+          early ? { sha: early, at, source: 'attempt' } : { sha, at, source },
+        );
         written.push(repositoryId);
       }
       return written;

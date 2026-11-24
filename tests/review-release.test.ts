@@ -30,7 +30,12 @@ import {
 import type { Engine } from '../src/engine/engine.ts';
 import { cliAdapter } from '../src/agents/cli-adapter.ts';
 import { releaseDone } from '../src/control/lead.ts';
-import { reviewRelease, type ReleaseReviewInput } from '../src/control/review-release.ts';
+import {
+  releaseBaseOf,
+  releaseContractText,
+  reviewRelease,
+  type ReleaseReviewInput,
+} from '../src/control/review-release.ts';
 import { releaseReviewRequired, releaseReviewState } from '../src/control/release-review-state.ts';
 import { engineOf, graphOf, policyOf, ready } from './engine-fixture.ts';
 import { bin } from './runner-fixture.ts';
@@ -407,4 +412,78 @@ test('база выпуска: записана при регистрации и
   f.clock.now += 1000;
   assert.deepEqual(f.engine.recordReleaseBases({ app: other }, 'outline'), ['app']);
   assert.equal(f.engine.read((v) => releaseReviewState(v, f.policy)).baseSource, 'outline');
+});
+
+test('ревью выпуска — только от базы выпуска и по нынешнему договору; цель не определена — отказ; выпуск без изменений проверяется', async () => {
+  const f = fixture();
+  ready(f.engine, graphOf({ w: [] }));
+  accept(f.engine, f.base, f.head);
+  f.engine.recordReleaseBases({ app: f.base }, 'register');
+  // Сужённое ревью: --base не база выпуска — выпуск не принимает.
+  const narrowed = f.commit({ 'x.txt': 'x\n' }, 'narrow');
+  f.git('update-ref', f.targetRef, narrowed);
+  const head = narrowed;
+  f.scenario({ reviewer: verdict(true) });
+  await f.review({ base: f.head });
+  let state = f.engine.read((v) => releaseReviewState(v, f.policy, { app: head }));
+  assert.equal(state.status, 'stale');
+  assert.equal(state.repositories[0]!.staleReason, 'base-mismatch');
+  notReady(
+    () => releaseDone(f.engine, { summary: 'готово', heads: { app: head } }),
+    /не от базы выпуска/,
+  );
+  // Ревью от базы выпуска одобрено; договор изменился (ответ владельца) — снова нет.
+  await f.review();
+  const before = {
+    app: digestOf(
+      await releaseContractText({ engine: f.engine, policy: f.policy }, 'app', f.app, head),
+    ),
+  };
+  state = f.engine.read((v) =>
+    releaseReviewState(v, f.policy, { app: head }, { strict: true, contracts: before }),
+  );
+  assert.equal(state.status, 'approved');
+  notReady(
+    () =>
+      releaseDone(f.engine, {
+        summary: 'готово',
+        heads: { app: head },
+        contracts: { app: 'changed-contract' },
+      }),
+    /договор выпуска изменился/,
+  );
+  // Цель не определена (target ref не читается) — выпуск не закрывается.
+  notReady(
+    () => releaseDone(f.engine, { summary: 'готово', heads: {}, contracts: before }),
+    /принятая цель не определена/,
+  );
+  // Выпуск без изменений: база = цель, ревью идёт с пустым diff.
+  const g = fixture();
+  ready(g.engine, graphOf({ w: [] }));
+  accept(g.engine, g.base, g.head);
+  g.scenario({ reviewer: { ...verdict(true), recordPrompt: true } });
+  const empty = await g.review({ base: g.head });
+  assert.equal(empty.approved, true);
+  assert.equal(empty.filesTotal, 0);
+  assert.match(
+    recordedPrompt(g.scenarioPath, 'reviewer', 0),
+    /There are no changes between the release base/,
+  );
+});
+
+test('выпуск, начатый до alpha.69: база — самая ранняя попытка после прежнего итога, а не нынешняя цель', () => {
+  const f = fixture();
+  ready(f.engine, graphOf({ w: [] }));
+  accept(f.engine, f.base, f.head);
+  const later = f.commit({ 'y.txt': 'y\n' }, 'later');
+  // Регистрация нового графа того же выпуска: нынешняя цель — later.
+  assert.deepEqual(
+    f.engine.recordReleaseBases({ app: later }, 'register', {
+      app: f.engine.read((v) => releaseBaseOf(v, 'app')),
+    }),
+    ['app'],
+  );
+  const state = f.engine.read((v) => releaseReviewState(v, f.policy));
+  assert.equal(state.base, f.base);
+  assert.equal(state.baseSource, 'attempt');
 });

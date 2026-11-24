@@ -52,10 +52,13 @@ const clip = (text: string, max: number) =>
 export function releaseBaseOf(view: ExecutionView, repositoryId: string): string | undefined {
   // Записанная база выпуска (alpha.69); база ранней попытки — для прежних состояний.
   const recorded = view.local('release-base', WORKSPACE_OWNER, repositoryId);
-  if (recorded) return recorded.sha;
+  const done = view.local('lead', WORKSPACE_OWNER, 'log')?.release?.doneAt;
+  if (recorded && !(done && recorded.at < done)) return recorded.sha;
+  // Без записи (выпуск, начатый до alpha.69): база самой ранней попытки
+  // после итога прежнего выпуска, а не нынешняя цель.
   return view
     .attempts()
-    .filter((a) => a.repositoryId === repositoryId && a.baseSha)
+    .filter((a) => a.repositoryId === repositoryId && a.baseSha && (!done || a.startedAt > done))
     .sort((a, b) => a.startedAt.localeCompare(b.startedAt) || a.id.localeCompare(b.id))[0]?.baseSha;
 }
 
@@ -110,8 +113,6 @@ export async function reviewRelease(
       [{ path: ['--base'], message: 'required' }],
     );
   const head = input.head ?? repo.targetRef;
-  const state = ctx.engine.read((v) => contractFromState(v, repo.id));
-  const topology = ctx.policy.release?.topology ?? [];
   return reviewBranch(
     ctx,
     {
@@ -122,40 +123,50 @@ export async function reviewRelease(
       repositoryId: repo.id,
       ...(input.signal ? { signal: input.signal } : {}),
     },
-    {
-      async contract({ path, head: sha }) {
-        const files: string[] = [];
-        for (const file of topology) {
-          let text: string;
-          try {
-            text = (await rawGit(path, ['show', `${sha}:${file}`])).toString('utf8');
-          } catch {
-            files.push(
-              `--- ${file}: MISSING at head (the file does not exist in the accepted target)`,
-            );
-            continue;
-          }
-          files.push(`--- ${file}\n${clip(text, RELEASE_TOPOLOGY_FILE_LIMIT)}`);
-        }
-        return clip(
-          [
-            'RELEASE CONTRACT.',
-            '(a) Orders of all registered graphs (engine state): every acceptance criterion must hold in the accepted target as deployed, not only in tests. ' +
-              JSON.stringify(state.orders),
-            state.answers.length
-              ? '(b) Owner answers to input requests: the release must follow them. ' +
-                JSON.stringify(state.answers)
-              : '(b) Owner answers: none recorded.',
-            topology.length
-              ? '(c) Deploy topology (policy release.topology, read from head):\n' +
-                files.join('\n')
-              : '(c) Deploy topology: the policy names no topology files (release.topology). Find the production gateway/proxy configs and production env files in the checkout yourself; their absence for a deployed app is a finding.',
-            'Topology check: compare the production routing and env (gateway/proxy routes, production env files, public base URLs for media, uploads and API) with what the gates and tests exercised (often the API port directly). Every user-visible URL the works produce must be routed by the production gateway; report mismatches as blocking.',
-            '(d) The diff base..head follows.',
-          ].join('\n\n'),
-          RELEASE_CONTRACT_LIMIT,
-        );
-      },
-    },
+    { contract: ({ path, head: sha }) => releaseContractText(ctx, repo.id, path, sha) },
+  );
+}
+
+/**
+ * Текст договора выпуска для репозитория на `head` (его digest — основание
+ * раунда ревью выпуска): постановки и критерии, ответы владельца, файлы
+ * топологии на head. Тот же текст пересчитывает `release done`: раунд по
+ * прежнему договору выпуск не принимает (alpha.69, ревью).
+ */
+export async function releaseContractText(
+  ctx: Pick<CodeReviewContext, 'engine' | 'policy'>,
+  repositoryId: string,
+  path: string,
+  sha: string,
+): Promise<string> {
+  const state = ctx.engine.read((v) => contractFromState(v, repositoryId));
+  const topology = ctx.policy.release?.topology ?? [];
+  const files: string[] = [];
+  for (const file of topology) {
+    let text: string;
+    try {
+      text = (await rawGit(path, ['show', `${sha}:${file}`])).toString('utf8');
+    } catch {
+      files.push(`--- ${file}: MISSING at head (the file does not exist in the accepted target)`);
+      continue;
+    }
+    files.push(`--- ${file}\n${clip(text, RELEASE_TOPOLOGY_FILE_LIMIT)}`);
+  }
+  return clip(
+    [
+      'RELEASE CONTRACT.',
+      '(a) Orders of all registered graphs (engine state): every acceptance criterion must hold in the accepted target as deployed, not only in tests. ' +
+        JSON.stringify(state.orders),
+      state.answers.length
+        ? '(b) Owner answers to input requests: the release must follow them. ' +
+          JSON.stringify(state.answers)
+        : '(b) Owner answers: none recorded.',
+      topology.length
+        ? '(c) Deploy topology (policy release.topology, read from head):\n' + files.join('\n')
+        : '(c) Deploy topology: the policy names no topology files (release.topology). Find the production gateway/proxy configs and production env files in the checkout yourself; their absence for a deployed app is a finding.',
+      'Topology check: compare the production routing and env (gateway/proxy routes, production env files, public base URLs for media, uploads and API) with what the gates and tests exercised (often the API port directly). Every user-visible URL the works produce must be routed by the production gateway; report mismatches as blocking.',
+      '(d) The diff base..head follows.',
+    ].join('\n\n'),
+    RELEASE_CONTRACT_LIMIT,
   );
 }

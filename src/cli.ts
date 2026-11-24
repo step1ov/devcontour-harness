@@ -1590,7 +1590,7 @@ async function run(
                   )
                 : releaseDone(h.engine, {
                     summary: need('summary'),
-                    heads: await h.targetHeads(),
+                    ...(await h.releaseCheck()),
                   });
         if (command === 'lead-end') {
           // Готовые работы, а никто не запущен (alpha.68, P6-33): сессия

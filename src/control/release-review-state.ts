@@ -24,6 +24,11 @@ export interface ReleaseReviewRepositoryState {
    */
   base?: string;
   baseSource?: 'register' | 'outline' | 'attempt';
+  /**
+   * Почему раунд не принимает выпуск (`stale`): цель сдвинулась, раунд на
+   * другой базе, договор выпуска изменился, цель не определена (alpha.69).
+   */
+  staleReason?: 'target-moved' | 'base-mismatch' | 'contract-changed' | 'target-unresolved';
   /** Текущая принятая цель (SHA target ref), если известна. */
   target?: string;
   /** Head последнего раунда ревью выпуска. */
@@ -99,6 +104,13 @@ export function releaseReviewState(
   view: ExecutionView,
   policy: Pick<ExecutionPolicy, 'release' | 'harnessMode'>,
   heads: Readonly<Record<string, string | undefined>> = {},
+  /**
+   * Сверка для `release done` (alpha.69, ревью): `strict` — цель только из
+   * `heads` (не определена — раунд не принимает выпуск), `contracts` —
+   * digest нынешнего договора выпуска по репозиторию: раунд по прежнему
+   * договору выпуск не принимает.
+   */
+  check: { strict?: boolean; contracts?: Readonly<Record<string, string | undefined>> } = {},
 ): ReleaseReviewState {
   const repositories = [
     ...new Set(
@@ -113,13 +125,19 @@ export function releaseReviewState(
     .map((r) => r.value)
     .filter((r) => r.kind === 'release');
   const states = repositories.map((repositoryId): ReleaseReviewRepositoryState => {
-    const target = heads[repositoryId] ?? acceptedHead(view, repositoryId);
-    const recorded = view.local('release-base', WORKSPACE_OWNER, repositoryId);
+    const target = check.strict
+      ? heads[repositoryId]
+      : (heads[repositoryId] ?? acceptedHead(view, repositoryId));
+    const done = view.local('lead', WORKSPACE_OWNER, 'log')?.release?.doneAt;
+    const record = view.local('release-base', WORKSPACE_OWNER, repositoryId);
+    const recorded = record && !(done && record.at < done) ? record : undefined;
     const early = recorded
       ? undefined
       : view
           .attempts()
-          .filter((a) => a.repositoryId === repositoryId && a.baseSha)
+          .filter(
+            (a) => a.repositoryId === repositoryId && a.baseSha && (!done || a.startedAt > done),
+          )
           .sort((a, b) => a.startedAt.localeCompare(b.startedAt) || a.id.localeCompare(b.id))[0]
           ?.baseSha;
     const baseOf = recorded
@@ -137,16 +155,26 @@ export function releaseReviewState(
     if (!last) return { repositoryId, status: 'not-run', ...baseOf, ...(target ? { target } : {}) };
     const open = last.findings.filter((f) => f.status === 'open');
     const blocking = open.filter((f) => f.severity === 'blocking').length;
-    const status: ReleaseReviewStatus =
-      !target || last.head !== target
-        ? 'stale'
-        : last.approved && !blocking
-          ? 'approved'
-          : 'findings';
+    const contract = check.contracts?.[repositoryId];
+    const staleReason: ReleaseReviewRepositoryState['staleReason'] = !target
+      ? 'target-unresolved'
+      : last.head !== target
+        ? 'target-moved'
+        : baseOf.base && last.base !== baseOf.base
+          ? 'base-mismatch'
+          : check.contracts && last.contextDigest !== contract
+            ? 'contract-changed'
+            : undefined;
+    const status: ReleaseReviewStatus = staleReason
+      ? 'stale'
+      : last.approved && !blocking
+        ? 'approved'
+        : 'findings';
     const notes = open.filter((f) => f.severity !== 'blocking').map((f) => f.message.slice(0, 300));
     return {
       repositoryId,
       status,
+      ...(staleReason ? { staleReason } : {}),
       ...baseOf,
       ...(target ? { target } : {}),
       head: last.head,
@@ -189,7 +217,13 @@ export function releaseReviewProblem(state: ReleaseReviewState): string | undefi
       const where = many ? `${r.repositoryId}: ` : '';
       if (r.status === 'not-run') return where + 'ревью выпуска не проводилось';
       if (r.status === 'stale')
-        return `${where}ревью выпуска (раунд ${r.round}) на ${short(r.head)}, а принятая цель — ${short(r.target)}`;
+        return r.staleReason === 'base-mismatch'
+          ? `${where}ревью выпуска (раунд ${r.round}) сделано не от базы выпуска ${short(r.base)}: повторите harness review-release без --base`
+          : r.staleReason === 'contract-changed'
+            ? `${where}договор выпуска изменился после ревью (раунд ${r.round}): постановки, ответы владельца или топология — повторите harness review-release`
+            : r.staleReason === 'target-unresolved'
+              ? `${where}принятая цель не определена (target ref не читается): выпуск не закрывается`
+              : `${where}ревью выпуска (раунд ${r.round}) на ${short(r.head)}, а принятая цель — ${short(r.target)}`;
       return `${where}ревью выпуска (раунд ${r.round}) не одобрено: открытых находок ${r.open ?? 0}, блокирующих ${r.blocking ?? 0}`;
     })
     .join('; ');

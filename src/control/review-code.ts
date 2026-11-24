@@ -253,7 +253,9 @@ export async function reviewBranch(
     .toString('utf8')
     .split('\0')
     .filter((n) => n.length > 0);
-  if (!names.length)
+  // Выпуск без изменений в репозитории (все работы уже выполнены — alpha.69):
+  // ревью выпуска идёт против текущего дерева, diff пуст и назван так.
+  if (!names.length && !release)
     throw new HarnessError(
       'INVALID_INPUT',
       `${label}: между merge-base(${input.base}, ${input.head}) и ${input.head} нет изменений`,
@@ -385,7 +387,9 @@ export async function reviewBranch(
       : '',
     contract ?? '',
     'Report execution.commands or an empty list with execution.noCommandsReason. Findings need a message; use null where a field does not apply.',
-    'Exact diff to review:\n' + diff,
+    names.length
+      ? 'Exact diff to review:\n' + diff
+      : 'There are no changes between the release base and head in this repository (the release changed nothing here): review the accepted tree at head against the release contract and approve only if it already satisfies every criterion.',
     'No secrets in output. Explain actions and evidence, not private reasoning.',
   ]
     .filter(Boolean)

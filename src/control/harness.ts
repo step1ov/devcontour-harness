@@ -58,7 +58,12 @@ import {
 import { acceptedTargets } from './target.ts';
 import { planRoundEpoch, reviewRoundCap, technicalReview } from './review.ts';
 import { reviewCode, type CodeReviewInput } from './review-code.ts';
-import { reviewRelease, type ReleaseReviewInput } from './review-release.ts';
+import {
+  releaseBaseOf,
+  releaseContractText,
+  reviewRelease,
+  type ReleaseReviewInput,
+} from './review-release.ts';
 import { releaseReviewState } from './release-review-state.ts';
 import { lifecyclePreflight } from './preflight.ts';
 import { policySourceChanged, type PolicySource } from './provenance.ts';
@@ -473,11 +478,53 @@ export class Harness {
     return heads;
   }
 
+  /**
+   * Сверка `release done` (alpha.69, ревью): нынешние цели (git) и digest
+   * договора выпуска на них по каждому репозиторию с принятыми работами.
+   * Цель, которую не прочитать, — без записи: выпуск не закрывается.
+   */
+  async releaseCheck(): Promise<{
+    heads: Record<string, string>;
+    contracts: Record<string, string>;
+  }> {
+    const heads = await this.targetHeads();
+    const repositories = this.engine.read(
+      (v) =>
+        new Set(
+          v
+            .works()
+            .filter((w) => w.status === 'done')
+            .map((w) => w.order.repositoryId),
+        ),
+    );
+    const contracts: Record<string, string> = {};
+    for (const repo of this.policy.repositories) {
+      const head = heads[repo.id];
+      if (!head || !repositories.has(repo.id)) continue;
+      contracts[repo.id] = digestOf(
+        await releaseContractText(
+          { engine: this.engine, policy: this.policy },
+          repo.id,
+          this.repoPath(repo.path),
+          head,
+        ),
+      );
+    }
+    return { heads, contracts };
+  }
+
   /** Записать базу выпуска репозиториев (`release-base`) по текущим target ref. */
   async recordReleaseBases(repositories: ReadonlySet<string>, source: 'register' | 'outline') {
     const heads = await this.targetHeads();
     const wanted = Object.fromEntries(Object.entries(heads).filter(([id]) => repositories.has(id)));
-    return Object.keys(wanted).length ? this.engine.recordReleaseBases(wanted, source) : [];
+    // Выпуск, уже идущий без записи (начат до alpha.69): база — его самая
+    // ранняя попытка после итога прежнего выпуска, а не нынешняя цель.
+    const earlier = this.engine.read((v) =>
+      Object.fromEntries(Object.keys(wanted).map((id) => [id, releaseBaseOf(v, id)])),
+    );
+    return Object.keys(wanted).length
+      ? this.engine.recordReleaseBases(wanted, source, earlier)
+      : [];
   }
 
   /** Состояние ревью выпуска против текущих target ref (для status и view). */

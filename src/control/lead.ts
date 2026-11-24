@@ -193,7 +193,16 @@ function unfinished(view: ExecutionView) {
  */
 export function releaseDone(
   engine: Engine,
-  options: { summary: string; heads?: Readonly<Record<string, string | undefined>> },
+  options: {
+    summary: string;
+    heads?: Readonly<Record<string, string | undefined>>;
+    /**
+     * Digest нынешнего договора выпуска по репозиторию (`Harness.releaseCheck`,
+     * alpha.69): с ним цель берётся только из `heads` и раунд по прежнему
+     * договору выпуск не принимает.
+     */
+    contracts?: Readonly<Record<string, string | undefined>>;
+  },
 ): LeadData {
   const summary = cleanLeadText(options.summary, LEAD_LIMITS.summary, 'release done --summary');
   return engine.recordLead((log, now, view) => {
@@ -205,7 +214,12 @@ export function releaseDone(
       );
     const accepted = view.works().filter((w) => w.status === 'done').length;
     if (!accepted) throw new HarnessError('NOT_READY', 'Выпуск не готов: принятых работ нет');
-    const review = releaseReviewState(view, engine.policy, options.heads);
+    const review = releaseReviewState(
+      view,
+      engine.policy,
+      options.heads,
+      options.contracts ? { strict: true, contracts: options.contracts } : {},
+    );
     const problem = releaseReviewProblem(review);
     if (problem && review.required)
       throw new HarnessError(

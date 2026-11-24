@@ -1591,7 +1591,8 @@ export const localSchemas = {
   'release-base': z.strictObject({
     sha: gitShaSchema,
     at: isoTimeSchema,
-    source: z.enum(['register', 'outline']),
+    /** `attempt` — выпуск, начатый до alpha.69: база самой ранней его попытки. */
+    source: z.enum(['register', 'outline', 'attempt']),
   }),
   'round-epochs': z.strictObject({
     epochs: z.array(z.strictObject({ at: isoTimeSchema, workId: idSchema })).max(100),
