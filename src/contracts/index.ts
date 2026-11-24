@@ -4,6 +4,7 @@ export * from './errors.ts';
 export * from './digest.ts';
 export * from './work.ts';
 export * from './infra.ts';
+export * from './light.ts';
 export * from './setup-progress.ts';
 export * from './policy.ts';
 export * from './context.ts';

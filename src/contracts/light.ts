@@ -1,0 +1,207 @@
+import { z } from 'zod';
+import { idSchema, relativePathSchema } from './primitives.ts';
+
+/**
+ * Режим работы harness (0.1.0-alpha.69, решение владельца).
+ *
+ * - `light` — режим по умолчанию: исполнитель и gates работают на хосте как
+ *   обычный разработчик — Docker, сеть, браузер, порты, список процессов и
+ *   сигналы доступны, чтение не ограничено. Остаётся одна граница — запрет
+ *   записи вне своего рабочего дерева попытки, временного каталога попытки и
+ *   кешей инструментов (`writeGuard`). Изоляция попыток друг от друга — своё
+ *   рабочее дерево, своё имя проекта compose и свои выделенные порты.
+ * - `strict` — прежняя изоляция (песочница ОС с закрытым чтением, сетью по
+ *   доменам, граница инфраструктуры). Явный выбор владельца для чужого кода
+ *   или секретов production; заморожен: новых возможностей не получает.
+ *
+ * Политика без поля — `light`. Поле не входит ни в `executionDigest`, ни в
+ * `isolationDigest`: смена режима не делает согласования графов устаревшими.
+ */
+export const harnessModeSchema = z.enum(['light', 'strict']);
+export type HarnessMode = z.infer<typeof harnessModeSchema>;
+export const DEFAULT_HARNESS_MODE: HarnessMode = 'light';
+
+/** Путь границы записи: абсолютный или от домашнего каталога (`~/…`). */
+export const guardPathSchema = z
+  .string()
+  .min(2)
+  .max(500)
+  .regex(/^(\/|~\/)/, 'Путь границы записи — абсолютный или ~/…')
+  .refine((p) => !p.split('/').includes('..'), 'Путь границы записи без ..')
+  .refine((p) => p !== '/' && p !== '~/', 'Корень и весь домашний каталог открыть нельзя');
+
+/**
+ * Граница записи облегчённого режима. Запись разрешена в рабочее дерево
+ * попытки, её временный каталог и кеши инструментов. Кеши по умолчанию —
+ * `DEFAULT_WRITE_GUARD_CACHES`; `add` дополняет их, `replace` заменяет
+ * целиком (тогда умолчаний нет), `off: true` снимает границу (решение
+ * владельца, doctor говорит об этом). Нет поля — умолчания.
+ */
+export const writeGuardSchema = z.strictObject({
+  off: z.literal(true).optional(),
+  add: z.array(guardPathSchema).max(64).optional(),
+  replace: z.array(guardPathSchema).max(64).optional(),
+});
+export type WriteGuardPolicy = z.infer<typeof writeGuardSchema>;
+
+/**
+ * Кеши инструментов, открытые на запись по умолчанию: менеджеры пакетов,
+ * браузеры, сборка, Docker CLI, мобильные инструменты (Maestro, симуляторы
+ * iOS, эмуляторы Android). Пути вида `~/…` раскрываются от HOME; `$DARWIN_*`
+ * — каталоги пользователя macOS (`getconf`), на других системах пропускаются.
+ */
+export const DEFAULT_WRITE_GUARD_CACHES: readonly { id: string; path: string; why: string }[] = [
+  { id: 'npm', path: '~/.npm', why: 'кеш npm' },
+  { id: 'pnpm-store', path: '~/.pnpm-store', why: 'хранилище pnpm' },
+  { id: 'pnpm-mac', path: '~/Library/pnpm', why: 'хранилище и кеш pnpm на macOS' },
+  { id: 'pnpm-xdg', path: '~/.local/share/pnpm', why: 'хранилище pnpm на Linux' },
+  { id: 'yarn', path: '~/.yarn', why: 'кеш yarn' },
+  { id: 'bun', path: '~/.bun/install/cache', why: 'кеш bun' },
+  { id: 'xdg-cache', path: '~/.cache', why: 'XDG-кеши: corepack, ms-playwright, turbo, pnpm' },
+  { id: 'mac-caches', path: '~/Library/Caches', why: 'кеши macOS: ms-playwright, turbo, CLI' },
+  { id: 'docker-buildx', path: '~/.docker/buildx', why: 'состояние buildx у docker compose build' },
+  { id: 'maestro', path: '~/.maestro', why: 'журналы и результаты Maestro' },
+  {
+    id: 'core-simulator',
+    path: '~/Library/Developer/CoreSimulator',
+    why: 'устройства симулятора iOS',
+  },
+  { id: 'simulator-logs', path: '~/Library/Logs/CoreSimulator', why: 'журналы симулятора iOS' },
+  {
+    id: 'xcode-derived',
+    path: '~/Library/Developer/Xcode/DerivedData',
+    why: 'сборка приложения iOS',
+  },
+  { id: 'android', path: '~/.android', why: 'ключи adb и AVD эмулятора Android' },
+  { id: 'gradle', path: '~/.gradle', why: 'кеш Gradle (сборка Android)' },
+  {
+    id: 'darwin-user-cache',
+    path: '$DARWIN_USER_CACHE_DIR',
+    why: 'системные кеши macOS (шрифты, Metal)',
+  },
+  {
+    id: 'darwin-user-temp',
+    path: '$DARWIN_USER_TEMP_DIR',
+    why: 'временный каталог пользователя macOS: Chrome создаёт в нём сокет профиля',
+  },
+];
+
+/** Имя переменной окружения порта попытки (не `HARNESS_*`/`DEVCONTOUR_*`). */
+const portEnvName = z
+  .string()
+  .regex(
+    /^(?!HARNESS_|DEVCONTOUR_)[A-Z_][A-Z0-9_]*$/,
+    'Имя переменной порта — [A-Z_][A-Z0-9_]*, кроме HARNESS_* и DEVCONTOUR_*',
+  );
+
+/**
+ * Окружение попытки облегчённого режима: свои порты. Каждой попытке harness
+ * выделяет свободный порт на каждое имя (проба занятости — та же, что у
+ * ресурсов-портов, аренда — в базе ресурсов машины) и передаёт его
+ * исполнителю и gates в переменной с этим именем. Имя проекта compose
+ * (`COMPOSE_PROJECT_NAME`) и `HARNESS_ATTEMPT_ID` задаются всегда.
+ */
+export const attemptEnvSchema = z
+  .strictObject({
+    ports: z.array(portEnvName).max(20).optional(),
+    portRange: z
+      .strictObject({
+        from: z.number().int().min(1024).max(65535),
+        to: z.number().int().min(1024).max(65535),
+      })
+      .refine((r) => r.from < r.to, 'portRange.from меньше to')
+      .optional(),
+  })
+  .refine(
+    (v) => !v.ports || new Set(v.ports).size === v.ports.length,
+    'Имена портов попытки не повторяются',
+  );
+export type AttemptEnvPolicy = z.infer<typeof attemptEnvSchema>;
+export const DEFAULT_PORT_RANGE = { from: 20000, to: 29999 } as const;
+
+/**
+ * Шлюз gates (зеркало маршрутизации production): gates и исполнитель идут к
+ * приложению через шлюз проекта (сервис Caddy/nginx в compose проекта), а не
+ * прямо в порт API. `url` может ссылаться на порт попытки `${NAME}`; `env` —
+ * переменные приложения, которые получают адрес шлюза с суффиксом пути
+ * (`{"IMAGE_PUBLIC_BASE_URL": "/media"}` → `http://127.0.0.1:20031/media`).
+ * Адрес шлюза — ещё и `HARNESS_GATEWAY_URL`. Поднимает шлюз lifecycle
+ * проекта (`docker compose up gateway`), harness его не пишет.
+ */
+export const gatewaySchema = z.strictObject({
+  url: z
+    .string()
+    .min(8)
+    .max(300)
+    .regex(/^https?:\/\//, 'Адрес шлюза — http(s)://…'),
+  env: z.record(portEnvName, z.string().max(300).regex(/^(\/|$)/, 'Суффикс — путь от /')),
+});
+export type GatewayPolicy = z.infer<typeof gatewaySchema>;
+
+/**
+ * Приёмка выпуска (P7-6): перед `release done` независимый reviewer
+ * проверяет принятую цель против договора выпуска — постановки, критериев
+ * приёмки, ответов владельца и топологии развёртывания (`topology`: конфигурации
+ * шлюза/прокси и файлы окружения production относительно корня репозитория).
+ * `review`: `required` — без одобренного ревью выпуска на текущей цели
+ * `release done` отказывает; `advisory` — только предупреждает. Нет поля —
+ * `required` в облегчённом режиме, `advisory` в строгом (прежнее поведение).
+ */
+export const releasePolicySchema = z.strictObject({
+  review: z.enum(['required', 'advisory']).optional(),
+  topology: z.array(relativePathSchema).max(50).optional(),
+});
+export type ReleasePolicy = z.infer<typeof releasePolicySchema>;
+
+/**
+ * UI gate (alpha.69, точка расширения): `browser` — Playwright, `mobile` —
+ * Maestro на симуляторе iOS или эмуляторе Android. Команда gate остаётся его
+ * `command` (например `pnpm exec playwright test` или `maestro test flows/`);
+ * блок `ui` описывает, что harness готовит попытке: браузер и его профиль,
+ * устройство, сборку и установку приложения, артефакты при провале.
+ * В alpha.69 исполняется `browser` (окружение и артефакты); `mobile` —
+ * договор: политика его проверяет, `doctor` называет, а исполнение — после
+ * отчёта исследования (docs/ui-gates.md).
+ */
+const uiArtifacts = z.array(relativePathSchema).min(1).max(20).optional();
+export const browserUiSchema = z.strictObject({
+  type: z.literal('browser'),
+  runner: z.literal('playwright').default('playwright'),
+  /** Спеки относительно cwd gate; нет — конфигурация раннера. */
+  specs: z.array(relativePathSchema).max(50).optional(),
+  browser: z.enum(['chromium', 'firefox', 'webkit']).default('chromium'),
+  headless: z.boolean().default(true),
+  /** Каталоги отчётов и трасс, сохраняемые при провале (умолчание — test-results/, playwright-report/). */
+  artifacts: uiArtifacts,
+});
+export const mobileUiSchema = z.strictObject({
+  type: z.literal('mobile'),
+  runner: z.literal('maestro').default('maestro'),
+  platform: z.enum(['ios', 'android']),
+  /** Потоки Maestro относительно cwd gate. */
+  flows: z.array(relativePathSchema).min(1).max(50),
+  /**
+   * Устройство: ресурсы `kind: device` политики (пул; попытка берёт одно
+   * свободное) или имя/версия ОС для создания своего устройства попытки.
+   */
+  device: z
+    .strictObject({
+      pool: z.array(idSchema).min(1).max(20).optional(),
+      name: z.string().min(1).max(100).optional(),
+      os: z.string().min(1).max(40).optional(),
+      perAttempt: z.boolean().default(false),
+    })
+    .refine((d) => d.pool || d.name, 'device: pool или name'),
+  app: z.strictObject({
+    /** Bundle ID (iOS) или package (Android). */
+    id: z.string().min(1).max(200),
+    build: z.array(z.string().min(1)).min(1).optional(),
+    install: z.array(z.string().min(1)).min(1).optional(),
+    buildTimeoutMs: z.number().int().positive().max(3_600_000).optional(),
+  }),
+  artifacts: uiArtifacts,
+  flowTimeoutMs: z.number().int().positive().max(3_600_000).optional(),
+});
+export const uiGateSchema = z.discriminatedUnion('type', [browserUiSchema, mobileUiSchema]);
+export type UiGatePolicy = z.infer<typeof uiGateSchema>;
+export const DEFAULT_BROWSER_ARTIFACTS = ['test-results', 'playwright-report'] as const;

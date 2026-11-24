@@ -18,6 +18,16 @@ import type { CodedIssue, ErrorCode } from './errors.ts';
 import { toolchainPinSchema, toolchainSchema } from './toolchain.ts';
 import { gateArtifactLimits } from './result.ts';
 import { infraIssues, infraScopeSchema } from './infra.ts';
+import {
+  DEFAULT_HARNESS_MODE,
+  attemptEnvSchema,
+  gatewaySchema,
+  harnessModeSchema,
+  releasePolicySchema,
+  uiGateSchema,
+  writeGuardSchema,
+  type HarnessMode,
+} from './light.ts';
 
 const envName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
 /** Переменные `HARNESS_*` и исторические `DEVCONTOUR_*` задаёт сам harness, не политика. */
@@ -168,6 +178,8 @@ export const gateSchema = z.discriminatedUnion('kind', [
     report: junitReport,
     artifacts: gateArtifacts,
     when: gateWhen,
+    /** UI gate (alpha.69, `light.ts`): браузер (Playwright) или мобильный (Maestro). */
+    ui: uiGateSchema.optional(),
   }),
   z.strictObject({
     ...gateCommon,
@@ -175,6 +187,8 @@ export const gateSchema = z.discriminatedUnion('kind', [
     report: junitReport.optional(),
     artifacts: gateArtifacts,
     when: gateWhen,
+    /** UI gate (alpha.69, `light.ts`): браузер (Playwright) или мобильный (Maestro). */
+    ui: uiGateSchema.optional(),
   }),
 ]);
 export type GatePolicy = z.infer<typeof gateSchema>;
@@ -355,6 +369,11 @@ export const repositoryPolicySchema = z.strictObject({
    * Необязательное поле без умолчания: политика без него сохраняет digest.
    */
   infra: infraScopeSchema.optional(),
+  /**
+   * Шлюз gates (alpha.69, `gatewaySchema`, docs/light-mode.md): gates идут к
+   * приложению через шлюз проекта, как в production. Необязательное поле.
+   */
+  gateway: gatewaySchema.optional(),
 });
 
 /** Предел расходов (USD) и/или времени вызовов; хотя бы одно поле — выражено вариантами. */
@@ -604,6 +623,19 @@ export const executionPolicySchema = z.strictObject({
       leadResets: z.number().int().min(0).max(5).default(2),
     })
     .optional(),
+  /**
+   * Режим harness (alpha.69, `light.ts`): нет поля — `light` (по умолчанию),
+   * `strict` — прежняя изоляция, заморожена. Имя `harnessMode`, потому что
+   * `mode` политики — режим runtime (`live`/`fixture`). Не входит ни в
+   * `executionDigest`, ни в `isolationDigest`.
+   */
+  harnessMode: harnessModeSchema.optional(),
+  /** Граница записи облегчённого режима (`writeGuardSchema`); не входит в digests. */
+  writeGuard: writeGuardSchema.optional(),
+  /** Окружение попытки облегчённого режима: выделенные порты (`attemptEnvSchema`). */
+  attemptEnv: attemptEnvSchema.optional(),
+  /** Приёмка выпуска (`releasePolicySchema`, P7-6); надзор, не входит в digests. */
+  release: releasePolicySchema.optional(),
   maxAttempts: z.number().int().min(1).max(10).default(3),
   repairBudget: z.number().int().min(0).max(50).default(6),
   reuseImplementation: z.boolean().default(true),
@@ -677,7 +709,35 @@ export const executionDigest = (policy: ExecutionPolicy) =>
       previews: r.infra ? r.previews : undefined,
     })),
     recovery: undefined,
+    // Режим, граница записи и приёмка выпуска (alpha.69) — надзор: смена
+    // режима не делает согласования устаревшими (решение владельца).
+    harnessMode: undefined,
+    writeGuard: undefined,
+    release: undefined,
   });
+
+/** Действующий режим политики: нет поля — `light` (alpha.69). */
+export const harnessModeOf = (policy: { harnessMode?: HarnessMode | undefined }): HarnessMode =>
+  policy.harnessMode ?? DEFAULT_HARNESS_MODE;
+/**
+ * Прежняя песочница ОС проверок и исполнителя действует: строгий режим с
+ * `isolation.mode: os`. В облегчённом режиме её место занимает граница
+ * записи (`writeGuardActive`).
+ */
+export const strictSandbox = (
+  policy: Pick<ExecutionPolicy, 'isolation'> & { harnessMode?: HarnessMode | undefined },
+) => harnessModeOf(policy) === 'strict' && policy.isolation.mode === 'os';
+/**
+ * Граница записи облегчённого режима действует: режим `light`,
+ * `isolation.mode` не `none` и граница не снята (`writeGuard.off`).
+ */
+export const writeGuardActive = (
+  policy: Pick<ExecutionPolicy, 'isolation'> & {
+    harnessMode?: HarnessMode | undefined;
+    writeGuard?: { off?: true | undefined } | undefined;
+  },
+) =>
+  harnessModeOf(policy) === 'light' && policy.isolation.mode !== 'none' && !policy.writeGuard?.off;
 
 /** Пути `toolProfile` и `runtime` назначений в ролях и правилах ревью: какой профиль у кого. */
 function profileSelections(value: unknown, path: string, out: [string, unknown][]) {
