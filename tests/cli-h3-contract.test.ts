@@ -89,6 +89,8 @@ const laterCommands: readonly string[] = [
   'lead-outline',
   // Ревью выпуска перед release done (0.1.0-alpha.69).
   'review-release',
+  // Решение ведущего по предложению исполнителя (0.1.0-alpha.70).
+  'proposal',
 ];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [
@@ -541,6 +543,18 @@ test('H3-01: прежние команды и схемы их данных не 
         delete o.kind;
         delete o.gateChanges;
       }
+      if (Object.keys(o).length !== before) v = o;
+    }
+    // alpha.70: метки работы и источники критериев у поручения, второй проход
+    // ревью в политике.
+    if (k === 'properties' && v && typeof v === 'object') {
+      const o = { ...(v as Record<string, unknown>) };
+      const before = Object.keys(o).length;
+      if ('writeScope' in o && 'context' in o && 'contracts' in o) {
+        delete o.labels;
+        delete o.criteriaSources;
+      }
+      if ('code' in o && 'plan' in o && 'contract' in o) delete o.passes;
       if (Object.keys(o).length !== before) v = o;
     }
     // alpha.68: кем исполнен повтор и откуда актёр (`retry`: `by`, `bySource`).
