@@ -512,3 +512,60 @@ test('digest договора выпуска — по полному текст�
   );
   assert.equal(ok.status, 'approved');
 });
+
+test('alpha.70: приёмка выпуска — второй проход по умолчанию always: опровергнутая находка снята, пропущенная — держит; off — один проход', async () => {
+  const f = fixture();
+  ready(f.engine, graphOf({ w: [] }));
+  accept(f.engine, f.base, f.head);
+  f.scenario({
+    reviewer: verdict(false, { findings: [finding('Медиа не через Caddy')] }),
+    refuter: {
+      result: {
+        summary: 'неверно',
+        verdicts: [{ index: 0, verdict: 'refuted', basis: 'Caddyfile проксирует /media/* на api' }],
+        missed: [],
+      },
+    },
+  });
+  const r1 = await f.review();
+  assert.equal(r1.approved, true);
+  assert.equal(r1.passes?.mode, 'always');
+  assert.equal(r1.passes?.status, 'ran');
+  assert.equal(r1.passes?.overturned, true);
+  assert.deepEqual(r1.findings, []);
+  assert.equal(codeReviewRecordSchema.safeParse(r1).success, true);
+
+  const g = fixture();
+  ready(g.engine, graphOf({ w: [] }));
+  accept(g.engine, g.base, g.head);
+  g.scenario({
+    reviewer: verdict(true),
+    refuter: {
+      result: {
+        summary: 'пропущено',
+        verdicts: [],
+        missed: [
+          {
+            message: 'prod.env без MEDIA_URL',
+            path: 'deploy/prod.env',
+            line: null,
+            rule: null,
+            evidence: null,
+          },
+        ],
+      },
+    },
+  });
+  const r2 = await g.review();
+  assert.equal(r2.approved, false);
+  assert.equal(r2.passes?.missed, 1);
+  assert.equal(r2.findings[0]?.message, 'prod.env без MEDIA_URL');
+
+  const h = fixture((p) => (p.review.passes = { release: 'off' }));
+  ready(h.engine, graphOf({ w: [] }));
+  accept(h.engine, h.base, h.head);
+  h.scenario({ reviewer: verdict(false, { findings: [finding('Медиа не через Caddy')] }) });
+  const r3 = await h.review();
+  assert.equal(r3.approved, false);
+  assert.equal(r3.passes, undefined);
+});
