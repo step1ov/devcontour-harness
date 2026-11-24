@@ -574,14 +574,17 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
 
 /**
  * Молчал ли тот же gate на этом коммите в прогоне `harness gates --sha`
- * (alpha.69, ревью): итог в `<state>/gates-at/<id>/result.json` с провалом
- * gate и меткой молчаливого провала. Основание удержания `gate-definition`.
+ * (alpha.69, ревью): берётся только самый поздний итог этого gate на этом
+ * коммите, и только при том же определении gate (`definition`); его
+ * провал с меткой молчаливого провала — основание удержания
+ * `gate-definition`. Поздний успешный прогон снимает основание.
  */
 export function silentGateOnSha(
   stateDir: string,
   repositoryId: string,
   sha: string,
   gateId: string,
+  definition: string,
 ): boolean {
   const root = join(stateDir, 'gates-at');
   let names: string[];
@@ -590,33 +593,48 @@ export function silentGateOnSha(
   } catch {
     return false;
   }
+  let newest:
+    | {
+        at: number;
+        gate: { status?: string; summary?: string; message?: string; definition?: string };
+      }
+    | undefined;
   for (const name of names) {
     try {
       const raw = JSON.parse(readFileSync(join(root, name, 'result.json'), 'utf8')) as {
+        at?: string;
         data?: {
           repositoryId?: string;
           sha?: string;
-          gates?: { gate?: string; status?: string; summary?: string; message?: string }[];
+          gates?: {
+            gate?: string;
+            status?: string;
+            summary?: string;
+            message?: string;
+            definition?: string;
+          }[];
         };
       };
       const d = raw.data;
-      if (d?.repositoryId !== repositoryId || d.sha !== sha) continue;
-      if (
-        d.gates?.some(
-          (g) =>
-            g.gate === gateId &&
-            g.status === 'failed' &&
-            [g.summary, g.message].some(
-              (t) =>
-                typeof t === 'string' &&
-                (t.includes(GATE_SILENT_FAILURE) || t.includes('GATE_DEFINITION_NO_CAUSE')),
-            ),
-        )
-      )
-        return true;
+      const at = Date.parse(raw.at ?? '');
+      if (d?.repositoryId !== repositoryId || d.sha !== sha || Number.isNaN(at)) continue;
+      const gate = d.gates?.find(
+        (g) => g.gate === gateId && (g.status === 'passed' || g.status === 'failed'),
+      );
+      if (gate && (!newest || at > newest.at)) newest = { at, gate };
     } catch {
       /* чужой или неполный итог */
     }
   }
-  return false;
+  const g = newest?.gate;
+  return (
+    !!g &&
+    g.status === 'failed' &&
+    g.definition === definition &&
+    [g.summary, g.message].some(
+      (t) =>
+        typeof t === 'string' &&
+        (t.includes(GATE_SILENT_FAILURE) || t.includes('GATE_DEFINITION_NO_CAUSE')),
+    )
+  );
 }

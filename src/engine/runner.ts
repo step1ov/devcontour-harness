@@ -56,6 +56,7 @@ import {
   hostStepFiles,
   infraViolations,
   strictSandbox,
+  gateDigest,
   harnessModeOf,
   writeGuardActive,
 } from '../contracts/index.ts';
@@ -3114,7 +3115,13 @@ export class Runner {
       ...(!consumer && attempt.baseSha
         ? {
             silentOnBase: (id: string) =>
-              silentGateOnSha(this.options.stateDir, attempt.repositoryId, attempt.baseSha!, id),
+              silentGateOnSha(
+                this.options.stateDir,
+                attempt.repositoryId,
+                attempt.baseSha!,
+                id,
+                gateDigest(gate),
+              ),
           }
         : {}),
       signal,

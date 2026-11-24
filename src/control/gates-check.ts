@@ -6,6 +6,7 @@ import {
   type ErrorCode,
   type EvidenceRecord,
   type ExecutionPolicy,
+  gateDigest,
 } from '../contracts/index.ts';
 import { git } from '../environment/process.ts';
 import { runGatesAt } from '../verification/gates-at.ts';
@@ -158,9 +159,13 @@ export async function checkGates(input: GateCheckInput) {
             : failure !== undefined && !duplicate
               ? failure
               : undefined;
+    const definition = repo.gates.find((g) => g.id === gate);
     return {
       gate,
       status,
+      // Определение gate (alpha.69): итог на базе освобождает от засчитанного
+      // молчаливого провала только при том же определении.
+      ...(definition ? { definition: gateDigest(definition) } : {}),
       ...(evidence
         ? { exitCode: evidence.exitCode, summary: evidence.summary, log: evidence.log }
         : {}),

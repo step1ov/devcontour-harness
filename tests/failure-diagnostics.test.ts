@@ -499,23 +499,26 @@ test('A68-r3: macOS открывает компоненты отчёта с O_NO
   else assert.equal(reportNoFollowAny(), false);
 });
 
-test('молчал ли gate на базе — по итогу harness gates на этом коммите', async () => {
+test('молчал ли gate на базе — по самому позднему итогу harness gates с тем же определением', async () => {
   const { silentGateOnSha } = await import('../src/verification/gates-at.ts');
   const state = realpathSync(mkdtempSync(join(tmpdir(), 'harness-silent-')));
   const sha = 'a'.repeat(40);
-  mkdirSync(join(state, 'gates-at', 'G1'), { recursive: true });
-  writeFileSync(
-    join(state, 'gates-at', 'G1', 'result.json'),
-    JSON.stringify({
-      at: new Date().toISOString(),
-      data: {
-        repositoryId: 'app',
-        sha,
-        gates: [{ gate: 'unit', status: 'failed', summary: 'GATE_SILENT_FAILURE: …' }],
-      },
-    }),
-  );
-  assert.equal(silentGateOnSha(state, 'app', sha, 'unit'), true);
-  assert.equal(silentGateOnSha(state, 'app', sha, 'other'), false);
-  assert.equal(silentGateOnSha(state, 'app', 'b'.repeat(40), 'unit'), false);
+  const put = (id: string, at: string, status: string, summary: string, definition = 'D1') => {
+    mkdirSync(join(state, 'gates-at', id), { recursive: true });
+    writeFileSync(
+      join(state, 'gates-at', id, 'result.json'),
+      JSON.stringify({
+        at,
+        data: { repositoryId: 'app', sha, gates: [{ gate: 'unit', status, summary, definition }] },
+      }),
+    );
+  };
+  put('G1', '2026-11-24T10:00:00.000Z', 'failed', 'GATE_SILENT_FAILURE: …');
+  assert.equal(silentGateOnSha(state, 'app', sha, 'unit', 'D1'), true);
+  assert.equal(silentGateOnSha(state, 'app', sha, 'unit', 'D2'), false, 'другое определение gate');
+  assert.equal(silentGateOnSha(state, 'app', sha, 'other', 'D1'), false);
+  assert.equal(silentGateOnSha(state, 'app', 'b'.repeat(40), 'unit', 'D1'), false);
+  // Поздний успешный прогон на базе снимает основание.
+  put('G2', '2026-11-24T11:00:00.000Z', 'passed', 'ok');
+  assert.equal(silentGateOnSha(state, 'app', sha, 'unit', 'D1'), false);
 });

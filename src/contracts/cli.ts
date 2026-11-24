@@ -2785,6 +2785,8 @@ export const gatesDataSchema = z.strictObject({
        * проверки (CLI тогда отвечает отказом `CANCELLED`).
        */
       status: z.enum(['passed', 'failed', 'cancelled', 'not-run', 'skipped']),
+      /** Digest определения gate (`gateDigest`, alpha.69). */
+      definition: digestSchema.optional(),
       exitCode: z.number().int().optional(),
       summary: z.string().optional(),
       /** Лог gate. */
