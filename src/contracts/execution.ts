@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { reviewPassesRecordSchema } from './review-passes.ts';
+import { PROPOSAL_LIMITS, workProposalSchema } from './proposals.ts';
 import { STATE_VERSION } from './version.ts';
 import {
   digestSchema,
@@ -639,6 +640,15 @@ export const attemptStateSchema = z.strictObject({
    * незасчитанных отказов; повтора без ведущего нет.
    */
   writerBlocked: z.literal(true).optional(),
+  /**
+   * Исполнитель в начале попытки предложил разделить работу (0.1.0-alpha.70,
+   * `needs-lead` с причиной `writer-split`): ID предложения. Попытка не
+   * засчитана (тратится предел незасчитанных отказов); решает ведущий.
+   */
+  writerSplit: z
+    .string()
+    .regex(/^P-[0-9a-f]{12}$/)
+    .optional(),
   /** Итог исполнителя незавершённой попытки своими словами (до 500 знаков). */
   writerSummary: z.string().max(500).optional(),
   failureKind: failureKindSchema.optional(),
@@ -1029,6 +1039,12 @@ export const workStateSchema = z.strictObject({
    * сбросом; нет поля — диагностик и учтённых сбросов не было.
    */
   leadRecovery: leadRecoverySchema.optional(),
+  /**
+   * Предложения исполнителей ведущему (0.1.0-alpha.70, `workProposalSchema`):
+   * задачи-продолжения на остаток и разделения из разбора в начале попытки.
+   * Принимает или отклоняет только ведущий (или оператор).
+   */
+  proposals: z.array(workProposalSchema).max(PROPOSAL_LIMITS.perWork).optional(),
   /**
    * Удержание gate по отказу окружения без повтора (0.1.0-alpha.66):
    * попытка этой работы упала `sandbox-process-list` на вызове `ps`, который

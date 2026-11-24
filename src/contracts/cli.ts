@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { workProposalSchema } from './proposals.ts';
 import { API_VERSION, STATE_VERSION } from './version.ts';
 import {
   digestSchema,
@@ -574,6 +575,41 @@ export const cliCommands = {
         required: false,
         multiple: true,
         description: 'Доказательство (ID попытки, evidence, строка лога), до 10',
+      },
+    ],
+    refusals: ['NOT_FOUND', 'NOT_READY', 'INVALID_INPUT'],
+  },
+  proposal: {
+    description:
+      'Решение ведущего по предложению исполнителя (0.1.0-alpha.70): задача-продолжение на остаток или разделение из разбора в начале попытки. accept — внести в план (сам граф команда не меняет: принятое ведущий вносит обычным ревью плана), reject — отклонить с основанием (после отклонённого разделения — retry --by lead). Исполнитель предложения не принимает. Модель не вызывается',
+    writes: true,
+    idempotency: 'Решённое предложение второй раз не решается (NOT_READY)',
+    args: [
+      state,
+      work,
+      {
+        name: '--proposal',
+        value: 'id',
+        required: true,
+        description: 'ID предложения (P-…)',
+      },
+      {
+        name: '--decision',
+        value: 'text',
+        required: true,
+        description: 'accept | reject',
+      },
+      {
+        name: '--reason',
+        value: 'text',
+        required: true,
+        description: 'Основание решения (3–2000 знаков)',
+      },
+      {
+        name: '--by',
+        value: 'text',
+        required: false,
+        description: 'lead (по умолчанию) | operator',
       },
     ],
     refusals: ['NOT_FOUND', 'NOT_READY', 'INVALID_INPUT'],
@@ -2519,6 +2555,12 @@ export const workActionDataSchema = z.strictObject({
   bySource: z.enum(['flag', 'default']).optional(),
 });
 
+/** `harness proposal`: решённое предложение исполнителя (alpha.70). */
+export const proposalDataSchema = z.strictObject({
+  workId: idSchema,
+  proposal: workProposalSchema,
+});
+
 /** `harness diagnose`: записанный разбор, что дальше и действующее правило. */
 export const diagnoseDataSchema = z.strictObject({
   workId: idSchema,
@@ -3558,6 +3600,7 @@ export const cliDataSchemas = {
   cancel: workActionDataSchema,
   retry: workActionDataSchema,
   diagnose: diagnoseDataSchema,
+  proposal: proposalDataSchema,
   result: resultEnvelopeSchema,
   deliver: resultEnvelopeSchema,
   cleanup: cleanupDataSchema,

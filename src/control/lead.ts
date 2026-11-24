@@ -389,6 +389,15 @@ export function leadCommandEntry(
         `the lead diagnosed the failures of ${w}: ${d?.diagnosis?.id ?? 'diagnosis'}, cause ${d?.diagnosis?.cause ?? '?'}${next ? `; next — ${next.en}` : ''}`,
       );
     }
+    case 'proposal': {
+      const p = (data as { proposal?: { id: string; status: string; kind: string } } | undefined)
+        ?.proposal;
+      const accepted = p?.status === 'accepted';
+      return one(
+        `ведущий ${accepted ? 'принял в план' : 'отклонил'} предложение исполнителя ${p?.id ?? '?'} (${p?.kind === 'split' ? 'разделение' : 'задача-продолжение'}) по ${w}`,
+        `the lead ${accepted ? 'accepted into the plan' : 'rejected'} writer proposal ${p?.id ?? '?'} (${p?.kind === 'split' ? 'split' : 'follow-up task'}) for ${w}`,
+      );
+    }
     case 'cancel':
       return d?.abandoned
         ? one(
@@ -469,10 +478,11 @@ export const LEAD_LOGGED_COMMANDS = [
   'input-carry',
   'input-cancel',
   'input-supersede',
+  'proposal',
 ] as const;
 
 /** Команды, которые по договору подаёт только ведущий: `diagnose` — его разбор. */
-const LEAD_ONLY_COMMANDS: readonly string[] = ['diagnose'];
+const LEAD_ONLY_COMMANDS: readonly string[] = ['diagnose', 'proposal'];
 /**
  * Команды, которые без явного `--by lead` / `--actor lead` — действие
  * оператора: `retry` (повтор оператора; в открытой сессии ведущего CLI без

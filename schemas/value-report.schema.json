@@ -2284,7 +2284,7 @@
               "type": "object",
               "properties": {
                 "rows": {
-                  "maxItems": 23,
+                  "maxItems": 24,
                   "type": "array",
                   "items": {
                     "type": "object",
@@ -2312,6 +2312,7 @@
                           "cleanup",
                           "resource-busy",
                           "writer-environment",
+                          "writer-split",
                           "toolchain",
                           "other",
                           "none"

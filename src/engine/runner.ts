@@ -66,6 +66,8 @@ import {
   refuteResultSchema,
   reviewPassModeOf,
   type ReviewPassesRecord,
+  REVIEW_FOLLOW_UPS_TEXT,
+  WRITER_TRIAGE_TEXT,
 } from '../contracts/index.ts';
 import { changedFacts, resolvedHostFiles } from './infra-guard.ts';
 import { git, hostGitArgs } from '../environment/process.ts';
@@ -1423,6 +1425,7 @@ export class Runner {
       discoveries: [],
       inputRequest: null,
       assumptions,
+      followUpTasks: [],
     };
     this.decideInput(
       attempt,
@@ -1989,6 +1992,8 @@ export class Runner {
                         ...(dependencies ? [writerDependenciesNote(dependencies)] : []),
                         ...(repo.generators?.length ? [generatorNote(repo.generators)!] : []),
                         ALREADY_SATISFIED_WRITER_NOTE,
+                        WRITER_TRIAGE_TEXT,
+                        ...proposalNotes(work),
                       ],
                       // Открытые находки ревью с выданными ID — из истории
                       // поручения; только когда reviewer ведёт протокол
@@ -2154,6 +2159,35 @@ export class Runner {
                       true,
                       generators.flatMap((g) => g.outputs),
                     );
+                    // Разбор в начале попытки (alpha.70): предложение разделить
+                    // работу уходит ведущему — попытка не засчитана, код не
+                    // принимается.
+                    const triage = result.data.triage;
+                    if (
+                      !result.data.completed &&
+                      triage?.decision === 'split' &&
+                      (triage.parts?.length ?? 0) >= 2
+                    ) {
+                      const [split] = this.engine.recordProposals(attempt.id, attempt.token, [
+                        {
+                          kind: 'split',
+                          title: work.order.title,
+                          goal: redactDeep(triage.reason, response.redact),
+                          acceptance: [],
+                          reason: redactDeep(triage.reason, response.redact),
+                          parts: redactDeep(triage.parts ?? [], response.redact),
+                        },
+                      ]);
+                      throw new TaskFailure(
+                        'needs-lead',
+                        `Исполнитель предлагает разделить работу (${split ?? 'предложение не записано'}, частей ${triage.parts!.length}); решает ведущий: harness proposal --work ${work.id} --proposal ${split ?? '?'} --decision accept|reject --reason …`,
+                        undefined,
+                        'writer-split',
+                        undefined,
+                        undefined,
+                        redactDeep(triage.reason, response.redact).slice(0, 500),
+                      );
+                    }
                     this.decideInput(
                       attempt,
                       decided,
@@ -2161,6 +2195,20 @@ export class Runner {
                       response.callId,
                       normalized?.issues,
                     );
+                    // Задачи-продолжения сданной работы — предложения ведущему.
+                    if (result.data.completed && result.data.followUpTasks.length)
+                      this.engine.recordProposals(
+                        attempt.id,
+                        attempt.token,
+                        redactDeep(result.data.followUpTasks, response.redact).map((f) => ({
+                          kind: 'follow-up' as const,
+                          title: f.title,
+                          goal: f.goal,
+                          acceptance: f.acceptance,
+                          reason: f.reason,
+                          ...(f.evidence ? { evidence: f.evidence } : {}),
+                        })),
+                      );
                     if (empty) {
                       await this.options.hooks?.implemented?.({
                         attempt,
@@ -2401,10 +2449,13 @@ export class Runner {
           !stalled && origin instanceof TaskFailure ? origin.writerSummary : undefined;
         let recorded: { kind: FailureKind; message: string } = { kind, message: reported };
         try {
+          const proposal =
+            cause === 'writer-split' ? /P-[0-9a-f]{12}/.exec(reported)?.[0] : undefined;
           this.engine.fail(attempt.id, attempt.token, reported, {
             ...failure,
             ...(input ? { input } : {}),
             ...(writerSummary ? { writerSummary } : {}),
+            ...(proposal ? { proposal } : {}),
           });
         } catch (refused) {
           // Запрос не записался (откат той же транзакции, что и отказ):
@@ -3751,10 +3802,22 @@ export class Runner {
     // по явному подтверждению reviewer, что приёмка уже выполнена.
     const unchanged =
       phase === 'candidate' ? base === sha : attempt.candidateSha === attempt.baseSha;
+    const followUps = (this.engine.read((v) => v.work(attempt.workId))?.proposals ?? []).filter(
+      (p) => p.runId === attempt.id && p.kind === 'follow-up',
+    );
     const notes = [
       ...this.notes(attempt, true, sha),
       ...(await this.hostNotes(work, attempt, true)),
       ...(unchanged ? [ALREADY_SATISFIED_REVIEW_NOTE] : []),
+      ...(followUps.length
+        ? [
+            REVIEW_FOLLOW_UPS_TEXT +
+              '\n' +
+              JSON.stringify(
+                followUps.map((f) => ({ title: f.title, goal: f.goal, reason: f.reason })),
+              ),
+          ]
+        : []),
     ];
     let issues: ProtocolIssue[] = lastIssues;
     const stage = phase + '-review';
@@ -4772,6 +4835,20 @@ async function receipts(dir: string): Promise<string[]> {
 
 /** Причины ошибки протокола для сообщения: путь, класс, пояснение. */
 /** Строка второго прохода в итоге evidence ревью. */
+/**
+ * Решения ведущего по разделению, предложенному прежней попыткой: отклонённое
+ * — делать работу как есть, с основанием ведущего.
+ */
+function proposalNotes(work: WorkState): string[] {
+  return (work.proposals ?? [])
+    .filter((p) => p.kind === 'split' && p.status === 'rejected')
+    .slice(-1)
+    .map(
+      (p) =>
+        `The lead rejected the split proposed by attempt ${p.attempt} (${p.id}): ${p.decision?.reason ?? ''}. Implement this work order as approved; do not propose the same split again.`,
+    );
+}
+
 function passesText(passes: ReviewPassesRecord | undefined) {
   if (!passes || passes.status === 'skipped') return '';
   if (passes.status === 'failed')

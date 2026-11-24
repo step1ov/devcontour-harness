@@ -535,6 +535,7 @@ const options = {
   'diagnose-after': { type: 'string' },
   'lead-resets': { type: 'string' },
   file: { type: 'string' },
+  proposal: { type: 'string' },
 } as const;
 
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
@@ -584,7 +585,8 @@ const flagOwners = {
   option: ['input-answer'],
   kind: ['input-answer'],
   actor: ['input-answer', 'input-carry', 'review-plan', 'review-contract', 'review-accept'],
-  by: ['reapprove', 'retry'],
+  by: ['reapprove', 'retry', 'proposal'],
+  proposal: ['proposal'],
   cause: ['diagnose'],
   hypothesis: ['diagnose'],
   addendum: ['diagnose'],
@@ -1646,6 +1648,33 @@ async function run(
           .recordReleaseBases(new Set(h.policy.repositories.map((r) => r.id)), 'outline')
           .catch(() => undefined);
         return { command, data };
+      } finally {
+        h.close();
+      }
+    }
+    case 'proposal': {
+      const decision = need('decision');
+      if (decision !== 'accept' && decision !== 'reject')
+        throw new HarnessError('INVALID_INPUT', '--decision: accept | reject', [
+          { path: ['--decision'], message: decision },
+        ]);
+      if (v.by !== undefined && v.by !== 'lead' && v.by !== 'operator')
+        throw new HarnessError('INVALID_INPUT', '--by: lead (по умолчанию) | operator', [
+          { path: ['--by'], message: v.by },
+        ]);
+      const h = open(need('state'), binding(need('state')), true);
+      try {
+        return {
+          command,
+          data: {
+            workId: need('work'),
+            proposal: h.engine.decideProposal(need('work'), need('proposal'), {
+              decision,
+              by: v.by === 'operator' ? 'operator' : 'lead',
+              reason: need('reason'),
+            }),
+          },
+        };
       } finally {
         h.close();
       }

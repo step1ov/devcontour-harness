@@ -85,6 +85,9 @@ import {
   type WorkState,
   harnessModeOf,
   strictSandbox,
+  PROPOSAL_LIMITS,
+  workProposalSchema,
+  type WorkProposal,
 } from '../contracts/index.ts';
 import { HARNESS_VERSION } from '../package.ts';
 import {
@@ -325,7 +328,8 @@ const causeOf = (
   if (blocked && kind !== 'provider-auth' && kind !== 'environment') return 'preflight';
   if (kind === 'provider-auth')
     return cause === 'provider-limit' ? 'provider-limit' : 'provider-auth';
-  if (kind === 'needs-lead' && cause === 'writer-environment') return cause;
+  if (kind === 'needs-lead' && (cause === 'writer-environment' || cause === 'writer-split'))
+    return cause;
   if (kind !== 'environment') return 'none';
   return cause && cause !== 'none' && cause !== 'provider-auth' && cause !== 'provider-limit'
     ? cause
@@ -2466,6 +2470,93 @@ export class Engine {
     this.withAttempt(id, token, 'run.partial', (a, _w, tx) => tx.putAttempt({ ...a, partial }));
   }
 
+  /**
+   * Предложения исполнителя ведущему (alpha.70): задачи-продолжения и
+   * разделение из разбора в начале попытки. Пишутся под fencing попытки;
+   * ID — по работе, попытке и номеру. Предел на работу — `PROPOSAL_LIMITS.perWork`
+   * (сверх — не пишутся). Возвращает записанные ID.
+   */
+  recordProposals(
+    id: string,
+    token: string,
+    proposals: Pick<
+      WorkProposal,
+      'kind' | 'title' | 'goal' | 'acceptance' | 'reason' | 'evidence' | 'parts'
+    >[],
+  ): string[] {
+    if (!proposals.length) return [];
+    return this.withAttempt(id, token, 'proposal.recorded', (a, w, tx) => {
+      const existing = w.proposals ?? [];
+      const room = Math.max(0, PROPOSAL_LIMITS.perWork - existing.length);
+      const at = iso(this.now());
+      const added = proposals.slice(0, room).map((p, i): WorkProposal =>
+        workProposalSchema.parse({
+          id: 'P-' + digestOf({ work: w.id, run: a.id, i, title: p.title }).slice(0, 12),
+          kind: p.kind,
+          runId: a.id,
+          attempt: a.attempt,
+          at,
+          title: p.title.slice(0, 180),
+          goal: p.goal.slice(0, 4000),
+          acceptance: p.acceptance
+            .slice(0, PROPOSAL_LIMITS.acceptance)
+            .map((c) => c.slice(0, 1500)),
+          reason: p.reason.slice(0, 2000),
+          ...(p.evidence ? { evidence: p.evidence.slice(0, 4000) } : {}),
+          ...(p.parts?.length ? { parts: p.parts.slice(0, PROPOSAL_LIMITS.parts) } : {}),
+          status: 'proposed',
+        }),
+      );
+      const fresh = added.filter((p) => !existing.some((e) => e.id === p.id));
+      if (fresh.length) tx.putWork({ ...w, proposals: [...existing, ...fresh] });
+      return added.map((p) => p.id);
+    });
+  }
+
+  /**
+   * Решение по предложению исполнителя (alpha.70): принять в план или
+   * отклонить — ведущий (`by: lead`) или оператор. Принятие граф не меняет:
+   * принятое ведущий вносит в план обычным ревью плана (разделение —
+   * `review-plan` с частями). Решённое предложение второй раз не решается.
+   */
+  decideProposal(
+    workId: string,
+    proposalId: string,
+    input: { decision: 'accept' | 'reject'; by: 'lead' | 'operator'; reason: string },
+  ): WorkProposal {
+    const reason = input.reason.trim();
+    if (reason.length < 3)
+      throw new HarnessError('INVALID_INPUT', '--reason: основание решения (не меньше 3 знаков)', [
+        { path: ['--reason'], message: 'required' },
+      ]);
+    return this.host.store.transact('proposal.decided', (tx) => {
+      const w = tx.work(workId);
+      if (!w) throw new HarnessError('NOT_FOUND', 'Работа не найдена: ' + workId);
+      const p = (w.proposals ?? []).find((x) => x.id === proposalId);
+      if (!p)
+        throw new HarnessError(
+          'NOT_FOUND',
+          `Предложение ${proposalId} у работы ${workId} не найдено`,
+          [{ path: ['--id'], message: proposalId }],
+        );
+      if (p.status !== 'proposed')
+        throw new HarnessError(
+          'NOT_READY',
+          `Предложение ${proposalId} уже решено: ${p.status === 'accepted' ? 'принято' : 'отклонено'} (${p.decision?.by ?? '?'})`,
+        );
+      const decided: WorkProposal = {
+        ...p,
+        status: input.decision === 'accept' ? 'accepted' : 'rejected',
+        decision: { by: input.by, reason: reason.slice(0, 2000), at: iso(this.now()) },
+      };
+      tx.putWork({
+        ...w,
+        proposals: (w.proposals ?? []).map((x) => (x.id === proposalId ? decided : x)),
+      });
+      return decided;
+    });
+  }
+
   /** Попытка начала с черновика предыдущей (см. `AttemptState.continuedFrom`). */
   continuation(id: string, token: string, from: NonNullable<AttemptState['continuedFrom']>) {
     this.withAttempt(id, token, 'run.continuation', (a, _w, tx) =>
@@ -3065,11 +3156,17 @@ export class Engine {
       input?: InputOutcome;
       /** Итог исполнителя незавершённой попытки своими словами (до 500 знаков). */
       writerSummary?: string;
+      /** Предложение разделить работу (`writer-split`, alpha.70). */
+      proposal?: string;
     } = {},
   ) {
     const kind = options.kind ?? 'unknown';
     // Исполнитель остановился из-за окружения: ход ведущего, попытка не засчитана.
-    const writerBlocked = kind === 'needs-lead' && options.cause === 'writer-environment';
+    // Исполнитель предложил разделить работу (alpha.70): ход ведущего, не засчитана.
+    const writerSplit =
+      kind === 'needs-lead' && options.cause === 'writer-split' ? options.proposal : undefined;
+    const writerBlocked =
+      kind === 'needs-lead' && (options.cause === 'writer-environment' || !!writerSplit);
     // Отказ окружения, который повтор не снимет (gate зовёт ps в песочнице):
     // без автоматического повтора и без паузы выдачи — ход ведущего.
     const noRetry =
@@ -3105,7 +3202,8 @@ export class Engine {
         status: 'failed',
         error: shown,
         ...(blocked ? { blocked: true } : {}),
-        ...(writerBlocked ? { writerBlocked: true as const } : {}),
+        ...(writerBlocked && !writerSplit ? { writerBlocked: true as const } : {}),
+        ...(writerSplit ? { writerSplit } : {}),
         ...(options.writerSummary?.trim()
           ? { writerSummary: options.writerSummary.trim().slice(0, 500) }
           : {}),

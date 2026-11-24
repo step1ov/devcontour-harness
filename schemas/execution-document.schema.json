@@ -317,6 +317,49 @@
                         "maxLength": 500,
                         "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
                       }
+                    },
+                    "labels": {
+                      "minItems": 1,
+                      "maxItems": 10,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "pattern": "^[a-z0-9][a-z0-9_.-]{0,39}$"
+                      }
+                    },
+                    "criteriaSources": {
+                      "maxItems": 30,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "criterion": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 29
+                          },
+                          "kind": {
+                            "type": "string",
+                            "enum": [
+                              "brief",
+                              "owner-answer",
+                              "review-finding",
+                              "context"
+                            ]
+                          },
+                          "ref": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 300
+                          }
+                        },
+                        "required": [
+                          "criterion",
+                          "kind",
+                          "ref"
+                        ],
+                        "additionalProperties": false
+                      }
                     }
                   },
                   "required": [
@@ -802,6 +845,49 @@
                   "minLength": 1,
                   "maxLength": 500,
                   "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
+                }
+              },
+              "labels": {
+                "minItems": 1,
+                "maxItems": 10,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^[a-z0-9][a-z0-9_.-]{0,39}$"
+                }
+              },
+              "criteriaSources": {
+                "maxItems": 30,
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "criterion": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 29
+                    },
+                    "kind": {
+                      "type": "string",
+                      "enum": [
+                        "brief",
+                        "owner-answer",
+                        "review-finding",
+                        "context"
+                      ]
+                    },
+                    "ref": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 300
+                    }
+                  },
+                  "required": [
+                    "criterion",
+                    "kind",
+                    "ref"
+                  ],
+                  "additionalProperties": false
                 }
               }
             },
@@ -1794,6 +1880,49 @@
                       "maxLength": 500,
                       "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
                     }
+                  },
+                  "labels": {
+                    "minItems": 1,
+                    "maxItems": 10,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9_.-]{0,39}$"
+                    }
+                  },
+                  "criteriaSources": {
+                    "maxItems": 30,
+                    "type": "array",
+                    "items": {
+                      "type": "object",
+                      "properties": {
+                        "criterion": {
+                          "type": "integer",
+                          "minimum": 0,
+                          "maximum": 29
+                        },
+                        "kind": {
+                          "type": "string",
+                          "enum": [
+                            "brief",
+                            "owner-answer",
+                            "review-finding",
+                            "context"
+                          ]
+                        },
+                        "ref": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 300
+                        }
+                      },
+                      "required": [
+                        "criterion",
+                        "kind",
+                        "ref"
+                      ],
+                      "additionalProperties": false
+                    }
                   }
                 },
                 "required": [
@@ -2072,6 +2201,146 @@
             ],
             "additionalProperties": false
           },
+          "proposals": {
+            "maxItems": 50,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "pattern": "^P-[0-9a-f]{12}$"
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "follow-up",
+                    "split"
+                  ]
+                },
+                "runId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
+                },
+                "attempt": {
+                  "type": "integer",
+                  "exclusiveMinimum": 0,
+                  "maximum": 9007199254740991
+                },
+                "at": {
+                  "type": "string",
+                  "format": "date-time",
+                  "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                },
+                "title": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 180
+                },
+                "goal": {
+                  "type": "string",
+                  "maxLength": 4000
+                },
+                "acceptance": {
+                  "maxItems": 10,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "maxLength": 1500
+                  }
+                },
+                "reason": {
+                  "type": "string",
+                  "maxLength": 2000
+                },
+                "evidence": {
+                  "type": "string",
+                  "maxLength": 4000
+                },
+                "parts": {
+                  "maxItems": 8,
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "properties": {
+                      "title": {
+                        "type": "string",
+                        "maxLength": 180
+                      },
+                      "goal": {
+                        "type": "string",
+                        "maxLength": 4000
+                      },
+                      "acceptance": {
+                        "maxItems": 10,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "maxLength": 1500
+                        }
+                      }
+                    },
+                    "required": [
+                      "title",
+                      "goal",
+                      "acceptance"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                "status": {
+                  "type": "string",
+                  "enum": [
+                    "proposed",
+                    "accepted",
+                    "rejected"
+                  ]
+                },
+                "decision": {
+                  "type": "object",
+                  "properties": {
+                    "by": {
+                      "type": "string",
+                      "enum": [
+                        "lead",
+                        "operator"
+                      ]
+                    },
+                    "reason": {
+                      "type": "string",
+                      "minLength": 3,
+                      "maxLength": 2000
+                    },
+                    "at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                    }
+                  },
+                  "required": [
+                    "by",
+                    "reason",
+                    "at"
+                  ],
+                  "additionalProperties": false
+                }
+              },
+              "required": [
+                "id",
+                "kind",
+                "runId",
+                "attempt",
+                "at",
+                "title",
+                "goal",
+                "acceptance",
+                "reason",
+                "status"
+              ],
+              "additionalProperties": false
+            }
+          },
           "environmentHold": {
             "type": "object",
             "properties": {
@@ -2261,6 +2530,10 @@
           "writerBlocked": {
             "type": "boolean",
             "const": true
+          },
+          "writerSplit": {
+            "type": "string",
+            "pattern": "^P-[0-9a-f]{12}$"
           },
           "writerSummary": {
             "type": "string",
@@ -3795,6 +4068,97 @@
                     "calls",
                     "protocol",
                     "expected"
+                  ],
+                  "additionalProperties": false
+                },
+                "reviewPasses": {
+                  "type": "object",
+                  "properties": {
+                    "mode": {
+                      "type": "string",
+                      "enum": [
+                        "off",
+                        "on-reject",
+                        "always"
+                      ]
+                    },
+                    "source": {
+                      "type": "string",
+                      "enum": [
+                        "policy",
+                        "default"
+                      ]
+                    },
+                    "sensitive": {
+                      "type": "string",
+                      "pattern": "^[a-z0-9][a-z0-9_.-]{0,39}$"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "ran",
+                        "skipped",
+                        "failed"
+                      ]
+                    },
+                    "first": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "confirmed": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "refuted": {
+                      "maxItems": 500,
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "message": {
+                            "type": "string",
+                            "maxLength": 4000
+                          },
+                          "basis": {
+                            "type": "string",
+                            "maxLength": 4000
+                          }
+                        },
+                        "required": [
+                          "message",
+                          "basis"
+                        ],
+                        "additionalProperties": false
+                      }
+                    },
+                    "missed": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "overturned": {
+                      "type": "boolean"
+                    },
+                    "reason": {
+                      "type": "string",
+                      "maxLength": 1000
+                    },
+                    "log": {
+                      "type": "string",
+                      "maxLength": 1000
+                    }
+                  },
+                  "required": [
+                    "mode",
+                    "source",
+                    "status",
+                    "first",
+                    "confirmed",
+                    "refuted",
+                    "missed",
+                    "overturned"
                   ],
                   "additionalProperties": false
                 },

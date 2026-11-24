@@ -180,6 +180,11 @@ export type StopInput =
          * последней попытки): ход ведущего; `summary` — итог исполнителя.
          */
         writerBlocked?: { summary?: string };
+        /**
+         * Исполнитель предложил разделить работу (alpha.70, `writerSplit`
+         * последней попытки): ID предложения и частей; решает ведущий.
+         */
+        writerSplit?: { proposal: string; parts: number; status?: string };
         hold?: { operation: string; reason: string };
         budgetBlock?: { reason: string };
         /**
@@ -409,6 +414,12 @@ const writerBlockedText =
 const writerBlockedSteps = (summary: string | undefined) =>
   (summary ? `Итог исполнителя: «${clipText(summary, 300)}». ` : '') +
   'Попытка не засчитана, автоматического повтора нет: проверьте шаг (harness smoke --writer-probe), разрешите его в политике, положите источник в контекст или вынесите шаг в проверки harness, затем повторите работу.';
+
+/** Шаблон `needs-lead`: исполнитель предложил разделить работу (alpha.70). */
+const writerSplitText =
+  'Исполнитель в начале попытки предложил разделить работу и кода не писал; решение ведущего.';
+const writerSplitSteps = (split: { proposal: string; parts: number; status?: string }) =>
+  `Предложение ${split.proposal}, частей ${split.parts}${split.status && split.status !== 'proposed' ? ` (${split.status === 'accepted' ? 'принято' : 'отклонено'})` : ''}. Попытка не засчитана. Принять — harness proposal --proposal ${split.proposal} --decision accept и внести части в план (review-plan); отклонить — --decision reject с основанием и повторить работу (retry --by lead).`;
 
 const message = (cause: StopCause, ...parts: (string | undefined)[]) =>
   messageWith(causeText[cause], ...parts);
@@ -846,14 +857,16 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
           phase,
           actor: 'lead',
           action: 'diagnose-failure',
-          ...(work.writerBlocked
-            ? {
-                text: writerBlockedText,
-                note: writerBlockedSteps(work.writerBlocked.summary),
-              }
-            : work.preflight
-              ? { text: preflightNeedsLeadText, note: preflightNeedsLeadSteps }
-              : {}),
+          ...(work.writerSplit
+            ? { text: writerSplitText, note: writerSplitSteps(work.writerSplit) }
+            : work.writerBlocked
+              ? {
+                  text: writerBlockedText,
+                  note: writerBlockedSteps(work.writerBlocked.summary),
+                }
+              : work.preflight
+                ? { text: preflightNeedsLeadText, note: preflightNeedsLeadSteps }
+                : {}),
         };
       case 'review-protocol':
       case 'unknown':

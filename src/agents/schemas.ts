@@ -10,6 +10,7 @@ import {
   criticalAreas,
   inputImpacts,
 } from '../contracts/input.ts';
+import { PROPOSAL_LIMITS } from '../contracts/proposals.ts';
 
 /**
  * JSON Schema структурированного ответа для CLI runtime. Codex требует
@@ -91,8 +92,68 @@ export const implementationOutputSchema = {
     discoveries: { type: 'array', maxItems: 20, items: discovery },
     inputRequest,
     assumptions: { type: 'array', maxItems: INPUT_LIMITS.assumptions, items: assumption },
+    followUpTasks: {
+      type: 'array',
+      maxItems: PROPOSAL_LIMITS.followUps,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          title: { type: 'string' },
+          goal: { type: 'string' },
+          acceptance: {
+            type: 'array',
+            maxItems: PROPOSAL_LIMITS.acceptance,
+            items: { type: 'string' },
+          },
+          reason: { type: 'string' },
+          evidence: { type: ['string', 'null'] },
+        },
+        required: ['title', 'goal', 'acceptance', 'reason', 'evidence'],
+      },
+    },
+    triage: {
+      anyOf: [
+        { type: 'null' },
+        {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            decision: { type: 'string', enum: ['implement', 'split', 'ask'] },
+            reason: { type: 'string' },
+            parts: {
+              type: ['array', 'null'],
+              maxItems: PROPOSAL_LIMITS.parts,
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  title: { type: 'string' },
+                  goal: { type: 'string' },
+                  acceptance: {
+                    type: 'array',
+                    maxItems: PROPOSAL_LIMITS.acceptance,
+                    items: { type: 'string' },
+                  },
+                },
+                required: ['title', 'goal', 'acceptance'],
+              },
+            },
+          },
+          required: ['decision', 'reason', 'parts'],
+        },
+      ],
+    },
   },
-  required: ['completed', 'summary', 'discoveries', 'inputRequest', 'assumptions'],
+  required: [
+    'completed',
+    'summary',
+    'discoveries',
+    'inputRequest',
+    'assumptions',
+    'followUpTasks',
+    'triage',
+  ],
 };
 
 export const reviewOutputSchema = {

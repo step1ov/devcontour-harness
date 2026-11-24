@@ -267,6 +267,7 @@ const counted = (a: AttemptState, givenBack: ReadonlySet<string>) =>
   a.interrupted !== 'shutdown' &&
   !a.blocked &&
   !a.writerBlocked &&
+  !a.writerSplit &&
   a.status !== 'expired' &&
   a.failureKind !== 'environment' &&
   a.failureKind !== 'provider-auth' &&
@@ -398,7 +399,8 @@ export function attemptCounted(
   maxAttempts: number,
 ): boolean {
   if (a.status === 'active' || a.status === 'succeeded') return true;
-  if (a.interrupted || a.status === 'expired' || a.blocked || a.writerBlocked) return false;
+  if (a.interrupted || a.status === 'expired' || a.blocked || a.writerBlocked || a.writerSplit)
+    return false;
   if (a.failureKind === 'environment' || a.failureKind === 'provider-auth') return false;
   if (a.failureKind === 'needs-input') {
     const earlier = attempts
