@@ -1,7 +1,11 @@
 #!/usr/bin/env node
-import { composeDown, composeSweep, composeUp } from './environment/compose-env.ts';
+import {
+  composeDown,
+  composeSweep,
+  composeUp,
+  ownedComposeProjects,
+} from './environment/compose-env.ts';
 import { redactor } from './environment/redaction.ts';
-import { composeProjectName } from './environment/attempt-ports.ts';
 import { execFileSync } from 'node:child_process';
 import {
   existsSync,
@@ -539,6 +543,7 @@ const options = {
   'lead-resets': { type: 'string' },
   file: { type: 'string' },
   proposal: { type: 'string' },
+  yes: { type: 'boolean' },
 } as const;
 
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
@@ -557,7 +562,8 @@ const flagOwners = {
   brief: ['plan-request', 'plan-check'],
   contracts: ['plan-request', 'plan-check'],
   requirements: ['plan-request'],
-  'dry-run': ['worktree-cleanup', 'env-sweep'],
+  'dry-run': ['worktree-cleanup'],
+  yes: ['env-sweep'],
   'probe-sandbox': ['doctor'],
   detail: ['status'],
   since: ['report'],
@@ -1705,26 +1711,21 @@ async function run(
       return { command, data, ...(data.ok ? {} : { code: 1 }) };
     }
     case 'env-sweep': {
-      const h = open(need('state'), binding(need('state')), false);
+      const state = need('state');
+      const h = open(state, binding(state), false);
       try {
-        const keep = new Set(
-          h.engine.read((v) =>
-            v
-              .attempts()
-              .filter((a) => a.status === 'active')
-              .flatMap((a) => [
-                composeProjectName(a.id, a.repositoryId),
-                ...h.policy.repositories.map((r) => composeProjectName(a.id, r.id)),
-              ]),
-          ),
-        );
+        // Только проекты env-up попыток этого состояния; живость — свежим
+        // чтением прямо перед каждым снятием. Без --yes — только список.
+        const owned = await ownedComposeProjects(state);
         return {
           command,
           data: await composeSweep({
             env: process.env,
             cwd: process.cwd(),
-            keep,
-            ...(v['dry-run'] ? { dryRun: true } : {}),
+            owned,
+            alive: (attemptId) =>
+              h.engine.read((view) => view.attempt(attemptId)?.status === 'active'),
+            ...(v.yes ? { confirm: true } : {}),
           }),
         };
       } finally {

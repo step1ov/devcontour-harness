@@ -1845,16 +1845,16 @@ export const cliCommands = {
   },
   'env-sweep': {
     description:
-      'Уборка по метке (0.1.0-alpha.70): проекты docker compose hx-* попыток, которых нет среди идущих попыток состояния, снимаются down -v --remove-orphans; с --dry-run — только список',
+      'Уборка стеков попыток (0.1.0-alpha.70): только проекты docker compose, которые поднял harness env-up попыток ЭТОГО каталога состояния (записи compose-services.json), и только у попыток, которые не идут (живость перепроверяется перед каждым снятием); проекты других установок, harness gates --sha и чужие hx-* не трогаются. Без --yes — только список (dry run); с --yes — down -v --remove-orphans',
     writes: true,
     idempotency: 'Повтор после уборки — пустой список',
     args: [
       state,
       {
-        name: '--dry-run',
+        name: '--yes',
         value: 'flag',
         required: false,
-        description: 'Только перечислить',
+        description: 'Снять найденные стеки (без флага — только список)',
       },
     ],
     refusals: ['NOT_FOUND', 'RUNTIME_UNAVAILABLE'],
@@ -2624,6 +2624,7 @@ export const envUpDataSchema = z.strictObject({
   ),
   env: z.record(z.string().max(200), z.string().max(10)),
   envFile: z.string().max(4096).optional(),
+  warnings: z.array(z.string().max(500)).max(5).optional(),
   readiness: z
     .strictObject({
       services: z.array(
@@ -2646,9 +2647,13 @@ export const envDownDataSchema = z.strictObject({
 });
 export const envSweepDataSchema = z.strictObject({
   ok: z.boolean(),
-  stale: z.array(z.string().max(100)).optional(),
+  /** Без `--yes` — только список. */
+  dryRun: z.boolean(),
+  stale: z.array(z.string().max(100)),
   removed: z.array(z.string().max(100)),
   kept: z.array(z.string().max(100)),
+  /** Проекты hx-* без записи env-up этого состояния — не тронуты. */
+  ignored: z.number().int().min(0),
   error: z.string().max(2000).optional(),
 });
 

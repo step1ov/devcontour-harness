@@ -14,7 +14,14 @@ import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { chmodSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,6 +29,7 @@ import {
   composeDown,
   composeSweep,
   composeUp,
+  ownedComposeProjects,
   servicePortEnv,
   servicePortsFromFile,
   type DockerRun,
@@ -162,36 +170,64 @@ test('env-up: остатки сняты, стек с --wait, порты в фа�
   await assert.rejects(composeUp({ env: {}, cwd: dir, docker: ok.docker }), /COMPOSE_PROJECT_NAME/);
 });
 
-test('env-sweep: снимаются только проекты hx-* не идущих попыток; --dry-run — только список', async () => {
+test('env-sweep: только проекты env-up этого состояния у не идущих попыток; без confirm — список; живость — перед снятием', async () => {
+  const state = realpathSync(mkdtempSync(join(tmpdir(), 'sweep-state-')));
+  const record = (attempt: string, project: string, owner = 'harness-env-up') => {
+    const dir = join(state, 'repos', 'app', 'artifacts', attempt);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'compose-services.json'),
+      JSON.stringify({ owner, project, attemptId: attempt, services: {} }),
+    );
+  };
+  record('r-live', 'hx-app-live');
+  record('r-dead', 'hx-app-dead');
+  record('r-racy', 'hx-app-racy');
+  record('r-forged', 'hx-app-forged', 'someone-else');
+  const owned = await ownedComposeProjects(state);
+  assert.deepEqual(owned.map((o) => o.project).sort(), [
+    'hx-app-dead',
+    'hx-app-live',
+    'hx-app-racy',
+  ]);
   const calls: string[][] = [];
   const docker: DockerRun = (args) => {
     calls.push(args);
     if (args[0] === 'ps')
       return Promise.resolve({
         code: 0,
-        stdout: 'hx-app-live\nhx-app-dead\nhx-app-dead\nother-project\n',
+        stdout:
+          'hx-app-live\nhx-app-dead\nhx-app-racy\nhx-other-install\nhx-gates-abc\nhx-app-forged\n',
         stderr: '',
       });
     return Promise.resolve({ code: 0, stdout: '', stderr: '' });
   };
-  const keep = new Set(['hx-app-live']);
-  const dry = await composeSweep({ env: {}, cwd: '/', keep, dryRun: true, docker });
-  assert.deepEqual(dry.stale, ['hx-app-dead']);
+  let racyStarted = false;
+  const alive = (a: string) => a === 'r-live' || (a === 'r-racy' && racyStarted);
+  const dry = await composeSweep({ env: {}, cwd: '/', owned, alive, docker });
+  assert.equal(dry.dryRun, true);
+  assert.deepEqual(dry.stale, ['hx-app-dead', 'hx-app-racy']);
   assert.deepEqual(dry.removed, []);
+  assert.equal(dry.ignored, 3, 'чужие hx-* и проекты без записи не тронуты');
   assert.equal(calls.filter((c) => c[0] === 'compose').length, 0);
-  const real = await composeSweep({ env: {}, cwd: '/', keep, docker });
+  // Попытка r-racy началась между списком и снятием: её стек остаётся.
+  const real = await composeSweep({
+    env: {},
+    cwd: '/',
+    owned,
+    alive: (a) => {
+      const r = alive(a);
+      if (a === 'r-dead') racyStarted = true;
+      return r;
+    },
+    confirm: true,
+    docker,
+  });
   assert.deepEqual(real.removed, ['hx-app-dead']);
-  assert.deepEqual(real.kept, ['hx-app-live']);
-  assert.deepEqual(calls.at(-1), [
-    'compose',
-    '-p',
-    'hx-app-dead',
-    'down',
-    '-v',
-    '--remove-orphans',
-    '-t',
-    '2',
-  ]);
+  assert.deepEqual(
+    calls.filter((c) => c[0] === 'compose').map((c) => c[2]),
+    ['hx-app-dead'],
+  );
 });
 
 test('CLI env-up: подставной docker в PATH; отказ готовности — код 1 и диагностика в stderr', () => {
@@ -267,4 +303,46 @@ require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><test
       ['integration', true],
     ],
   );
+});
+
+test('ревью 1: env-up там, где файл окружения не записать (gate под границей), — стек поднят, предупреждение вместо исключения; маска до обрезки', async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'compose-ro-')));
+  const ro = join(dir, 'ro');
+  mkdirSync(ro);
+  writeFileSync(join(ro, 'attempt-env.json'), '{}');
+  chmodSync(ro, 0o500);
+  try {
+    const up = await composeUp({
+      env: {
+        COMPOSE_PROJECT_NAME: 'hx-app-ro',
+        HARNESS_ATTEMPT_ENV_FILE: join(ro, 'attempt-env.json'),
+      },
+      cwd: dir,
+      docker: fake(0).docker,
+    });
+    assert.equal(up.ok, true);
+    assert.match(up.warnings?.join('\n') ?? '', /не записан.*для шагов lifecycle/);
+  } finally {
+    chmodSync(ro, 0o700);
+  }
+  // Секрет на границе обрезки маскируется целиком: маска — до обрезки.
+  const secret = 'S3CRET-VALUE-XYZ';
+  const long = 'x'.repeat(8000 - 4) + secret;
+  const bad: DockerRun = (args) =>
+    Promise.resolve(
+      args.includes('up')
+        ? { code: 1, stdout: '', stderr: 'boom' }
+        : args.includes('ps')
+          ? { code: 0, stdout: ps, stderr: '' }
+          : args.includes('logs')
+            ? { code: 0, stdout: long, stderr: '' }
+            : { code: 0, stdout: '', stderr: '' },
+    );
+  const failed = await composeUp({
+    env: { COMPOSE_PROJECT_NAME: 'hx-app-ro' },
+    cwd: dir,
+    docker: bad,
+    redact: (t) => t.replaceAll(secret, '***'),
+  });
+  assert.doesNotMatch(failed.readiness?.logs.rabbit ?? '', /S3CR|XYZ/);
 });

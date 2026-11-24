@@ -10,7 +10,7 @@
 // убирает проекты `hx-*` попыток, которых нет среди идущих.
 
 import { execFile } from 'node:child_process';
-import { readFile, rename, writeFile } from 'node:fs/promises';
+import { readFile, readdir, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 
 /** Запуск docker; тест подменяет. */
@@ -56,6 +56,8 @@ export interface ComposeUpResult {
   /** Переменные портов: `HX_<СЕРВИС>_<ПОРТ>=<порт хоста>`. */
   env: Record<string, string>;
   envFile?: string;
+  /** Что не удалось записать (например, из gate под границей записи). */
+  warnings?: string[];
   /** Диагностика готовности при отказе (`compose ps -a`, хвосты журналов). */
   readiness?: {
     services: { service: string; state: string; health?: string; exitCode?: number }[];
@@ -160,7 +162,8 @@ export async function composeUp(options: ComposeOptions): Promise<ComposeUpResul
     for (const r of bad.slice(0, 10)) {
       if (!r.Service) continue;
       const l = await run(['logs', '--no-color', '--tail', String(LOG_TAIL), r.Service], 30_000);
-      logs[r.Service] = redact((l.stdout + l.stderr).slice(-8000));
+      // Маска — по полному тексту, затем обрезка (ревью alpha.70).
+      logs[r.Service] = redact(l.stdout + l.stderr).slice(-8000);
     }
     result.readiness = {
       services: rows.map((r) => ({
@@ -170,27 +173,48 @@ export async function composeUp(options: ComposeOptions): Promise<ComposeUpResul
         ...(r.ExitCode !== undefined ? { exitCode: r.ExitCode } : {}),
       })),
       logs,
-      error: redact((up.stderr || up.stdout).slice(-4000)),
+      error: redact(up.stderr || up.stdout).slice(-4000),
     };
   }
   const file = options.env.HARNESS_ATTEMPT_ENV_FILE;
   if (file) {
     result.envFile = file;
-    await mergeEnvFile(file, env);
+    // Запись — шагом lifecycle (вне границы записи). Под границей (из gate)
+    // каталог артефактов закрыт: стек поднят, а порты не записаны — это
+    // предупреждение с советом, а не исключение (ревью alpha.70).
+    const warn = (what: string, error: unknown) =>
+      (result.warnings ??= []).push(
+        `${what} не записан (${error instanceof Error ? error.message : String(error)}): env-up — для шагов lifecycle попытки, не для gates`.slice(
+          0,
+          500,
+        ),
+      );
+    await mergeEnvFile(file, env).catch((e: unknown) => warn('файл окружения попытки', e));
     await writeFile(
       join(dirname(file), COMPOSE_SERVICES_FILE),
-      JSON.stringify({ project, services }, null, 2),
-    ).catch(() => undefined);
+      JSON.stringify(
+        {
+          owner: COMPOSE_OWNER,
+          project,
+          attemptId: options.env.HARNESS_ATTEMPT_ID ?? null,
+          services,
+        },
+        null,
+        2,
+      ),
+    ).catch((e: unknown) => warn(COMPOSE_SERVICES_FILE, e));
     if (result.readiness)
       await writeFile(
         join(dirname(file), COMPOSE_READINESS_FILE),
         JSON.stringify(result.readiness, null, 2),
-      ).catch(() => undefined);
+      ).catch((e: unknown) => warn(COMPOSE_READINESS_FILE, e));
   }
   return result;
 }
 
 export const COMPOSE_SERVICES_FILE = 'compose-services.json';
+/** Метка записи `env-up` — признак владения для `env-sweep`. */
+export const COMPOSE_OWNER = 'harness-env-up';
 export const COMPOSE_READINESS_FILE = 'compose-readiness.json';
 /** Переменные портов сервисов в файле окружения попытки. */
 export const SERVICE_PORT_ENV = /^HX_[A-Z0-9_]+$/;
@@ -257,11 +281,64 @@ export async function composeDown(options: ComposeOptions) {
  * (имена проектов идущих попыток), снимаются `down -v --remove-orphans`.
  * `dryRun` — только список.
  */
+export interface OwnedComposeProject {
+  project: string;
+  attemptId: string;
+  /** Файл записи `env-up` (`compose-services.json`) в каталоге состояния. */
+  file: string;
+}
+
+/**
+ * Записи `env-up` этого каталога состояния: `compose-services.json` в
+ * каталогах артефактов попыток (их пишет только controller-шаг, процессы
+ * под границей туда не пишут). Глубина обхода ограничена.
+ */
+export async function ownedComposeProjects(stateDir: string): Promise<OwnedComposeProject[]> {
+  const out: OwnedComposeProject[] = [];
+  const walk = async (dir: string, depth: number) => {
+    if (depth > 6) return;
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = await readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const path = join(dir, e.name);
+      if (e.isDirectory()) await walk(path, depth + 1);
+      else if (e.isFile() && e.name === COMPOSE_SERVICES_FILE)
+        try {
+          const data = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
+          if (
+            typeof data.project === 'string' &&
+            /^hx-[a-z0-9_-]+$/.test(data.project) &&
+            typeof data.attemptId === 'string' &&
+            data.owner === COMPOSE_OWNER
+          )
+            out.push({ project: data.project, attemptId: data.attemptId, file: path });
+        } catch {
+          /* не запись env-up */
+        }
+    }
+  };
+  await walk(stateDir, 0);
+  return out;
+}
+
+/**
+ * Уборка (ревью alpha.70): снимаются только проекты, которые поднял
+ * `env-up` попыток ЭТОГО каталога состояния (записи `ownedComposeProjects`),
+ * и только когда попытка не идёт — живость перепроверяется прямо перед
+ * каждым снятием. Проекты без записи (другие установки, `gates --sha`,
+ * чужие `hx-*`) не трогаются. Без `confirm` — только список (dry run).
+ */
 export async function composeSweep(options: {
   env: NodeJS.ProcessEnv;
   cwd: string;
-  keep: ReadonlySet<string>;
-  dryRun?: boolean;
+  owned: readonly OwnedComposeProject[];
+  /** Попытка идёт (свежее чтение состояния). */
+  alive: (attemptId: string) => boolean;
+  confirm?: boolean;
   docker?: DockerRun;
 }) {
   const docker = options.docker ?? dockerRun;
@@ -279,17 +356,26 @@ export async function composeSweep(options: {
   if (ls.code !== 0)
     return {
       ok: false,
+      dryRun: !options.confirm,
+      stale: [] as string[],
       removed: [] as string[],
       kept: [] as string[],
+      ignored: 0,
       error: ls.stderr.slice(-2000),
     };
-  const projects = [...new Set(ls.stdout.split('\n').map((l) => l.trim()))].filter((p) =>
-    /^hx-[a-z0-9_-]+$/.test(p),
-  );
-  const stale = projects.filter((p) => !options.keep.has(p)).sort();
+  const present = new Set(ls.stdout.split('\n').map((l) => l.trim()));
+  const owned = new Map<string, string>();
+  for (const o of options.owned) if (present.has(o.project)) owned.set(o.project, o.attemptId);
+  const hx = [...present].filter((p) => /^hx-[a-z0-9_-]+$/.test(p));
+  const stale = [...owned]
+    .filter(([, a]) => !options.alive(a))
+    .map(([p]) => p)
+    .sort();
   const removed: string[] = [];
-  if (!options.dryRun)
+  if (options.confirm)
     for (const p of stale) {
+      // Живость — ещё раз прямо перед снятием: попытка могла начаться.
+      if (options.alive(owned.get(p)!)) continue;
       const r = await docker(['compose', '-p', p, 'down', '-v', '--remove-orphans', '-t', '2'], {
         env: options.env,
         cwd: options.cwd,
@@ -299,8 +385,10 @@ export async function composeSweep(options: {
     }
   return {
     ok: true,
+    dryRun: !options.confirm,
     stale,
     removed,
-    kept: projects.filter((p) => options.keep.has(p)).sort(),
+    kept: [...owned.keys()].filter((p) => !stale.includes(p)).sort(),
+    ignored: hx.filter((p) => !owned.has(p)).length,
   };
 }

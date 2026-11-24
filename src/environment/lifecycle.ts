@@ -1,5 +1,9 @@
 import { mkdir, writeFile, readFile, realpath } from 'node:fs/promises';
-import { SERVICE_PORT_ENV, servicePortsFromFile } from './compose-env.ts';
+import {
+  COMPOSE_READINESS_FILE,
+  SERVICE_PORT_ENV,
+  servicePortsFromFile,
+} from './compose-env.ts';
 import { basename, dirname, join, relative, sep } from 'node:path';
 import type { z } from 'zod';
 import {
@@ -455,6 +459,16 @@ async function clearServicePorts(env: NodeJS.ProcessEnv) {
   }
 }
 
+/** Перемаскировать `compose-readiness.json` попытки маской controller. */
+async function remaskReadiness(execution: ReturnType<typeof executionEnvironment>) {
+  const file = execution.env.HARNESS_ATTEMPT_ENV_FILE;
+  if (!file) return;
+  const path = join(dirname(file), COMPOSE_READINESS_FILE);
+  const text = await readFile(path, 'utf8').catch(() => undefined);
+  if (text === undefined) return;
+  await writeFile(path, execution.redact(text)).catch(() => undefined);
+}
+
 /** Порты сервисов этой фазы (после setup и ready) — в окружение её gates. */
 async function refreshServicePorts(env: NodeJS.ProcessEnv) {
   const file = env.HARNESS_ATTEMPT_ENV_FILE;
@@ -690,7 +704,11 @@ async function phaseEnvironment<T>(
         )) ?? { pending: true };
         await saveReceipt(receiptFile);
       }
-      await runSteps(lifecycle.setup, cwd, join(dir, 'setup'), execution, signal);
+      await runSteps(lifecycle.setup, cwd, join(dir, 'setup'), execution, signal).finally(() =>
+        // Диагностика готовности `env-up` — ещё раз маской секретов политики
+        // (шаг знает только свои переменные; ревью alpha.70).
+        remaskReadiness(execution),
+      );
     });
     await measure('ready', () =>
       runSteps(lifecycle.ready, cwd, join(dir, 'ready'), execution, signal),
