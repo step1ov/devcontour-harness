@@ -32,7 +32,15 @@ import { cleanLeadText, leadBegin, leadNote, releaseDone } from '../src/control/
 import { harnessCapabilities } from '../src/catalog/harness.ts';
 import { operatorView } from '../src/projections/index.ts';
 import { at, attempt, baseInput, work } from './operator-view-input.ts';
-import { engineOf, graphOf, planReview, ready, sha, trustNone } from './engine-fixture.ts';
+import {
+  engineOf,
+  graphOf,
+  planReview,
+  policyOf,
+  ready,
+  sha,
+  trustNone,
+} from './engine-fixture.ts';
 
 const cli = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
 const harness = (...args: string[]) => {
@@ -541,7 +549,8 @@ test('P4-5: зарегистрированная несогласованная 
 });
 
 test('P4-10: журнал ведущего — сессия, заметки, итог выпуска; «код принят, ведущий ещё работает»', () => {
-  const env = engineOf();
+  // Приёмка выпуска (alpha.69) здесь не предмет: совет вместо требования.
+  const env = engineOf(policyOf((p) => (p.release = { review: 'advisory' })));
   ready(env.engine, graphOf({ w: [], x: ['w'] }));
   assert.throws(
     () => releaseDone(env.engine, { summary: 'рано' }),
@@ -599,7 +608,8 @@ test('P4-10: строка ведущего — без управляющих с�
 });
 
 test('P4-10: CLI lead begin|note|end и release done — синонимы, договор, capabilities', () => {
-  const env = engineOf();
+  // Приёмка выпуска (alpha.69) здесь не предмет: совет вместо требования.
+  const env = engineOf(policyOf((p) => (p.release = { review: 'advisory' })));
   ready(env.engine, graphOf({ w: [] }));
   acceptAll(env, 1, 'a');
   writeFileSync(

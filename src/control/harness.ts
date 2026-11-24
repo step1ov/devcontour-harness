@@ -473,6 +473,13 @@ export class Harness {
     return heads;
   }
 
+  /** Записать базу выпуска репозиториев (`release-base`) по текущим target ref. */
+  async recordReleaseBases(repositories: ReadonlySet<string>, source: 'register' | 'outline') {
+    const heads = await this.targetHeads();
+    const wanted = Object.fromEntries(Object.entries(heads).filter(([id]) => repositories.has(id)));
+    return Object.keys(wanted).length ? this.engine.recordReleaseBases(wanted, source) : [];
+  }
+
   /** Состояние ревью выпуска против текущих target ref (для status и view). */
   async releaseReview() {
     const heads = await this.targetHeads();
@@ -1062,6 +1069,12 @@ export class Harness {
       },
     });
     const graph = registered.graph;
+    // База выпуска (alpha.69): target ref репозиториев графа при первой
+    // регистрации выпуска; записанная не переписывается.
+    await this.recordReleaseBases(
+      new Set(input.graph.orders.map((o) => o.repositoryId)),
+      'register',
+    ).catch(() => undefined);
     if (input.context) {
       const issues = contextIssues(input.context);
       if (issues.length)

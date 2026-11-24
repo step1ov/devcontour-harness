@@ -99,11 +99,15 @@ test('forecast.progress.release.review: принятый код без приё�
   assert.equal(review?.status, 'not-run');
   assert.equal(review?.required, true);
   assert.match(review.line, /приёмки выпуска нет.*обязательна/);
-  // Строгий режим без release — совет.
+  // Строгий режим без release — тоже обязательна; совет — только явным полем.
   const strict = engineOf(policyOf());
   ready(strict.engine, graphOf({ w1: [] }));
   acceptOne(strict.engine, sha('c'), sha('e'));
-  assert.equal(viewOf(strict).forecast?.progress.release?.review?.required, false);
+  assert.equal(viewOf(strict).forecast?.progress.release?.review?.required, true);
+  const advisory = engineOf(policyOf((p) => (p.release = { review: 'advisory' })));
+  ready(advisory.engine, graphOf({ w1: [] }));
+  acceptOne(advisory.engine, sha('c'), sha('e'));
+  assert.equal(viewOf(advisory).forecast?.progress.release?.review?.required, false);
 });
 
 test('releaseReviewView: строки состояний', () => {

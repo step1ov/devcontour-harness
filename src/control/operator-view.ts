@@ -1477,6 +1477,7 @@ export function collectOperatorViewInput(
                 ...(r.round !== undefined ? { round: r.round } : {}),
                 ...(r.open !== undefined ? { open: r.open } : {}),
                 ...(r.blocking !== undefined ? { blocking: r.blocking } : {}),
+                ...(r.base ? { base: r.base, baseSource: r.baseSource! } : {}),
                 ...(r.head ? { head: r.head } : {}),
                 ...(r.target ? { target: r.target } : {}),
                 ...(r.at ? { at: r.at } : {}),

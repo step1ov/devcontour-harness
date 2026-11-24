@@ -1635,14 +1635,17 @@ async function run(
         false,
       );
       try {
-        return {
-          command,
-          data: leadOutline(
-            h.engine,
-            input,
-            optional('reason', typeof v.reason === 'string' ? v.reason : undefined),
-          ),
-        };
+        const data = leadOutline(
+          h.engine,
+          input,
+          optional('reason', typeof v.reason === 'string' ? v.reason : undefined),
+        );
+        // База выпуска (alpha.69): план выпуска — его начало, если граф ещё
+        // не регистрировался; записанная база не переписывается.
+        await h
+          .recordReleaseBases(new Set(h.policy.repositories.map((r) => r.id)), 'outline')
+          .catch(() => undefined);
+        return { command, data };
       } finally {
         h.close();
       }

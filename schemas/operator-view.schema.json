@@ -3334,6 +3334,18 @@
                       "minimum": 0,
                       "maximum": 9007199254740991
                     },
+                    "base": {
+                      "type": "string",
+                      "maxLength": 100
+                    },
+                    "baseSource": {
+                      "type": "string",
+                      "enum": [
+                        "register",
+                        "outline",
+                        "attempt"
+                      ]
+                    },
                     "head": {
                       "type": "string",
                       "maxLength": 100

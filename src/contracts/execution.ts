@@ -1582,6 +1582,17 @@ export const localSchemas = {
    * остаётся израсходованной и после отказа от доработки. Пишет регистрация
    * графа.
    */
+  /**
+   * База выпуска (0.1.0-alpha.69): запись по ID репозитория у `@workspace` —
+   * target ref репозитория при первой регистрации графа выпуска или при
+   * `lead outline` (что раньше). Новый выпуск (после `release done`)
+   * записывает новую базу. Читает приёмка выпуска (`review-release`).
+   */
+  'release-base': z.strictObject({
+    sha: gitShaSchema,
+    at: isoTimeSchema,
+    source: z.enum(['register', 'outline']),
+  }),
   'round-epochs': z.strictObject({
     epochs: z.array(z.strictObject({ at: isoTimeSchema, workId: idSchema })).max(100),
   }),

@@ -151,7 +151,7 @@ export type GatewayPolicy = z.infer<typeof gatewaySchema>;
  * шлюза/прокси и файлы окружения production относительно корня репозитория).
  * `review`: `required` — без одобренного ревью выпуска на текущей цели
  * `release done` отказывает; `advisory` — только предупреждает. Нет поля —
- * `required` в облегчённом режиме, `advisory` в строгом (прежнее поведение).
+ * `required` в обоих режимах (P7-6 прошёл и в строгом).
  */
 export const releasePolicySchema = z.strictObject({
   review: z.enum(['required', 'advisory']).optional(),

@@ -13,6 +13,7 @@ import {
   type ExecutionView,
   type GraphState,
   type WorkState,
+  WORKSPACE_OWNER,
 } from '../contracts/index.ts';
 import { requestsOf } from '../engine/input-requests.ts';
 import {
@@ -49,6 +50,9 @@ const clip = (text: string, max: number) =>
  * ref до первой работы выпуска. Нет попыток — `undefined` (нужен `--base`).
  */
 export function releaseBaseOf(view: ExecutionView, repositoryId: string): string | undefined {
+  // Записанная база выпуска (alpha.69); база ранней попытки — для прежних состояний.
+  const recorded = view.local('release-base', WORKSPACE_OWNER, repositoryId);
+  if (recorded) return recorded.sha;
   return view
     .attempts()
     .filter((a) => a.repositoryId === repositoryId && a.baseSha)

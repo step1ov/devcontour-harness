@@ -4753,6 +4753,26 @@ export class Engine {
     });
   }
 
+  /**
+   * База выпуска (alpha.69): записывается для репозиториев без базы текущего
+   * выпуска — нет записи или она старше итога прежнего выпуска (`release
+   * done`). Записанная база не переписывается. Возвращает записанные.
+   */
+  recordReleaseBases(heads: Record<string, string>, source: 'register' | 'outline') {
+    return this.tx('lead.recorded', (tx) => {
+      const done = tx.local('lead', WORKSPACE_OWNER, 'log')?.release?.doneAt;
+      const at = new Date(this.now()).toISOString();
+      const written: string[] = [];
+      for (const [repositoryId, sha] of Object.entries(heads)) {
+        const prev = tx.local('release-base', WORKSPACE_OWNER, repositoryId);
+        if (prev && !(done && prev.at < done)) continue;
+        tx.putLocal('release-base', WORKSPACE_OWNER, repositoryId, { sha, at, source });
+        written.push(repositoryId);
+      }
+      return written;
+    });
+  }
+
   recordPolicy(owner: string) {
     this.tx('config.started', (tx) => {
       const lease = tx.controller();

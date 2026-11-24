@@ -24,6 +24,8 @@ import { requestsOf } from '../engine/input-requests.ts';
 import { reviewSummaryRows, reviewsText } from './review-summary.ts';
 import { ruCount } from '../contracts/plural.ts';
 import { MAX_NEUTRAL_FAILURES } from '../contracts/repair-policy.ts';
+import { releaseReviewState } from './release-review-state.ts';
+import { releaseReviewView } from '../projections/operator-view.ts';
 import {
   livePlanReviews,
   nextRunControl,
@@ -300,6 +302,20 @@ export function statusOf(
       ...(options.detail ? { detail: statusDetail(source, v, graphId) } : {}),
       decisions: decisionSettingsView(source.policy),
       ...((o) => (o ? { outline: o } : {}))(graphId === undefined ? outlineStatus(v) : undefined),
+      // Приёмка выпуска и база выпуска (alpha.69): цель — по состоянию.
+      ...((r) =>
+        graphId === undefined && r.repositories.length
+          ? {
+              releaseReview: {
+                required: r.required,
+                status: r.status,
+                ...(r.base ? { base: r.base, baseSource: r.baseSource! } : {}),
+                ...(r.round !== undefined ? { round: r.round } : {}),
+                ...(r.blocking !== undefined ? { blocking: r.blocking } : {}),
+                line: releaseReviewView(r).line,
+              },
+            }
+          : {})(releaseReviewState(v, source.policy)),
     };
   });
 }

@@ -846,6 +846,8 @@ const forecastSchema = z.strictObject({
             round: count.optional(),
             open: count.optional(),
             blocking: count.optional(),
+            base: z.string().max(100).optional(),
+            baseSource: z.enum(['register', 'outline', 'attempt']).optional(),
             head: z.string().max(100).optional(),
             target: z.string().max(100).optional(),
             at: isoTimeSchema.optional(),

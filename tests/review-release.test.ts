@@ -311,7 +311,7 @@ test('P7-6: release done при required — отказ без ревью, с б
   assert.match(done.line, /Ревью выпуска одобрено; неблокирующих замечаний 1/);
 });
 
-test('P7-6: advisory — release done проходит с предупреждением; строгий режим без release — advisory, облегчённый — required', () => {
+test('P7-6: advisory — release done проходит с предупреждением; без поля release — required в обоих режимах', () => {
   const f = fixture((p) => {
     p.release = { review: 'advisory' };
   });
@@ -327,21 +327,22 @@ test('P7-6: advisory — release done проходит с предупрежде
   );
   assert.match(done.line, /Ревью выпуска не пройдено/);
 
-  // Строгий режим (пример тестов) без поля release — рекомендательное ревью:
-  // прежний release done без heads проходит (цель — по состоянию).
+  // Строгий режим (пример тестов) без поля release — тоже обязательная
+  // приёмка (решение владельца: P7-6 прошёл и в строгом режиме).
   const strict = fixture((p) => {
     delete p.release;
   });
   assert.equal(strict.policy.harnessMode, 'strict');
   ready(strict.engine, graphOf({ w: [] }));
   accept(strict.engine, strict.base, strict.head);
-  const plain = releaseDone(strict.engine, { summary: 'готово' });
-  assert.equal(plain.releaseReview?.required, false);
-  assert.ok(plain.warning);
+  assert.throws(
+    () => releaseDone(strict.engine, { summary: 'готово' }),
+    (e: unknown) => e instanceof HarnessError && e.code === 'NOT_READY',
+  );
 
   assert.equal(releaseReviewRequired({}), true, 'нет harnessMode — light — required');
   assert.equal(releaseReviewRequired({ harnessMode: 'light' }), true);
-  assert.equal(releaseReviewRequired({ harnessMode: 'strict' }), false);
+  assert.equal(releaseReviewRequired({ harnessMode: 'strict' }), true);
   assert.equal(
     releaseReviewRequired({ harnessMode: 'strict', release: { review: 'required' } }),
     true,
@@ -381,4 +382,29 @@ test('P7-6: CLI review-release — договор команды и данные
   );
   assert.equal(cliDataSchemas['review-release'], codeReviewRecordSchema);
   assert.match(cliCommands['release-done'].description, /harness review-release/);
+});
+
+test('база выпуска: записана при регистрации или плане выпуска, не переписывается до release done; без записи — ранняя попытка', () => {
+  const f = fixture((p) => {
+    p.release = { review: 'advisory' };
+  });
+  ready(f.engine, graphOf({ w: [] }));
+  accept(f.engine, f.base, f.head);
+  // Прежнее состояние без записи: база — ранняя попытка.
+  const legacy = f.engine.read((v) => releaseReviewState(v, f.policy));
+  assert.equal(legacy.base, f.base);
+  assert.equal(legacy.baseSource, 'attempt');
+  // Записанная база главнее и не переписывается в том же выпуске.
+  const other = f.commit({ 'x.txt': 'x\n' }, 'other');
+  assert.deepEqual(f.engine.recordReleaseBases({ app: f.head }, 'register'), ['app']);
+  assert.deepEqual(f.engine.recordReleaseBases({ app: other }, 'outline'), []);
+  const recorded = f.engine.read((v) => releaseReviewState(v, f.policy));
+  assert.equal(recorded.base, f.head);
+  assert.equal(recorded.baseSource, 'register');
+  // Новый выпуск (после release done) записывает новую базу.
+  f.clock.now += 1000;
+  releaseDone(f.engine, { summary: 'готово', heads: f.heads() });
+  f.clock.now += 1000;
+  assert.deepEqual(f.engine.recordReleaseBases({ app: other }, 'outline'), ['app']);
+  assert.equal(f.engine.read((v) => releaseReviewState(v, f.policy)).baseSource, 'outline');
 });

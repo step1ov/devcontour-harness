@@ -6,7 +6,6 @@
 
 import {
   WORKSPACE_OWNER,
-  harnessModeOf,
   type CodeReviewRecord,
   type ExecutionPolicy,
   type ExecutionView,
@@ -18,6 +17,13 @@ export type ReleaseReviewStatus = 'not-run' | 'stale' | 'findings' | 'approved';
 export interface ReleaseReviewRepositoryState {
   repositoryId: string;
   status: ReleaseReviewStatus;
+  /**
+   * База выпуска (alpha.69): записанная при регистрации графа или `lead
+   * outline` (`register`, `outline`), иначе база самой ранней попытки
+   * (`attempt`, прежние состояния).
+   */
+  base?: string;
+  baseSource?: 'register' | 'outline' | 'attempt';
   /** Текущая принятая цель (SHA target ref), если известна. */
   target?: string;
   /** Head последнего раунда ревью выпуска. */
@@ -36,6 +42,8 @@ export interface ReleaseReviewState {
   required: boolean;
   /** Худшее состояние по репозиториям (порядок: not-run, stale, findings, approved). */
   status: ReleaseReviewStatus;
+  base?: string;
+  baseSource?: 'register' | 'outline' | 'attempt';
   head?: string;
   target?: string;
   round?: number;
@@ -45,12 +53,13 @@ export interface ReleaseReviewState {
   repositories: ReleaseReviewRepositoryState[];
 }
 
-/** Требование ревью выпуска: `release.review`, иначе `required` в light и `advisory` в strict. */
+/** Требование ревью выпуска: `release.review`, иначе `required` (в обоих режимах, alpha.69). */
 export const releaseReviewRequired = (
   policy: Pick<ExecutionPolicy, 'release' | 'harnessMode'>,
 ): boolean =>
-  (policy.release?.review ?? (harnessModeOf(policy) === 'light' ? 'required' : 'advisory')) ===
-  'required';
+  // Обязательна в обоих режимах (решение владельца: P7-6 прошёл и в строгом);
+  // совет — только явным `release.review: advisory`.
+  (policy.release?.review ?? 'required') === 'required';
 
 const rank: Record<ReleaseReviewStatus, number> = {
   'not-run': 0,
@@ -105,6 +114,19 @@ export function releaseReviewState(
     .filter((r) => r.kind === 'release');
   const states = repositories.map((repositoryId): ReleaseReviewRepositoryState => {
     const target = heads[repositoryId] ?? acceptedHead(view, repositoryId);
+    const recorded = view.local('release-base', WORKSPACE_OWNER, repositoryId);
+    const early = recorded
+      ? undefined
+      : view
+          .attempts()
+          .filter((a) => a.repositoryId === repositoryId && a.baseSha)
+          .sort((a, b) => a.startedAt.localeCompare(b.startedAt) || a.id.localeCompare(b.id))[0]
+          ?.baseSha;
+    const baseOf = recorded
+      ? { base: recorded.sha, baseSource: recorded.source }
+      : early
+        ? { base: early, baseSource: 'attempt' as const }
+        : {};
     const last = reviews
       .filter((r) => r.repositoryId === repositoryId)
       .reduce<CodeReviewRecord | undefined>(
@@ -112,7 +134,7 @@ export function releaseReviewState(
           !best || r.at > best.at || (r.at === best.at && r.round > best.round) ? r : best,
         undefined,
       );
-    if (!last) return { repositoryId, status: 'not-run', ...(target ? { target } : {}) };
+    if (!last) return { repositoryId, status: 'not-run', ...baseOf, ...(target ? { target } : {}) };
     const open = last.findings.filter((f) => f.status === 'open');
     const blocking = open.filter((f) => f.severity === 'blocking').length;
     const status: ReleaseReviewStatus =
@@ -125,6 +147,7 @@ export function releaseReviewState(
     return {
       repositoryId,
       status,
+      ...baseOf,
       ...(target ? { target } : {}),
       head: last.head,
       round: last.round,
@@ -141,6 +164,7 @@ export function releaseReviewState(
   const top: Omit<ReleaseReviewState, 'required' | 'repositories'> = worst
     ? {
         status: worst.status,
+        ...(worst.base ? { base: worst.base, baseSource: worst.baseSource! } : {}),
         ...(worst.head ? { head: worst.head } : {}),
         ...(worst.target ? { target: worst.target } : {}),
         ...(worst.round !== undefined ? { round: worst.round } : {}),

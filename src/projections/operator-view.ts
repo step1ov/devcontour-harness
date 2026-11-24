@@ -1482,6 +1482,9 @@ export interface ReleaseReviewView {
   round?: number;
   open?: number;
   blocking?: number;
+  /** База выпуска и откуда она: регистрация графа, план выпуска или ранняя попытка. */
+  base?: string;
+  baseSource?: 'register' | 'outline' | 'attempt';
   head?: string;
   target?: string;
   at?: string;

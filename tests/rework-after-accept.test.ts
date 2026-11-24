@@ -21,7 +21,15 @@ import { currentRevisionAttempts } from '../src/report/compute.ts';
 import { operatorViewSchema } from '../src/contracts/index.ts';
 import { stopInputsOf } from '../src/explain/state.ts';
 import { explainStop } from '../src/projections/stop.ts';
-import { engineOf, graphOf, planReview, ready, sha, trustNone } from './engine-fixture.ts';
+import {
+  engineOf,
+  graphOf,
+  planReview,
+  policyOf,
+  ready,
+  sha,
+  trustNone,
+} from './engine-fixture.ts';
 
 /** Провести попытку через обе фазы с PASS gate и ревью и принять её. */
 function accept(e: Engine, id: string, token: string, candidate: string, integration: string) {
@@ -91,7 +99,8 @@ const fail = (e: Engine) => {
  * своей проверкой и перепланировал поручение с изменённой постановкой.
  */
 function pilot(deps: Record<string, string[]> = { w: [], x: ['w'] }) {
-  const env = engineOf();
+  // Приёмка выпуска (alpha.69) здесь не предмет: совет вместо требования.
+  const env = engineOf(policyOf((p) => (p.release = { review: 'advisory' })));
   const { engine } = env;
   assert.equal(engine.policy.maxAttempts, 3);
   ready(engine, graphOf(deps));

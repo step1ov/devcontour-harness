@@ -2377,6 +2377,23 @@ export const statusDataSchema = z.strictObject({
     })
     .optional(),
   /**
+   * 0.1.0-alpha.69: приёмка выпуска (`harness review-release`) — требование,
+   * состояние, база выпуска (откуда: регистрация графа, план выпуска или
+   * ранняя попытка), раунд и блокирующие находки. Нет поля — принятых работ
+   * нет или `status --graph`.
+   */
+  releaseReview: z
+    .strictObject({
+      required: z.boolean(),
+      status: z.enum(['not-run', 'stale', 'findings', 'approved']),
+      base: z.string().max(100).optional(),
+      baseSource: z.enum(['register', 'outline', 'attempt']).optional(),
+      round: z.number().int().positive().optional(),
+      blocking: z.number().int().min(0).optional(),
+      line: z.string().min(1).max(300),
+    })
+    .optional(),
+  /**
    * Только `status --detail`: время снимка, почему стоит выдача и активные
    * попытки (стадия, длительность, владение, gates). Без флага поля нет.
    */
