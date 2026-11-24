@@ -1,9 +1,5 @@
 import { mkdir, writeFile, readFile, realpath } from 'node:fs/promises';
-import {
-  COMPOSE_READINESS_FILE,
-  SERVICE_PORT_ENV,
-  servicePortsFromFile,
-} from './compose-env.ts';
+import { COMPOSE_READINESS_FILE, SERVICE_PORT_ENV, servicePortsFromFile } from './compose-env.ts';
 import { basename, dirname, join, relative, sep } from 'node:path';
 import type { z } from 'zod';
 import {
@@ -451,7 +447,9 @@ async function clearServicePorts(env: NodeJS.ProcessEnv) {
   try {
     const data = JSON.parse(text) as Record<string, unknown>;
     if (!data || typeof data !== 'object' || Array.isArray(data)) return;
-    const kept = Object.fromEntries(Object.entries(data).filter(([k]) => !SERVICE_PORT_ENV.test(k)));
+    const kept = Object.fromEntries(
+      Object.entries(data).filter(([k]) => !SERVICE_PORT_ENV.test(k)),
+    );
     if (Object.keys(kept).length !== Object.keys(data).length)
       await writeFile(file, JSON.stringify(kept, null, 2) + '\n');
   } catch {
