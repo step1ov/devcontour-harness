@@ -96,10 +96,21 @@ export const DEFAULT_WRITE_GUARD_CACHES: readonly { id: string; path: string; wh
   { id: 'gradle-native', path: '~/.gradle/native', why: 'нативные библиотеки Gradle' },
   { id: 'gradle-tmp', path: '~/.gradle/.tmp', why: 'временные файлы Gradle' },
   { id: 'gradle-wrapper', path: '~/.gradle/wrapper/dists', why: 'дистрибутивы gradle-wrapper' },
+  // Maestro вне мобильного UI gate (у UI gate — свой домашний каталог Java):
+  // журналы и состояние, без `deps/` (распакованные исполняемые файлы —
+  // готовятся при настройке) и без исполняемого CLI.
+  { id: 'maestro-tests', path: '~/.maestro/tests', why: 'журналы прогонов Maestro' },
+  { id: 'maestro-sessions', path: '~/.maestro/sessions', why: 'сессии Maestro' },
+  { id: 'maestro-analytics', path: '~/.maestro/analytics.json', why: 'состояние Maestro' },
   {
-    id: 'maestro',
-    path: '~/.maestro',
-    why: 'Maestro вне мобильного UI gate (у UI gate — свой домашний каталог Java)',
+    id: 'maestro-promotion',
+    path: '~/.maestro/promotion-state.json',
+    why: 'состояние Maestro',
+  },
+  {
+    id: 'maestro-notification',
+    path: '~/.maestro/analyze-notification.json',
+    why: 'состояние Maestro',
   },
   {
     id: 'darwin-user-cache',

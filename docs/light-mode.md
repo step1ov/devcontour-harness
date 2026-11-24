@@ -67,11 +67,17 @@ strict`) для чужого кода или секретов production. Стр
 - кеши инструментов (`DEFAULT_WRITE_GUARD_CACHES`).
 
 **Настройки CLI пользователя закрыты.** Каждый вызов исполнителя получает
-свой каталог настроек (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`) со ссылкой
-только на настоящий файл входа: у codex — `auth.json`, у claude —
-`.credentials.json`, если вход хранится файлом. Граница записи открывает
-ровно этот файл: обновлённый токен попадает в настоящий файл (копия
-обновила бы токен только у себя и разлогинила бы пользователя). Каталог
+свой каталог настроек (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`) под каталогом
+controller. Вход — через посредника: до вызова controller под блокировкой
+читает настоящий файл входа (у codex — `auth.json`, у claude —
+`.credentials.json`, если вход хранится файлом; только обычный файл, без
+ссылок, с пределом) и кладёт копию в каталог вызова; после вызова
+изменённая копия переносится в настоящий файл, только если это обычный
+файл, JSON того же вида и той же учётной записи, с токенами и новее
+(`last_refresh` / `expiresAt`), — атомарно рядом с настоящим файлом под той
+же блокировкой; иначе копия отбрасывается с заметкой в журнале вызова.
+Настоящий файл входа исполнителю не открыт и в границу записи не входит:
+подменённый ссылкой путь не расширит границу следующего вызова. Каталог
 вызова с журналом и итогом controller исполнителю не открыт; файл ответа
 codex исполнитель пишет в отдельный каталог, controller читает его без
 ссылок и с пределом. `~/.codex`, `~/.claude` и
@@ -87,7 +93,9 @@ runtime называет, что сделать.
 (`~/.pnpm-store`, `~/Library/pnpm/store`, `~/.local/share/pnpm/store`), его
 кеши и версии (`.tools`), кеш corepack, кеши yarn и bun, браузеры Playwright
 (`~/Library/Caches/ms-playwright`, `~/.cache/ms-playwright`), кеши turbo,
-node-gyp и Prisma, `~/.docker/buildx`, `~/.maestro`, симулятор iOS
+node-gyp и Prisma, `~/.docker/buildx`, журналы и состояние Maestro
+(`~/.maestro/tests`, `sessions` и файлы состояния; не `deps/` и не
+исполняемый CLI — их готовят при настройке), симулятор iOS
 (`~/Library/Developer/CoreSimulator`, `~/Library/Logs/CoreSimulator`,
 `~/Library/Developer/Xcode/DerivedData`), `~/.android/avd`,
 `~/.android/cache`, Gradle (`~/.gradle/caches`, `daemon`, `native`, `.tmp`,

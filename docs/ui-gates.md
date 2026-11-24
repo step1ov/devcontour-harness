@@ -137,6 +137,7 @@ gates, а gate получает `HARNESS_UI=mobile`, `HARNESS_MOBILE_PLATFORM`,
   установка драйвера на каждое устройство пула.
 
 Граница записи облегчённого режима по умолчанию открывает то, что нужно
-Maestro и симуляторам: `~/.maestro`, `~/Library/Developer/CoreSimulator`,
+Maestro и симуляторам: журналы и состояние `~/.maestro` (`tests`, `sessions`,
+файлы состояния; `deps/` готовится при настройке), `~/Library/Developer/CoreSimulator`,
 `~/Library/Logs/CoreSimulator`, `~/Library/Developer/Xcode/DerivedData`,
 `~/.android`, `~/.gradle`. Другие пути — `writeGuard.add`.

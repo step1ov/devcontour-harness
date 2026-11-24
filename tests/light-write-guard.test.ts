@@ -10,6 +10,7 @@ import {
   readdirSync,
   realpathSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -30,6 +31,15 @@ import {
 import { example } from './fixtures.ts';
 
 const supported = writeGuardSupport().ok;
+/** Вход codex и его обновление (та же учётная запись, позже `last_refresh`). */
+const AUTH = JSON.stringify({
+  tokens: { account_id: 'acct-1', access_token: 'a1', refresh_token: 'r1' },
+  last_refresh: '2026-11-01T00:00:00.000Z',
+});
+const REFRESHED = JSON.stringify({
+  tokens: { account_id: 'acct-1', access_token: 'a2', refresh_token: 'r2' },
+  last_refresh: '2026-11-24T00:00:00.000Z',
+});
 const dockerUp = (() => {
   try {
     execFileSync('docker', ['info', '--format', '{{.ServerVersion}}'], {
@@ -95,7 +105,7 @@ test('кеши границы: умолчания, add, replace; профиль 
   const paths = guardCaches(undefined, '/home/u').map((c) => c.path);
   for (const p of paths)
     assert.ok(
-      !/\/\.(codex|claude)(\.json)?$|\/\.claude\/|_npx|\/\.gradle$|\/Library\/Caches$|\/\.cache$|\/\.npm$/.test(
+      !/\/\.(codex|claude)(\.json)?$|\/\.claude\/|_npx|\/\.gradle$|\/Library\/Caches$|\/\.cache$|\/\.npm$|\/\.maestro$|\/\.maestro\/(deps|bin|lib)/.test(
         p,
       ),
       p,
@@ -105,7 +115,7 @@ test('кеши границы: умолчания, add, replace; профиль 
     '/home/u/.gradle/native',
     '/home/u/.gradle/.tmp',
     '/home/u/.gradle/wrapper/dists',
-    '/home/u/.maestro',
+    '/home/u/.maestro/tests',
     '/home/u/.cache/node/corepack',
     '/home/u/Library/pnpm/.tools',
   ])
@@ -174,7 +184,7 @@ test(
     // Свой HOME с настройками CLI: исполнитель их не меняет (alpha.69, ревью).
     const home = join(root, 'home');
     execFileSync('mkdir', ['-p', join(home, '.codex'), join(home, '.claude')]);
-    writeFileSync(join(home, '.codex', 'auth.json'), '{"fake":true}');
+    writeFileSync(join(home, '.codex', 'auth.json'), AUTH);
     writeFileSync(join(home, '.codex', 'config.toml'), 'model = "x"\n');
     writeFileSync(join(home, '.claude', 'settings.json'), '{}');
     // Каталог вызова вне временного каталога: файл ответа codex пишется в него.
@@ -192,7 +202,7 @@ while [ $# -gt 0 ]; do [ "$1" = "--output-last-message" ] && OUT="$2"; shift; do
 ( echo hacked > "$HOME/.claude/settings.json" ) 2>/dev/null && echo "claude-settings=ok" >> "$R" || echo "claude-settings=denied" >> "$R"
 ( echo hacked > "$HOME/.codex/config.toml" ) 2>/dev/null && echo "codex-config=ok" >> "$R" || echo "codex-config=denied" >> "$R"
 [ -f "$CODEX_HOME/auth.json" ] && [ "$CODEX_HOME" != "$HOME/.codex" ] && echo "codex-home=own" >> "$R" || echo "codex-home=shared" >> "$R"
-( echo '{"refreshed":true}' > "$CODEX_HOME/auth.json" ) 2>/dev/null && echo "auth-refresh=ok" >> "$R" || echo "auth-refresh=denied" >> "$R"
+( printf '%s' '${REFRESHED}' > "$CODEX_HOME/auth.json" ) 2>/dev/null && echo "auth-refresh=ok" >> "$R" || echo "auth-refresh=denied" >> "$R"
 ( ln -sf "$HOME/.codex/config.toml" "$CALL_DIR/runtime.log" ) 2>/dev/null && echo "call-dir=ok" >> "$R" || echo "call-dir=denied" >> "$R"
 ( echo inside > "${cwd}/inside.txt" ) && echo "write-inside=ok" >> "$R" || echo "write-inside=fail" >> "$R"
 ( echo outside > "${outside}" ) 2>/dev/null && echo "write-outside=ok" >> "$R" || echo "write-outside=denied" >> "$R"
@@ -245,11 +255,9 @@ echo '{}'
     assert.equal(report['codex-home'], 'own');
     // Вход — ссылкой на настоящий файл: обновление токена попадает в него,
     // копий входа нет ни в каталоге вызова, ни после вызова.
+    // Посредник: обновление токена в копии вызова переносится в настоящий файл.
     assert.equal(report['auth-refresh'], 'ok');
-    assert.equal(
-      readFileSync(join(home, '.codex', 'auth.json'), 'utf8').trim(),
-      '{"refreshed":true}',
-    );
+    assert.equal(readFileSync(join(home, '.codex', 'auth.json'), 'utf8'), REFRESHED);
     assert.equal(existsSync(join(call, 'auth.json')), false);
     assert.equal(existsSync(join(call, 'runtime-home')), false);
     // Каталог вызова (журнал, итог controller) исполнителю не открыт.
@@ -315,3 +323,113 @@ test(
     }
   },
 );
+
+/** Вызов подставного codex-исполнителя под границей записи со своим сценарием shell. */
+async function writerCall(home: string, script: string) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), 'light-broker-')));
+  const cwd = join(root, 'w');
+  execFileSync('mkdir', ['-p', cwd, join(root, 'call')]);
+  const exe = join(root, 'fake.sh');
+  writeFileSync(
+    exe,
+    `#!/bin/sh
+if [ "$1" = "--version" ]; then echo "fake 1.0"; exit 0; fi
+cat > /dev/null
+OUT=""
+while [ $# -gt 0 ]; do [ "$1" = "--output-last-message" ] && OUT="$2"; shift; done
+${script}
+printf '{}' > "$OUT"
+echo '{}'
+`,
+  );
+  chmodSync(exe, 0o755);
+  return cliAdapter('codex', { executable: exe }).invoke(
+    {
+      callId: 'c',
+      task: 'implement',
+      binding: { runtime: 'codex' },
+      cwd,
+      prompt: 'p',
+      session: { kind: 'fresh' },
+      sandbox: {
+        mode: 'os',
+        writable: [cwd],
+        denied: [],
+        network: { domains: [] },
+        light: { guard: [cwd] },
+      },
+      timeoutMs: 30_000,
+      env: { PATH: process.env.PATH!, HOME: home },
+      artifactDir: join(root, 'call'),
+    },
+    AbortSignal.timeout(40_000),
+  );
+}
+
+test(
+  'посредник входа: ссылка или мусор вместо копии настоящий файл не меняют',
+  { skip: !supported },
+  async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'light-home-')));
+    execFileSync('mkdir', ['-p', join(home, '.codex')]);
+    const real = join(home, '.codex', 'auth.json');
+    writeFileSync(real, AUTH);
+    writeFileSync(join(home, 'victim.json'), '{"victim":true}');
+    // Копия заменена ссылкой на другой файл.
+    await writerCall(
+      home,
+      `rm -f "$CODEX_HOME/auth.json"; ln -s "$HOME/victim.json" "$CODEX_HOME/auth.json"`,
+    );
+    assert.equal(readFileSync(real, 'utf8'), AUTH);
+    // Мусор и чужая учётная запись — тоже.
+    await writerCall(home, `printf 'not json' > "$CODEX_HOME/auth.json"`);
+    assert.equal(readFileSync(real, 'utf8'), AUTH);
+    const other = JSON.stringify({
+      tokens: { account_id: 'acct-2', access_token: 'x', refresh_token: 'y' },
+      last_refresh: '2026-11-25T00:00:00.000Z',
+    });
+    await writerCall(home, `printf '%s' '${other}' > "$CODEX_HOME/auth.json"`);
+    assert.equal(readFileSync(real, 'utf8'), AUTH);
+    // Настоящий файл исполнителю не открыт напрямую.
+    await writerCall(home, `printf 'x' > "$HOME/.codex/auth.json" 2>/dev/null || true`);
+    assert.equal(readFileSync(real, 'utf8'), AUTH);
+  },
+);
+
+test(
+  'посредник входа: ссылка, подложенная на месте настоящего файла, не расширяет границу',
+  { skip: !supported },
+  async () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'light-home-')));
+    execFileSync('mkdir', ['-p', join(home, '.codex')]);
+    // Прежний вызов (или исполнитель) подменил путь входа ссылкой на $HOME.
+    symlinkSync(home, join(home, '.codex', 'auth.json'));
+    const out = await writerCall(
+      home,
+      `( echo pwned > "$HOME/pwned" ) 2>/dev/null; ( echo pwned > "$HOME/.codex/auth.json/pwned" ) 2>/dev/null; true`,
+    );
+    assert.equal(out.status, 'ok', JSON.stringify(out.diagnostics));
+    assert.equal(existsSync(join(home, 'pwned')), false, 'граница не расширена до $HOME');
+  },
+);
+
+test('обновление входа: тот же вид и учётная запись, токены есть, новее', async () => {
+  const { authUpdate } = await import('../src/environment/write-guard.ts');
+  const a = JSON.parse(AUTH) as Record<string, unknown>;
+  const b = JSON.parse(REFRESHED) as Record<string, unknown>;
+  assert.equal(authUpdate('codex', a, b), true);
+  assert.equal(authUpdate('codex', b, a), false, 'старее — не переносится');
+  assert.equal(authUpdate('codex', a, { last_refresh: '2027-01-01T00:00:00Z' }), false);
+  const c0 = {
+    claudeAiOauth: { accessToken: 'a', refreshToken: 'r', expiresAt: 1, subscriptionType: 'max' },
+  };
+  const c1 = {
+    claudeAiOauth: { accessToken: 'b', refreshToken: 's', expiresAt: 2, subscriptionType: 'max' },
+  };
+  assert.equal(authUpdate('claude', c0, c1), true);
+  assert.equal(authUpdate('claude', c1, c0), false);
+  assert.equal(
+    authUpdate('claude', c0, { claudeAiOauth: { ...c1.claudeAiOauth, subscriptionType: 'pro' } }),
+    false,
+  );
+});

@@ -406,15 +406,11 @@ export function cliAdapter(
         ? join(controllerTemp.dir(), `hx-home-${randomUUID().slice(0, 12)}`)
         : undefined;
       const userHome = r.env.HOME ?? homedir();
-      const authFile =
-        runtime === 'codex'
-          ? join(r.env.CODEX_HOME ?? join(userHome, '.codex'), 'auth.json')
-          : join(r.env.CLAUDE_CONFIG_DIR ?? join(userHome, '.claude'), '.credentials.json');
       let homeEnv: Record<string, string> = {};
       // Входа для своего каталога не нашлось: вызов идёт (вход может прийти
       // иначе), а отказ runtime получит подсказку, что сделать.
       let homeHint: string | undefined;
-      let writeBack: (() => Promise<void>) | undefined;
+      let writeBack: (() => Promise<string | undefined>) | undefined;
       const cleanup = async () => {
         await writeBack?.().catch(() => undefined);
         for (const d of [runtimeHome, outDir])
@@ -429,7 +425,6 @@ export function cliAdapter(
             ...light.guard.map((subpath) => ({ subpath })),
             ...(outDir ? [{ subpath: outDir }] : []),
             ...(runtimeHome ? [{ subpath: runtimeHome }] : []),
-            { prefix: authFile },
           ]);
         } catch (error) {
           await cleanup();
@@ -443,8 +438,15 @@ export function cliAdapter(
             diagnostics: { exitCode: null, reason: error.message.slice(0, 500), log: logPath },
           };
         }
-      const version = await runtimeVersion(executable, r.env);
-      await writeFile(logPath, `Runtime ${runtime}; started ${new Date().toISOString()}\n`);
+      let version: Awaited<ReturnType<typeof runtimeVersion>>;
+      try {
+        version = await runtimeVersion(executable, r.env);
+        await writeFile(logPath, `Runtime ${runtime}; started ${new Date().toISOString()}\n`);
+      } catch (error) {
+        // Каталог ответа не переживает отказ до вызова.
+        if (outDir) await rm(outDir, { recursive: true, force: true }).catch(() => undefined);
+        throw error;
+      }
       let logged = 0;
       const unavailable = (reason: string): RuntimeResponse => ({
         status: 'unavailable',
@@ -505,9 +507,11 @@ export function cliAdapter(
           return unavailable(`${runtime}: runtime не запускается: ${String(error)}`);
         throw error;
       } finally {
-        // Домашний каталог вызова убирается на любом исходе; вход, заменённый
-        // CLI файлом, переносится в настоящий файл.
-        await writeBack?.().catch(() => undefined);
+        // Домашний каталог вызова убирается на любом исходе; обновлённый вход
+        // переносит посредник (проверки — в `writerRuntimeHome`), отброшенная
+        // копия — заметкой в журнале вызова.
+        const note = await writeBack?.().catch(() => 'вход исполнителя не перенесён: ошибка');
+        if (note) appendFileSync(logPath, `[harness] ${note}\n`);
         writeBack = undefined;
         if (runtimeHome)
           await rm(runtimeHome, { recursive: true, force: true }).catch(() => undefined);
