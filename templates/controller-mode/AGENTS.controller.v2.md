@@ -53,11 +53,16 @@ this mode the controller does them instead, so the worker does not:
 
 ## When the environment blocks a mandated step
 
-The attempt runs in the harness writer sandbox. A product rule can mandate a
-step that this sandbox does not allow: a generator fetched from the package
-registry, a local server for browser checks, a browser tool, or reading the
-task description from a tracker. Such a block is not a reason to stop before
-coding:
+In light mode (the default) the attempt runs on the host like a normal
+developer: network, Docker, a local server, a browser and process listing
+work; the only limit is that you write only inside your attempt worktree,
+its temp dir and tool caches. Use the attempt's own ports and compose
+project from the environment (`COMPOSE_PROJECT_NAME`, the ports in
+`HARNESS_ATTEMPT_ENV_FILE`). In strict mode the attempt runs in an OS
+sandbox. When a step a product rule mandates is still blocked (a write
+outside the worktree, reading the task description from a tracker, or,
+in strict mode, the network or a browser), the block is not a reason to
+stop before coding:
 
 1. Implement the work order first with what you have. The task description is
    in the work order and the pinned context; do not fetch it yourself.

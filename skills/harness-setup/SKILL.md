@@ -64,6 +64,10 @@ In light mode:
   (`GATEWAY_MIRROR_MISSING`). Open an infra work only for a shared thing
   several works need (for example a new compose service), reviewed like
   code. Infra works stay available when the owner wants that boundary;
+- acceptance tests assert what a user or client sees — status codes, text,
+  roles, links, API payloads — and never hashed CSS Module class names
+  (`module__<hash>`) or the framework's RSC payload (`__next_f`): those
+  change with every build and make the test fail on correct code;
 - browser gates standardise on Playwright Test with its bundled headless
   Chromium (`ui: {type: "browser"}`); agent-browser is an exploration tool
   for agents, not a gate runner. Mobile gates (Maestro) are a contract in

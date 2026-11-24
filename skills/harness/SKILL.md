@@ -220,6 +220,9 @@ into a separate stage: use the harness helpers — per-attempt services and
 `attempt-env.json` (`HARNESS_ATTEMPT_ENV_FILE`), the `browser` (Playwright)
 gate, the gateway-mirror check. Open an infra work only for a shared thing
 several works need (for example a new compose service), reviewed like code.
+In acceptance criteria and tests ask for what a user or client sees (status,
+text, roles, links, payloads), never hashed CSS Module classes or the RSC
+payload.
 Strict mode (`harnessMode: strict`) is frozen; switching modes is the
 owner's decision — never change it yourself. When the product is served
 through a gateway in production, gates should go through the project's
