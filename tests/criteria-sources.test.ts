@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-explicit-any --
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-argument --
  * Тест строит сырые draft и адаптеры как есть.
  */
 /**
