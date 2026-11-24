@@ -20,7 +20,6 @@ import {
   type RuntimeBinding,
   type RuntimeName,
   strictSandbox,
-  harnessModeOf,
   writeGuardActive,
 } from '../contracts/index.ts';
 import { guardCaches, writeGuardSupport } from '../environment/write-guard.ts';
