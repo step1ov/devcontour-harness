@@ -84,6 +84,7 @@ import { carriedInput, statusOf } from './status.ts';
 import { acceptedTargets } from './target.ts';
 import { WorkflowQueue } from './workflow.ts';
 import { reviewRoundCap, strictReviewRoundCap } from './review.ts';
+import { releaseReviewState } from './release-review-state.ts';
 import { LIGHT_ROUNDS_EN, reviewSubjectSummary, subjectRoundBudget } from './review-summary.ts';
 import { stageOfStep } from './stage.ts';
 import { setupProgress } from './setup-progress.ts';
@@ -431,7 +432,7 @@ export function reviewsOf(
     (r): OperatorReviewInput => {
       const counts = findingCounts(r.findings);
       return {
-        kind: 'code',
+        kind: r.kind === 'release' ? 'release' : 'code',
         subject: r.subject,
         at: r.at,
         approved: r.approved,
@@ -1466,6 +1467,22 @@ export function collectOperatorViewInput(
       ...((outline) => (outline ? { outline } : {}))(
         v.local('release-outline', WORKSPACE_OWNER, 'outline'),
       ),
+      // Приёмка выпуска (ревизия 9): цель — по состоянию (принятая работа).
+      ...((r) =>
+        r.repositories.length
+          ? {
+              releaseReview: {
+                required: r.required,
+                status: r.status,
+                ...(r.round !== undefined ? { round: r.round } : {}),
+                ...(r.open !== undefined ? { open: r.open } : {}),
+                ...(r.blocking !== undefined ? { blocking: r.blocking } : {}),
+                ...(r.head ? { head: r.head } : {}),
+                ...(r.target ? { target: r.target } : {}),
+                ...(r.at ? { at: r.at } : {}),
+              },
+            }
+          : {})(releaseReviewState(v, policy)),
       ...((r) => (r ? { resources: r } : {}))(
         resourcesInputOf(policy, h.stateDir, view.baseDir, {
           // Попытка закончилась по снимку хранилища: квитанция окружения
@@ -1474,9 +1491,12 @@ export function collectOperatorViewInput(
             const a = v.attempt(runId);
             return a ? a.status !== 'active' : undefined;
           },
-          heldGates: h.engine
-            .environmentGateHolds(v)
-            .map((x) => ({ repositoryId: x.repositoryId, gate: x.gate, workId: x.workId })),
+          heldGates: h.engine.environmentGateHolds(v).map((x) => ({
+            repositoryId: x.repositoryId,
+            gate: x.gate,
+            workId: x.workId,
+            ...(x.cause ? { cause: x.cause } : {}),
+          })),
         }),
       ),
       ...(status.budgets ? { budgets: status.budgets.budgets } : {}),

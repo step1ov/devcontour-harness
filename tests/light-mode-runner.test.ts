@@ -1,3 +1,6 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-call --
+ * Тест правит сырой JSON политики до разбора схемой.
+ */
 import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -35,7 +38,7 @@ test('порты попытки: свои у каждой попытки, аре
   // Занятый диапазон — понятный отказ, аренды не остаются.
   await assert.rejects(
     allocateAttemptPorts({ ports: ['X'], portRange: { from: 31020, to: 31021 } }, db, 'c', {
-      busy: async () => true,
+      busy: () => Promise.resolve(true),
     }),
     /Нет свободного порта попытки для X/,
   );
@@ -64,7 +67,7 @@ test('переменные попытки: имя проекта compose, пор
 
 test('политика: шлюз ссылается только на порты попытки, пул устройств — ресурсы device', async () => {
   const { policyIssues } = await import('../src/contracts/policy.ts');
-  const raw = example('policy') as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any
+  const raw = example('policy') as Record<string, any>;
   raw.repositories[0].gateway = { url: 'http://127.0.0.1:${GW}', env: {} };
   raw.repositories[0].gates.push({
     id: 'mobile',
@@ -131,7 +134,7 @@ fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,
           ports: ['API_PORT', 'GATEWAY_PORT'],
           portRange: { from: 32000, to: 32999 },
         };
-        const repo = (p.repositories as Record<string, any>[])[0]!; // eslint-disable-line @typescript-eslint/no-explicit-any
+        const repo = (p.repositories as Record<string, any>[])[0]!;
         repo.gateway = {
           url: 'http://127.0.0.1:${GATEWAY_PORT}',
           env: { IMAGE_PUBLIC_BASE_URL: '/media' },

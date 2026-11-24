@@ -84,6 +84,7 @@ import {
   type WorkOrder,
   type WorkState,
   harnessModeOf,
+  strictSandbox,
 } from '../contracts/index.ts';
 import { HARNESS_VERSION } from '../package.ts';
 import {
@@ -5760,7 +5761,11 @@ export class Engine {
       runId: a.id,
       at: iso(this.now()),
       // Gate без названной причины удержан своим определением, не песочницей.
-      ...(cause === 'gate-definition' ? {} : { isolation: this.policy.isolation.mode }),
+      // Среда отказа песочницы: строгая песочница ОС (`os`) или без неё
+      // (облегчённый режим, alpha.69) — смена режима снимает удержание.
+      ...(cause === 'gate-definition'
+        ? {}
+        : { isolation: strictSandbox(this.policy) ? ('os' as const) : ('none' as const) }),
       ...(cause === 'sandbox-process-list' ? {} : { cause }),
     };
   }
@@ -5776,7 +5781,7 @@ export class Engine {
         return gate ? gateDigest(gate) : undefined;
       },
       {
-        isolation: this.policy.isolation.mode,
+        isolation: strictSandbox(this.policy) ? 'os' : 'none',
         ...(processListSeen.status ? { processList: processListSeen.status } : {}),
       },
     );

@@ -81,7 +81,13 @@ export interface ResourcesInput {
   gates: { repositoryId: string; count: number }[];
   workspaceGates: number;
   /** Удержанные gates (`Engine.environmentGateHolds`); нет — удержаний нет. */
-  heldGates?: { repositoryId: string; gate: string; workId: string }[];
+  heldGates?: {
+    repositoryId: string;
+    gate: string;
+    workId: string;
+    /** Ревизия 9: причина удержания (`gate-definition` — gate не назвал причину). */
+    cause?: 'sandbox-process-list' | 'sandbox-signal' | 'sandbox-browser' | 'gate-definition';
+  }[];
 }
 
 export interface ResourcesRoleView {
@@ -555,12 +561,35 @@ export function resourcesOf(input: ResourcesInput, opts: ResourcesOptions): Reso
     repositoryId: mid(h.repositoryId),
     gate: mid(h.gate),
     workId: mid(h.workId),
+    ...(h.cause ? { cause: h.cause } : {}),
   }));
+  // Причина удержания простыми словами: у всех одна — она, иначе общая.
+  const causes = new Set(held.map((h) => h.cause ?? 'sandbox-process-list'));
+  const only = causes.size === 1 ? [...causes][0] : undefined;
+  const why = ru
+    ? only === 'gate-definition'
+      ? 'gate упал, не назвав причины (ни упавших тестов, ни строки ошибки)'
+      : only === 'sandbox-process-list'
+        ? 'gate зовёт ps, а в песочнице проверок списка процессов нет'
+        : only === 'sandbox-signal'
+          ? 'gate шлёт сигнал процессу вне песочницы проверок'
+          : only === 'sandbox-browser'
+            ? 'gate запускает браузер, а в песочнице проверок он не стартует'
+            : 'отказ без повтора, который правкой кода задачи не снять'
+    : only === 'gate-definition'
+      ? 'the gate failed without naming a cause (no failed tests, no error line)'
+      : only === 'sandbox-process-list'
+        ? 'the gate runs ps, and the check sandbox has no process list'
+        : only === 'sandbox-signal'
+          ? 'the gate signals a process outside the check sandbox'
+          : only === 'sandbox-browser'
+            ? 'the gate launches a browser, which does not start in the check sandbox'
+            : 'a no-retry failure that task code changes cannot fix';
   const heldLine = held.length
     ? clipLine(
         ru
-          ? `Удержано: ${held.map((h) => `${h.repositoryId}/${h.gate} (работа ${h.workId})`).join(', ')} — gate зовёт ps, а в песочнице проверок списка процессов нет; ход ведущего: поменять gate или исправить тест и повторить работу (retry --by lead)`
-          : `Held: ${held.map((h) => `${h.repositoryId}/${h.gate} (work ${h.workId})`).join(', ')} — the gate runs ps, and the check sandbox has no process list; the lead changes the gate, or fixes the test and retries the work (retry --by lead)`,
+          ? `Удержано: ${held.map((h) => `${h.repositoryId}/${h.gate} (работа ${h.workId})`).join(', ')} — ${why}; ход ведущего: поменять gate или исправить тест и повторить работу (retry --by lead)`
+          : `Held: ${held.map((h) => `${h.repositoryId}/${h.gate} (work ${h.workId})`).join(', ')} — ${why}; the lead changes the gate, or fixes the test and retries the work (retry --by lead)`,
       )
     : undefined;
   const gates = {
