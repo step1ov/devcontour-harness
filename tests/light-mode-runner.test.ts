@@ -345,7 +345,17 @@ test('каталог controller короткий (сокеты unix) и закр
     controllerTemp.use(undefined);
     rmSync(root, { recursive: true, force: true });
   }
-  const { claudeLoginWarning } = await import('../src/control/doctor.ts');
+  const { claudeLoginWarning, loginCopyNote } = await import('../src/control/doctor.ts');
+  {
+    const base = example('policy') as Record<string, any>;
+    delete base.harnessMode;
+    assert.match(
+      loginCopyNote(executionPolicySchema.parse(base)) ?? '',
+      /^light-login-copy: исполнители получают копию входа; .*codex login/,
+    );
+    base.environment = { inherit: ['OPENAI_API_KEY'] };
+    assert.equal(loginCopyNote(executionPolicySchema.parse(base)), undefined);
+  }
   const raw = example('policy') as Record<string, any>;
   delete raw.harnessMode;
   raw.roles.developer.writer.runtime = 'claude';

@@ -349,6 +349,8 @@ export async function doctor(
     notes.unshift(mode.line);
     const login = policy ? claudeLoginWarning(policy) : undefined;
     if (login) warnings.push(login);
+    const copy = policy ? loginCopyNote(policy) : undefined;
+    if (copy) notes.push(copy);
     // Облегчённый режим без границы записи — предупреждение, не заметка.
     if (mode.mode === 'light' && !mode.writeGuard?.active)
       warnings.push(
@@ -756,4 +758,28 @@ export function lightContractBudgetNote(
   if (harnessModeOf(policy) !== 'light' || !policy.budgets?.group || policy.budgets.total)
     return undefined;
   return 'light-contract-budget: ревью контрактов бюджет группы (budgets.group) не ограничивает — их держат защита от круга ревью (6 раундов — ведущий, 12 — владелец) и budgets.total; задайте budgets.total, чтобы ограничить и их';
+}
+
+/**
+ * Облегчённый режим со входом из файла (решение владельца 2026-11-24):
+ * исполнитель получает копию входа, обратно ничего не переносится.
+ * Заметка, если исполнителям не передан ключ API.
+ */
+export function loginCopyNote(policy: ExecutionPolicy): string | undefined {
+  if (harnessModeOf(policy) !== 'light') return undefined;
+  const keys = new Set([
+    'OPENAI_API_KEY',
+    'CODEX_API_KEY',
+    'ANTHROPIC_API_KEY',
+    'CLAUDE_CODE_OAUTH_TOKEN',
+  ]);
+  const envs = [policy.environment, ...policy.repositories.map((r) => r.environment)];
+  const keyed = envs.some(
+    (e) =>
+      !!e &&
+      [...e.inherit, ...Object.keys(e.values), ...Object.keys(e.secrets)].some((k) => keys.has(k)),
+  );
+  return keyed
+    ? undefined
+    : 'light-login-copy: исполнители получают копию входа; если исполнитель обновит токен, Codex может однажды попросить `codex login` — с API-ключом для исполнителей (OPENAI_API_KEY / ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN в environment.inherit) этого не бывает';
 }

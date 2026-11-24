@@ -410,9 +410,7 @@ export function cliAdapter(
       // Входа для своего каталога не нашлось: вызов идёт (вход может прийти
       // иначе), а отказ runtime получит подсказку, что сделать.
       let homeHint: string | undefined;
-      let writeBack: (() => Promise<string | undefined>) | undefined;
       const cleanup = async () => {
-        await writeBack?.().catch(() => undefined);
         for (const d of [runtimeHome, outDir])
           if (d) await rm(d, { recursive: true, force: true }).catch(() => undefined);
       };
@@ -474,9 +472,21 @@ export function cliAdapter(
       try {
         if (runtimeHome) {
           const prepared = await writerRuntimeHome(runtime, runtimeHome, r.env, userHome);
+          if (prepared.refused)
+            return {
+              status: 'unavailable',
+              text: '',
+              model: null,
+              runtimeVersion: version,
+              usage: unknownUsage(),
+              diagnostics: {
+                exitCode: null,
+                reason: redact(`${runtime}: облегчённый режим: ${prepared.refused}`).slice(0, 500),
+                log: logPath,
+              },
+            };
           homeEnv = prepared.env;
           homeHint = prepared.missing;
-          writeBack = prepared.writeBack;
         }
         result = await command(launch, r.cwd, {
           activity: { kind: 'agent', label: `${runtime} ${r.task}`.slice(0, 300) },
@@ -507,12 +517,8 @@ export function cliAdapter(
           return unavailable(`${runtime}: runtime не запускается: ${String(error)}`);
         throw error;
       } finally {
-        // Домашний каталог вызова убирается на любом исходе; обновлённый вход
-        // переносит посредник (проверки — в `writerRuntimeHome`), отброшенная
-        // копия — заметкой в журнале вызова.
-        const note = await writeBack?.().catch(() => 'вход исполнителя не перенесён: ошибка');
-        if (note) appendFileSync(logPath, `[harness] ${note}\n`);
-        writeBack = undefined;
+        // Домашний каталог вызова с копией входа убирается на любом исходе;
+        // обратно ничего не переносится (решение владельца 2026-11-24).
         if (runtimeHome)
           await rm(runtimeHome, { recursive: true, force: true }).catch(() => undefined);
       }

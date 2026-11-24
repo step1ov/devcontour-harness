@@ -196,67 +196,52 @@ export function guardEntries(
 }
 
 /**
- * Свой домашний каталог CLI исполнителя (alpha.69, ревью): настройки,
- * хуки, AGENTS.md/CLAUDE.md и конфигурация MCP пользователя — общие с
- * ведущим, reviewer и владельцем — исполнителю на запись не открыты. Вызов
- * получает свой каталог (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`) под каталогом
- * временных файлов controller.
- *
- * Вход — через посредника: настоящий файл входа исполнителю не открыт ни на
- * запись, ни путём в границе записи (подменённый ссылкой путь иначе
- * расширил бы границу следующего вызова). До вызова controller под
- * блокировкой читает настоящий файл (обычный файл, без ссылок, с пределом)
- * и кладёт копию в домашний каталог вызова. После вызова изменённая копия
- * переносится в настоящий файл, только если она — обычный файл, JSON того же
- * вида и той же учётной записи, с токенами и новее (`last_refresh` /
- * `expiresAt`) и настоящего файла, и прочитанного до вызова; запись —
- * атомарно рядом с настоящим файлом под той же блокировкой. Иначе копия
- * отбрасывается с заметкой. На macOS вход claude по подписке лежит в
- * Keychain: нужен `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`) или
- * `ANTHROPIC_API_KEY` в окружении исполнителя (`missing` называет это).
+ * Свой домашний каталог CLI исполнителя (alpha.69, решение владельца
+ * 2026-11-24): настройки, хуки, AGENTS.md/CLAUDE.md и конфигурация MCP
+ * пользователя — общие с ведущим, reviewer и владельцем — исполнителю на
+ * запись не открыты. Вызов получает свой каталог (`CODEX_HOME`,
+ * `CLAUDE_CONFIG_DIR`) под каталогом временных файлов controller и в нём —
+ * КОПИЮ файла входа (`auth.json` codex, `.credentials.json` claude, если вход
+ * хранится файлом). Копия делается только с обычного файла (lstat, без
+ * ссылок, с пределом, JSON-объект), создаётся заново (0600, исключительное
+ * создание) и удаляется после вызова; обратно ничего не переносится.
+ * Настоящий путь входа в границу записи не входит. Путь входа есть, но это
+ * не обычный файл (подложенная ссылка, каталог) — отказ вызова (`refused`).
+ * Если исполнитель обновит токен в копии, Codex может однажды попросить
+ * `codex login`; с ключом API у исполнителей этого не бывает. На macOS вход
+ * claude по подписке лежит в Keychain: нужен `CLAUDE_CODE_OAUTH_TOKEN`
+ * (`claude setup-token`) или `ANTHROPIC_API_KEY` (`missing` называет это).
  */
 export async function writerRuntimeHome(
   runtime: 'codex' | 'claude',
   dir: string,
   env: Record<string, string>,
   home = homedir(),
-): Promise<{
-  env: Record<string, string>;
-  missing?: string;
-  /** Перенести обновлённый вход в настоящий файл; заметка, если копия отброшена. */
-  writeBack: () => Promise<string | undefined>;
-}> {
-  const { mkdir, writeFile } = await import('node:fs/promises');
+): Promise<{ env: Record<string, string>; missing?: string; refused?: string }> {
+  const { mkdir, writeFile, lstat } = await import('node:fs/promises');
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const real =
     runtime === 'codex'
       ? join(env.CODEX_HOME ?? join(home, '.codex'), 'auth.json')
       : join(env.CLAUDE_CONFIG_DIR ?? join(home, '.claude'), '.credentials.json');
   const copy = join(dir, runtime === 'codex' ? 'auth.json' : '.credentials.json');
-  const before = await withAuthLock(real, () => readAuthFile(real));
-  if (before) await writeFile(copy, before.text, { mode: 0o600, flag: 'wx' });
-  const writeBack = async (): Promise<string | undefined> => {
-    if (!before) return undefined;
-    const after = await readAuthFile(copy);
-    if (!after) return 'вход исполнителя не перенесён: копия заменена не обычным файлом';
-    if (after.text === before.text) return undefined;
-    const fresh = authUpdate(runtime, before.json, after.json);
-    if (!fresh)
-      return 'вход исполнителя не перенесён: копия не того вида, другой учётной записи или не новее';
-    return withAuthLock(real, async () => {
-      const now = await readAuthFile(real);
-      if (!now) return 'вход исполнителя не перенесён: настоящий файл входа — не обычный файл';
-      // Настоящий файл обновил другой вызов: остаётся более новый.
-      if (now.text !== before.text && !authUpdate(runtime, now.json, after.json)) return undefined;
-      await replaceRegularFile(real, after.text);
-      return undefined;
-    });
-  };
+  let exists = false;
+  try {
+    exists = !!(await lstat(real));
+  } catch {
+    exists = false;
+  }
+  const source = exists ? await readAuthFile(real) : undefined;
+  if (exists && !source)
+    return {
+      env: {},
+      refused: `файл входа ${real} — не обычный файл JSON (ссылка, каталог или повреждён): копия исполнителю не делается; восстановите вход (${runtime === 'codex' ? 'codex login' : 'claude login'})`,
+    };
+  if (source) await writeFile(copy, source.text, { mode: 0o600, flag: 'wx' });
   if (runtime === 'codex')
     return {
       env: { CODEX_HOME: dir },
-      writeBack,
-      ...(before || env.OPENAI_API_KEY || env.CODEX_API_KEY
+      ...(source || env.OPENAI_API_KEY || env.CODEX_API_KEY
         ? {}
         : { missing: `нет ${real}: выполните codex login` }),
     };
@@ -264,8 +249,7 @@ export async function writerRuntimeHome(
   await writeFile(join(dir, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true }));
   return {
     env: { CLAUDE_CONFIG_DIR: dir },
-    writeBack,
-    ...(before || env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY
+    ...(source || env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY
       ? {}
       : {
           missing:
@@ -277,9 +261,7 @@ export async function writerRuntimeHome(
 const AUTH_LIMIT = 1024 * 1024;
 
 /** Прочитать файл входа: только обычный файл, без ссылок, с пределом; JSON-объект. */
-async function readAuthFile(
-  path: string,
-): Promise<{ text: string; json: Record<string, unknown> } | undefined> {
+async function readAuthFile(path: string): Promise<{ text: string } | undefined> {
   const { lstat, open } = await import('node:fs/promises');
   const { constants } = await import('node:fs');
   try {
@@ -290,105 +272,11 @@ async function readAuthFile(
       if (!st.isFile() || st.size > AUTH_LIMIT) return undefined;
       const text = (await handle.readFile()).toString('utf8');
       const json = JSON.parse(text) as unknown;
-      return json && typeof json === 'object' && !Array.isArray(json)
-        ? { text, json: json as Record<string, unknown> }
-        : undefined;
+      return json && typeof json === 'object' && !Array.isArray(json) ? { text } : undefined;
     } finally {
       await handle.close();
     }
   } catch {
     return undefined;
-  }
-}
-
-const obj = (v: unknown): Record<string, unknown> | undefined =>
-  v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : undefined;
-
-/**
- * Обновление входа `next` против `prev`: тот же вид и та же учётная
- * запись, токены есть, и `next` новее. Codex: `tokens.{account_id,
- * refresh_token}`, `last_refresh`; claude: `claudeAiOauth.{refreshToken,
- * expiresAt}`.
- */
-export function authUpdate(
-  runtime: 'codex' | 'claude',
-  prev: Record<string, unknown>,
-  next: Record<string, unknown>,
-): boolean {
-  if (runtime === 'codex') {
-    const a = obj(prev.tokens),
-      b = obj(next.tokens);
-    if (!b || typeof b.refresh_token !== 'string' || typeof b.access_token !== 'string')
-      return false;
-    if (a?.account_id !== undefined && a.account_id !== b.account_id) return false;
-    const t0 = Date.parse(typeof prev.last_refresh === 'string' ? prev.last_refresh : ''),
-      t1 = Date.parse(typeof next.last_refresh === 'string' ? next.last_refresh : '');
-    return Number.isFinite(t1) && (!Number.isFinite(t0) || t1 > t0);
-  }
-  const a = obj(prev.claudeAiOauth),
-    b = obj(next.claudeAiOauth);
-  if (!b || typeof b.refreshToken !== 'string' || typeof b.accessToken !== 'string') return false;
-  if (a?.subscriptionType !== undefined && a.subscriptionType !== b.subscriptionType) return false;
-  return (
-    typeof b.expiresAt === 'number' &&
-    (typeof a?.expiresAt !== 'number' || b.expiresAt > a.expiresAt)
-  );
-}
-
-/** Заменить обычный файл атомарно: временный файл рядом (без ссылок) и переименование. */
-async function replaceRegularFile(path: string, text: string) {
-  const { lstat, open, rename, rm } = await import('node:fs/promises');
-  const { constants } = await import('node:fs');
-  if (!(await lstat(path)).isFile()) throw new Error('не обычный файл');
-  const tmp = `${path}.hx-${process.pid}-${Date.now()}`;
-  const handle = await open(
-    tmp,
-    constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-    0o600,
-  );
-  try {
-    await handle.writeFile(text);
-    await handle.sync();
-  } finally {
-    await handle.close();
-  }
-  try {
-    await rename(tmp, path);
-  } catch (error) {
-    await rm(tmp, { force: true }).catch(() => undefined);
-    throw error;
-  }
-}
-
-/** Блокировка файла входа рядом с ним (`<файл>.hx-lock`, O_EXCL; давняя — снимается). */
-async function withAuthLock<T>(path: string, fn: () => Promise<T>): Promise<T> {
-  const { open, rm, stat } = await import('node:fs/promises');
-  const { constants } = await import('node:fs');
-  const lock = `${path}.hx-lock`;
-  let handle;
-  for (let i = 0; i < 100 && !handle; i++) {
-    try {
-      handle = await open(
-        lock,
-        constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
-        0o600,
-      );
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return fn();
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') return fn();
-      try {
-        if (Date.now() - (await stat(lock)).mtimeMs > 60_000) await rm(lock, { force: true });
-      } catch {
-        /* снята другим */
-      }
-      await new Promise((r) => setTimeout(r, 50));
-    }
-  }
-  if (!handle) return fn();
-  try {
-    return await fn();
-  } finally {
-    await handle.close();
-    await rm(lock, { force: true }).catch(() => undefined);
   }
 }

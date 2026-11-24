@@ -1995,6 +1995,7 @@ view`) в пределе длины сохраняет хвост — остат
   инструментов исполнителя не ограничивается: явное `network: none` или
   `loopback` у профиля исполнителя — отказ политики, пока поле не убрано или
   не выбран `harnessMode: strict`.
+- **Вход исполнителей — копией.** Исполнители получают копию входа; если исполнитель обновит токен, Codex может однажды попросить `codex login` — с API-ключом для исполнителей (`OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `CLAUDE_CODE_OAUTH_TOKEN` в `environment.inherit`) этого не бывает.
 - **Исполнитель claude по подписке на macOS.** Свой каталог настроек вызова
   не видит вход из Keychain: `claude setup-token` и `CLAUDE_CODE_OAUTH_TOKEN`
   в `environment.inherit` (или `ANTHROPIC_API_KEY`).
