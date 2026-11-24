@@ -292,6 +292,25 @@ export const driftViewSchema = z.strictObject({
   unavailable: freeText(T.unavailable).optional(),
 });
 
+const costAmount = {
+  usd: z.number().min(0),
+  bound: z.enum(['exact', 'lower']),
+  calls: count,
+  /** Вызовов без цены: `bound: lower`, когда больше нуля. */
+  unpricedCalls: count,
+};
+const attemptCostSchema = z.strictObject({
+  runId: token(200),
+  attempt: z.number().int().positive().optional(),
+  ...costAmount,
+});
+/** Расход одной работы (ревизия 10, `works[].cost`). */
+export const workCostViewSchema = z.strictObject({
+  ...costAmount,
+  byAttempt: z.array(attemptCostSchema).max(20),
+  byAttemptTruncated: count,
+});
+
 export const workViewSchema = z.strictObject({
   id,
   graphId: id,
@@ -375,6 +394,11 @@ export const workViewSchema = z.strictObject({
         counted: z.boolean().optional(),
         /** Ревизия 10: справочник причин (`docs/failure-causes.md#…`). */
         reference: z.string().min(1).max(200).optional(),
+        /**
+         * Ревизия 10: та же ссылка адресом в репозитории harness этой версии
+         * (`<repository>/blob/v<версия>/docs/failure-causes.md#…`).
+         */
+        referenceUrl: z.string().min(1).max(600).optional(),
       })
       .optional(),
   }),
@@ -519,6 +543,16 @@ export const workViewSchema = z.strictObject({
             refuted: count,
             missed: count,
             overturned: z.literal(true).optional(),
+            /** Снятые находки: текст и основание опровержения (маскируются, до 20). */
+            refutedFindings: z
+              .array(
+                z.strictObject({
+                  finding: z.string().min(1).max(T.plain),
+                  basis: z.string().min(1).max(T.plain),
+                }),
+              )
+              .max(20)
+              .optional(),
           })
           .optional(),
       }),
@@ -536,11 +570,27 @@ export const workViewSchema = z.strictObject({
         kind: z.enum(['follow-up', 'split']),
         status: z.enum(['proposed', 'accepted', 'rejected']),
         attempt: z.number().int().positive(),
+        /** Заголовок; у разделения без него — «разделение на N части». */
         title: freeText(T.title).optional(),
+        /** Цель и почему вне работы — слова исполнителя (маскируются). */
+        goal: freeText(T.plain).optional(),
+        reason: freeText(T.plain).optional(),
+        /** Частей разделения. */
+        parts: count.optional(),
+        /** Решение ведущего или оператора; `reason` — его основание. */
+        decision: z
+          .strictObject({
+            by: z.enum(['lead', 'operator']),
+            at: isoTimeSchema,
+            reason: freeText(T.plain).optional(),
+          })
+          .optional(),
       }),
     )
     .max(20)
     .optional(),
+  /** Ревизия 10: расход работы — итог и по попыткам (`workCostViewSchema`). */
+  cost: workCostViewSchema.optional(),
 });
 
 const series = z.array(count).max(L.buckets);
@@ -972,14 +1022,17 @@ const sourceSchema = z.strictObject({
 
 const truncatedCount = z.number().int().positive();
 
-const costAmount = {
-  usd: z.number().min(0),
-  bound: z.enum(['exact', 'lower']),
-  calls: count,
-};
 export const costsViewSchema = z.strictObject({
   total: z.strictObject(costAmount),
-  release: z.strictObject({ ...costAmount, since: isoTimeSchema.optional() }),
+  /**
+   * Текущий выпуск: `sinceRelease: true` — вызовы после последнего `release
+   * done` (`since`); `false` — выпуска ещё не было, это все вызовы.
+   */
+  release: z.strictObject({
+    ...costAmount,
+    since: isoTimeSchema.optional(),
+    sinceRelease: z.boolean(),
+  }),
   byRole: z
     .array(
       z.strictObject({
@@ -998,23 +1051,21 @@ export const costsViewSchema = z.strictObject({
       }),
     )
     .max(50),
+  /** Моделей сверх предела `byModel`. */
+  byModelTruncated: count,
   byWork: z
     .array(
       z.strictObject({
         workId: id,
         ...costAmount,
-        attempts: z
-          .array(
-            z.strictObject({
-              runId: token(200),
-              attempt: z.number().int().positive().optional(),
-              ...costAmount,
-            }),
-          )
-          .max(20),
+        /** Последние попытки работы (до 20); ранние сверх предела — `attemptsTruncated`. */
+        attempts: z.array(attemptCostSchema).max(20),
+        attemptsTruncated: count,
       }),
     )
     .max(L.works),
+  /** Работ сверх предела `byWork` (полный расход работы — `works[].cost`). */
+  byWorkTruncated: count,
 });
 
 export const operatorViewSchema = z.strictObject({

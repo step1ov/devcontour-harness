@@ -6,7 +6,7 @@
 // свободный текст, держит пределы списков и размера и считает токен
 // содержимого. Схема ответа — `operatorViewSchema` (src/contracts/operator-view.ts).
 
-import type { CostBreakdown } from './costs.ts';
+import type { CostBreakdown, WorkCost } from './costs.ts';
 import { HarnessError } from '../contracts/errors.ts';
 import { MAX_NEUTRAL_FAILURES } from '../contracts/repair-policy.ts';
 import { REVIEW_ESCALATION_ROUNDS } from '../contracts/review-loop.ts';
@@ -536,6 +536,25 @@ export interface WorkView {
   attemptReviews?: AttemptReviewView[];
   /** Ревизия 10: предложения исполнителей ведущему (alpha.70). */
   proposals?: ProposalView[];
+  /** Ревизия 10: расход работы — итог и по попыткам. */
+  cost?: WorkCostView;
+}
+
+/** Расход работы (ревизия 10). */
+export interface WorkCostView {
+  usd: number;
+  bound: 'exact' | 'lower';
+  calls: number;
+  unpricedCalls: number;
+  byAttempt: {
+    runId: string;
+    attempt?: number;
+    usd: number;
+    bound: 'exact' | 'lower';
+    calls: number;
+    unpricedCalls: number;
+  }[];
+  byAttemptTruncated: number;
 }
 
 /** Предложение исполнителя (ревизия 10). */
@@ -545,6 +564,13 @@ export interface ProposalView {
   status: 'proposed' | 'accepted' | 'rejected';
   attempt: number;
   title?: string;
+  /** Цель предложения и почему оно вне работы — слова исполнителя (маскируются). */
+  goal?: string;
+  reason?: string;
+  /** Частей разделения. */
+  parts?: number;
+  /** Решение ведущего или оператора с основанием. */
+  decision?: { by: 'lead' | 'operator'; reason?: string; at: string };
 }
 
 /** Шаг документации выпуска (ревизия 10). */
@@ -587,6 +613,8 @@ export interface AttemptReviewView {
     refuted: number;
     missed: number;
     overturned?: true;
+    /** Снятые находки: текст находки и основание (маскируются, до 20). */
+    refutedFindings?: { finding: string; basis: string }[];
   };
 }
 
@@ -970,6 +998,8 @@ export interface OperatorWorkInput {
   attemptReviews?: readonly AttemptReviewView[];
   /** Ревизия 10: предложения исполнителей (`WorkState.proposals`). */
   proposals?: readonly ProposalView[];
+  /** Ревизия 10: расход работы (`costBreakdown().byWork` без предела). */
+  cost?: WorkCost;
   /** Записи доказательств с `recheck` по всем попыткам работы. */
   rechecks: number;
   liveness?: 'quiet' | 'stalled';
@@ -1505,6 +1535,11 @@ export interface OperatorViewInput {
   outline?: OperatorOutlineInput;
   /** Приёмка выпуска (ревизия 9, `releaseReviewState`); нет — поля нет. */
   releaseReview?: Omit<ReleaseReviewView, 'line'>;
+  /**
+   * База ссылок на документы harness этой версии (ревизия 10,
+   * `harnessDocsBase`): `<репозиторий>/blob/v<версия>/`; нет — ссылок нет.
+   */
+  docsBase?: string;
   /** Шаг документации выпуска (ревизия 10, `releaseDocsState`); нет — поля нет. */
   releaseDocs?: ReleaseDocsView;
   /** Расход по работам, попыткам, ролям и моделям (ревизия 10, `costBreakdown`). */
@@ -2135,6 +2170,9 @@ function workView(c: Ctx, w: OperatorWorkInput, truncated: Record<string, number
               ...(last.kind ? { kind: last.kind } : {}),
               ...(last.counted !== undefined ? { counted: last.counted } : {}),
               ...(last.reference ? { reference: last.reference } : {}),
+              ...(last.reference && c.i.docsBase
+                ? { referenceUrl: c.i.docsBase + last.reference }
+                : {}),
             },
           }
         : {}),
@@ -2210,17 +2248,72 @@ function workView(c: Ctx, w: OperatorWorkInput, truncated: Record<string, number
       if (!rows?.length) return {};
       const over = Math.max(0, rows.length - L.attemptReviews);
       if (over) truncated.attemptReviews = (truncated.attemptReviews ?? 0) + over;
-      return { attemptReviews: rows.slice(over).map((r) => ({ ...r })) };
+      return {
+        attemptReviews: rows.slice(over).map((r) => ({
+          ...r,
+          ...(r.secondPass
+            ? {
+                secondPass: {
+                  ...r.secondPass,
+                  ...(r.secondPass.refutedFindings
+                    ? {
+                        refutedFindings: r.secondPass.refutedFindings.slice(0, 20).map((f) => ({
+                          finding: text(c, f.finding, T.plain) ?? '…',
+                          basis: text(c, f.basis, T.plain) ?? '…',
+                        })),
+                      }
+                    : {}),
+                },
+              }
+            : {}),
+        })),
+      };
     })(w.attemptReviews),
     ...(w.proposals?.length
       ? {
-          proposals: w.proposals.slice(-20).map((p) => ({
-            id: p.id,
-            kind: p.kind,
-            status: p.status,
-            attempt: p.attempt,
-            ...(c.titles && p.title ? { title: text(c, p.title, T.title) } : {}),
-          })),
+          proposals: w.proposals.slice(-20).map((p) => {
+            const en = c.lang === 'en';
+            const title =
+              p.title ||
+              (p.kind === 'split'
+                ? en
+                  ? `split into ${p.parts ?? '?'} parts`
+                  : `разделение на ${p.parts ?? '?'} части`
+                : en
+                  ? 'follow-up task'
+                  : 'задача-продолжение');
+            return {
+              id: p.id,
+              kind: p.kind,
+              status: p.status,
+              attempt: p.attempt,
+              ...(c.titles ? { title: text(c, title, T.title) } : {}),
+              ...(c.titles && p.goal ? { goal: text(c, p.goal, T.plain) } : {}),
+              ...(c.titles && p.reason ? { reason: text(c, p.reason, T.plain) } : {}),
+              ...(p.parts !== undefined ? { parts: p.parts } : {}),
+              ...(p.decision
+                ? {
+                    decision: {
+                      by: p.decision.by,
+                      at: p.decision.at,
+                      ...(c.titles ? { reason: text(c, p.decision.reason, T.plain) } : {}),
+                    },
+                  }
+                : {}),
+            };
+          }),
+        }
+      : {}),
+    ...(w.cost
+      ? {
+          cost: {
+            usd: w.cost.usd,
+            bound: w.cost.bound,
+            calls: w.cost.calls,
+            unpricedCalls: w.cost.unpricedCalls,
+            byAttempt: w.cost.attempts.map((a) => ({ ...a })),
+            byAttemptTruncated: w.cost.attemptsTruncated,
+          },
         }
       : {}),
   };

@@ -163,20 +163,38 @@ lead outline`): незарегистрированные этапы и комп�
 - **Удержание gate без причины** (`resources.gates.held[].cause`, ревизия
   9): `gate-definition` — gate упал, не назвав причины; ход ведущего —
   поменять команду gate или повторить работу (`retry --by lead`).
-- **Расход** (`costs`, ревизия 10, harness 0.1.0-alpha.70): итог
-  установки (`total`) и текущего выпуска (`release`, после последнего
-  `release done`), по ролям (`writer`, `reviewer`, `planner`, `lead`,
-  `other`), по моделям с вендором и по работам с попытками; `bound: lower`
-  — есть вызовы без цены.
+- **Расход** (`costs`, ревизия 10, harness 0.1.0-alpha.70). Каждая сумма —
+  `{usd, bound, calls, unpricedCalls}`: `bound: lower` и `unpricedCalls > 0`
+  — есть вызовы без цены. `total` — вся установка; `release` — текущий
+  выпуск: `sinceRelease: true` и `since` — вызовы после последнего
+  `release done`, `sinceRelease: false` (без `since`) — выпуска ещё не было,
+  это все вызовы. `byRole[]` (`writer`, `reviewer`, `planner`, `lead`,
+  `other`), `byModel[]` (`runtime`, `vendor`, `model`; до 50, опущенное —
+  `byModelTruncated`), `byWork[]` (`workId`, `attempts[]` — последние 20
+  попыток, ранние — `attemptsTruncated`; опущенные работы —
+  `byWorkTruncated`).
+- **Расход работы** (`works[].cost`, ревизия 10): `{usd, bound, calls,
+unpricedCalls, byAttempt[], byAttemptTruncated}` — для деталей работы,
+  без предела списка работ.
 - **Второй проход ревью** (`works[].attemptReviews[].secondPass`, ревизия
-  10): режим, итог, сколько находок снято и сколько пропустил первый,
-  снят ли отказ первого прохода.
-- **Предложения исполнителей** (`works[].proposals`, ревизия 10):
-  задачи-продолжения и разделения со статусом; решает ведущий.
-- **Шаг документации выпуска** (`forecast.progress.release.docs`,
-  ревизия 10): режим, состояние, работы документации, корни без неё.
-- **Справочник причин** (`works[].attempts.lastFailure.reference`,
-  ревизия 10): ссылка `docs/failure-causes.md#…`.
+  10): `mode`, `status` (`ran`, `failed`), `refuted` (число), `missed`,
+  `overturned`, `refutedFindings[]` — `{finding, basis}`: текст снятой
+  находки и основание (маскируются, до 20).
+- **Предложения исполнителей** (`works[].proposals[]`, ревизия 10): `id`,
+  `kind` (`follow-up`, `split`), `status`, `attempt`, `title` (у разделения
+  без заголовка — «разделение на N части»), `goal`, `reason` (слова
+  исполнителя, маскируются), `parts`, `decision` — `{by, at, reason}`
+  решения ведущего или оператора.
+- **Шаг документации выпуска** (`forecast.progress.release.docs`, ревизия
+  10): есть всегда, когда `release.docs` не `off`; `mode`, `status`
+  (`no-works`, `missing`, `not-after-roots`, `pending`, `done`), `works`,
+  `missingRoots` (корни без работы документации — и при `missing`), `line`
+  на языке представления (`--lang`), в том числе для `done`.
+- **Справочник причин** (`works[].attempts.lastFailure`, ревизия 10):
+  `reference` — путь в пакете (`docs/failure-causes.md#kind-gate`),
+  `referenceUrl` — тот же документ в репозитории harness этой версии:
+  `<repository из package.json>/blob/v<версия>/docs/failure-causes.md#…`
+  (версия не вида `X.Y.Z…` — ветка `master`; нет `repository` — поля нет).
 
 ## Гарантии
 

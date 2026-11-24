@@ -11,32 +11,34 @@ import assert from 'node:assert/strict';
 import { digestOf, operatorViewSchema, type CallRecord } from '../src/contracts/index.ts';
 import { collectOperatorViewInput } from '../src/control/operator-view.ts';
 import { costBreakdown, costRoleOf } from '../src/projections/costs.ts';
+import { harnessDocsBase } from '../src/package.ts';
+import { releaseDocsLine } from '../src/control/release-docs.ts';
 import { operatorView } from '../src/projections/operator-view.ts';
 import { engineOf, graphOf, policyOf, ready, sha } from './engine-fixture.ts';
 
-const call = (over: Partial<CallRecord>): CallRecord =>
-  ({
-    id: Math.random().toString(16).slice(2),
-    stage: 'implementation',
-    runtime: 'claude',
-    model: 'claude-x',
-    runtimeVersion: null,
-    startedAt: '2026-11-24T10:00:00.000Z',
-    outcome: 'returned',
-    promptBytes: 1,
-    promptDigest: digestOf('p'),
-    usage: {
-      inputTokens: 1,
-      outputTokens: 1,
-      cacheReadTokens: 0,
-      cacheWriteTokens: 0,
-      complete: true,
-      source: 'claude-result',
-    },
-    costUsd: 1,
-    costSource: 'provider-reported',
-    ...over,
-  }) as CallRecord;
+const call = (over: Partial<CallRecord>): CallRecord => ({
+  id: Math.random().toString(16).slice(2),
+  stage: 'implementation',
+  runtime: 'claude',
+  model: 'claude-x',
+  runtimeVersion: null,
+  startedAt: '2026-11-24T10:00:00.000Z',
+  outcome: 'returned',
+  promptBytes: 1,
+  promptDigest: digestOf('p'),
+  usage: {
+    inputTokens: 1,
+    outputTokens: 1,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    reportedUsd: null,
+    complete: true,
+    source: 'claude-result',
+  },
+  costUsd: 1,
+  costSource: 'provider-reported',
+  ...over,
+});
 
 test('costBreakdown: по работам и попыткам, ролям, моделям; неизвестная цена — нижняя граница; выпуск — после release done', () => {
   assert.equal(costRoleOf('implementation'), 'writer');
@@ -69,13 +71,45 @@ test('costBreakdown: по работам и попыткам, ролям, мод
     ],
     { attemptOf: (r) => ({ r1: 1, r2: 2, r3: 1 })[r], releaseSince: '2026-11-24T11:00:00.000Z' },
   );
-  assert.deepEqual(c.total, { usd: 3.75, bound: 'lower', calls: 5 });
+  assert.deepEqual(c.total, { usd: 3.75, bound: 'lower', calls: 5, unpricedCalls: 1 });
   assert.deepEqual(c.release, {
     usd: 1,
     bound: 'lower',
     calls: 2,
+    unpricedCalls: 1,
+    sinceRelease: true,
     since: '2026-11-24T11:00:00.000Z',
   });
+  assert.equal(c.byModelTruncated, 0);
+  assert.equal(c.byWorkTruncated, 0);
+  // Выпуска ещё не было: явно sinceRelease: false, since нет.
+  const noRelease = costBreakdown([call({ workId: 'a', runId: 'r1' })]);
+  assert.deepEqual(noRelease.release, {
+    usd: 1,
+    bound: 'exact',
+    calls: 1,
+    unpricedCalls: 0,
+    sinceRelease: false,
+  });
+  // Пределы списков: опущенное — счётчиками; у работы — последние попытки.
+  const many = costBreakdown(
+    [
+      call({ workId: 'a', runId: 'r1', model: 'm1' }),
+      call({ workId: 'a', runId: 'r2', model: 'm2' }),
+      call({ workId: 'a', runId: 'r3', model: 'm3' }),
+      call({ workId: 'b', runId: 'r4', model: 'm1' }),
+    ],
+    { limits: { models: 2, works: 1, attempts: 2 } },
+  );
+  assert.equal(many.byModel.length, 2);
+  assert.equal(many.byModelTruncated, 1);
+  assert.equal(many.byWork.length, 1);
+  assert.equal(many.byWorkTruncated, 1);
+  assert.deepEqual(
+    many.byWork[0]!.attempts.map((x) => x.runId),
+    ['r2', 'r3'],
+  );
+  assert.equal(many.byWork[0]!.attemptsTruncated, 1);
   assert.deepEqual(
     c.byRole.map((r) => [r.role, r.usd, r.calls]),
     [
@@ -92,7 +126,7 @@ test('costBreakdown: по работам и попыткам, ролям, мод
     ],
   );
   const a = c.byWork.find((w) => w.workId === 'a')!;
-  assert.deepEqual([a.usd, a.bound, a.calls], [2.5, 'lower', 3]);
+  assert.deepEqual([a.usd, a.bound, a.calls, a.unpricedCalls], [2.5, 'lower', 3, 1]);
   assert.deepEqual(
     a.attempts.map((x) => [x.runId, x.attempt, x.usd, x.bound]),
     [
@@ -146,21 +180,37 @@ test('view: второй проход и предложения у работы,
           }
         : {}),
     });
-  const view = operatorViewSchema.parse(
-    operatorView(
-      collectOperatorViewInput(
-        {
-          engine,
-          policy: engine.policy,
-          workflows: { list: () => [], continues: () => false } as never,
-          stateDir: dir,
-          baseDir: dir,
-        },
-        { raw: engine.policy, warnings: [], baseDir: dir },
-        { now: engine.clock(), lang: 'ru' },
+  const [proposal] = engine.read((v) => v.work('w1')!.proposals ?? []);
+  engine.decideProposal('w1', proposal!.id, {
+    decision: 'accept',
+    by: 'lead',
+    reason: 'Вносим в следующий план',
+  });
+  engine.beginCall(call({ id: 'c-1', workId: 'w1', runId: run.id, costUsd: 0.5 }), {
+    runId: run.id,
+    stage: 'implementation',
+  });
+  engine.beginCall(call({ id: 'c-2', workId: 'w1', runId: run.id, costUsd: null }), {
+    runId: run.id,
+    stage: 'implementation',
+  });
+  const viewIn = (lang: 'ru' | 'en') =>
+    operatorViewSchema.parse(
+      operatorView(
+        collectOperatorViewInput(
+          {
+            engine,
+            policy: engine.policy,
+            workflows: { list: () => [], continues: () => false } as never,
+            stateDir: dir,
+            baseDir: dir,
+          },
+          { raw: engine.policy, warnings: [], baseDir: dir },
+          { now: engine.clock(), lang },
+        ),
       ),
-    ),
-  );
+    );
+  const view = viewIn('ru');
   assert.equal(view.viewRevision, 10);
   const w = view.works.find((x) => x.id === 'w1')!;
   assert.deepEqual(w.attemptReviews?.[0]?.secondPass, {
@@ -169,12 +219,80 @@ test('view: второй проход и предложения у работы,
     refuted: 1,
     missed: 0,
     overturned: true,
+    refutedFindings: [{ finding: 'ложная', basis: 'обработано в строке 3' }],
   });
   assert.equal(w.proposals?.length, 1);
-  assert.equal(w.proposals?.[0]?.kind, 'follow-up');
-  assert.equal(w.proposals?.[0]?.status, 'proposed');
+  const p = w.proposals?.[0];
+  assert.equal(p?.kind, 'follow-up');
+  assert.equal(p?.status, 'accepted');
+  assert.equal(p?.title, 'Локализация');
+  assert.equal(p?.goal, 'Строки в словарь локалей');
+  assert.equal(p?.reason, 'вне критериев');
+  assert.equal(p?.decision?.by, 'lead');
+  assert.equal(p?.decision?.reason, 'Вносим в следующий план');
+  assert.deepEqual(
+    {
+      usd: w.cost?.usd,
+      bound: w.cost?.bound,
+      calls: w.cost?.calls,
+      unpricedCalls: w.cost?.unpricedCalls,
+      attempts: w.cost?.byAttempt.map((a) => [a.attempt, a.calls]),
+      truncated: w.cost?.byAttemptTruncated,
+    },
+    { usd: 0.5, bound: 'lower', calls: 2, unpricedCalls: 1, attempts: [[1, 2]], truncated: 0 },
+  );
+  assert.equal(view.costs?.release.sinceRelease, false);
+  assert.equal(view.costs?.byWorkTruncated, 0);
   const docs = view.forecast?.progress.release?.docs;
   assert.equal(docs?.mode, 'advisory');
   assert.equal(docs?.status, 'missing');
+  assert.deepEqual(docs?.missingRoots, ['w1']);
   assert.match(docs?.line ?? '', /нет работы с меткой docs/);
+  assert.match(
+    viewIn('en').forecast?.progress.release?.docs?.line ?? '',
+    /no work labelled docs after the root works \(w1\)/,
+  );
+});
+
+test('lastFailure.referenceUrl — адрес документа этой версии; шаг документации принят — строка done', () => {
+  assert.equal(
+    harnessDocsBase('0.1.0-alpha.70', 'https://github.com/o/r'),
+    'https://github.com/o/r/blob/v0.1.0-alpha.70/',
+  );
+  assert.equal(
+    harnessDocsBase('dev', 'https://github.com/o/r'),
+    'https://github.com/o/r/blob/master/',
+  );
+  assert.equal(harnessDocsBase('0.1.0', ''), undefined);
+  assert.match(
+    harnessDocsBase() ?? '',
+    /^https:\/\/github\.com\/[^/]+\/devcontour-harness\/blob\/v\d/,
+  );
+  const env = engineOf(policyOf((p) => delete p.harnessMode));
+  ready(env.engine, graphOf({ w1: [] }));
+  env.engine.lead('c1');
+  const run = env.engine.claim('c1')!;
+  env.engine.fail(run.id, run.token, 'gate unit упал', { kind: 'gate' });
+  const view = operatorViewSchema.parse(
+    operatorView(
+      collectOperatorViewInput(
+        {
+          engine: env.engine,
+          policy: env.engine.policy,
+          workflows: { list: () => [], continues: () => false } as never,
+          stateDir: env.dir,
+          baseDir: env.dir,
+        },
+        { raw: env.engine.policy, warnings: [], baseDir: env.dir },
+        { now: env.engine.clock(), lang: 'ru' },
+      ),
+    ),
+  );
+  const last = view.works[0]!.attempts.lastFailure;
+  assert.equal(last?.reference, 'docs/failure-causes.md#kind-gate');
+  assert.equal(last?.referenceUrl, harnessDocsBase()! + 'docs/failure-causes.md#kind-gate');
+  assert.equal(
+    releaseDocsLine({ mode: 'advisory', status: 'done', roots: ['a'], works: ['docs'] }, 'en'),
+    'Release documentation step: docs work docs accepted',
+  );
 });

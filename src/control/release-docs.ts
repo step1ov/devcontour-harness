@@ -47,7 +47,7 @@ export function releaseDocsState(
   const base = { mode, roots, works: docs.map((w) => w.id).sort() };
   if (mode === 'off') return { ...base, status: 'off' };
   if (!product.length) return { ...base, status: 'no-works' };
-  if (!docs.length) return { ...base, status: 'missing' };
+  if (!docs.length) return { ...base, status: 'missing', missingRoots: roots };
   const byId = new Map(works.map((w) => [w.id, w]));
   const closure = (w: WorkState) => {
     const seen = new Set<string>();
@@ -72,15 +72,34 @@ export function releaseDocsState(
   return { ...base, status: after.some((s) => s.w.status === 'done') ? 'done' : 'pending' };
 }
 
-/** Строка для людей: чего не хватает шагу документации. */
-export function releaseDocsLine(state: ReleaseDocsState): string | undefined {
+/** Шаг документации не выполнен: работы нет, она не после корней или не принята. */
+export const releaseDocsOpen = (state: ReleaseDocsState) =>
+  state.status === 'missing' || state.status === 'not-after-roots' || state.status === 'pending';
+
+/** Строка для людей на языке представления; нет — шага нет (`off`) или работ нет. */
+export function releaseDocsLine(
+  state: ReleaseDocsState,
+  lang: 'ru' | 'en' = 'ru',
+): string | undefined {
+  const en = lang === 'en';
+  const list = (ids: readonly string[] | undefined) => (ids ?? []).join(', ');
   switch (state.status) {
     case 'missing':
-      return `Шаг документации выпуска: нет работы с меткой docs после корневых работ (${state.roots.join(', ')})`;
+      return en
+        ? `Release documentation step: no work labelled docs after the root works (${list(state.roots)})`
+        : `Шаг документации выпуска: нет работы с меткой docs после корневых работ (${list(state.roots)})`;
     case 'not-after-roots':
-      return `Шаг документации выпуска: работа документации не зависит от корневых работ ${state.missingRoots?.join(', ') ?? ''}`;
+      return en
+        ? `Release documentation step: the docs work does not depend on root works ${list(state.missingRoots)}`
+        : `Шаг документации выпуска: работа документации не зависит от корневых работ ${list(state.missingRoots)}`;
     case 'pending':
-      return `Шаг документации выпуска: работа документации ${state.works.join(', ')} ещё не принята`;
+      return en
+        ? `Release documentation step: docs work ${list(state.works)} is not accepted yet`
+        : `Шаг документации выпуска: работа документации ${list(state.works)} ещё не принята`;
+    case 'done':
+      return en
+        ? `Release documentation step: docs work ${list(state.works)} accepted`
+        : `Шаг документации выпуска: работа документации ${list(state.works)} принята`;
     default:
       return undefined;
   }
