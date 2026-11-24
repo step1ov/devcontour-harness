@@ -1,3 +1,4 @@
+import { failureRefOf } from '../contracts/failure-catalog.ts';
 import { RU, ruCount } from '../contracts/plural.ts';
 import { errorCodes, type ErrorCode } from '../contracts/errors.ts';
 import {
@@ -329,6 +330,8 @@ export interface StopDiagnosis {
   evidence: EvidenceLink[];
   workId?: string;
   runId?: string;
+  /** Справочник причин отказов (alpha.70): `docs/failure-causes.md#…`. */
+  reference?: string;
 }
 
 /** Кто ответил на вопрос исполнителя — словами сообщения. */
@@ -1198,5 +1201,18 @@ export function explainStop(input: StopInput): StopDiagnosis {
     evidence: (input.evidence ?? []).slice(-20).map((e) => ({ ...e })),
     workId: input.work.id,
     ...(input.runId ? { runId: input.runId } : {}),
+    // Справочник причин (alpha.70): только у отказа работы.
+    ...((ref) => (ref ? { reference: ref } : {}))(
+      input.work.status === 'failed' && input.work.failureKind
+        ? failureRefOf(
+            input.work.failureKind,
+            input.work.writerSplit
+              ? 'writer-split'
+              : input.work.writerBlocked
+                ? 'writer-environment'
+                : (input.work.environmentCause ?? input.work.gateHold?.cause),
+          )
+        : undefined,
+    ),
   };
 }

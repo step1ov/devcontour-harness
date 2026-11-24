@@ -2,6 +2,7 @@
 // node:* и без zod — его импортирует браузер; схема ответа —
 // `valueReportSchema` (src/contracts/report.ts).
 
+import { failureRefOf } from '../contracts/failure-catalog.ts';
 import { attemptLine, type AttemptLineFacts } from '../contracts/attempt-line.ts';
 import { HarnessError } from '../contracts/errors.ts';
 import type {
@@ -336,6 +337,8 @@ export interface LastFailure {
   at?: string;
   plain: string;
   plainEn: string;
+  /** Справочник причин (alpha.70): `docs/failure-causes.md#…`. */
+  reference?: string;
 }
 
 /**
@@ -382,6 +385,16 @@ function lastFailureView(a: AttemptState, bucket: FailureBucket): LastFailure {
     ...(a.finishedAt ? { at: a.finishedAt } : {}),
     plain: p.ru,
     plainEn: p.en,
+    ...((ref) => (ref ? { reference: ref } : {}))(
+      failureRefOf(
+        a.failureKind,
+        a.writerSplit
+          ? 'writer-split'
+          : a.writerBlocked
+            ? 'writer-environment'
+            : a.environmentCause,
+      ),
+    ),
   };
 }
 

@@ -39,3 +39,4 @@ export * from './view-resources.ts';
 export * from './preview.ts';
 export * from './review-passes.ts';
 export * from './proposals.ts';
+export * from './failure-catalog.ts';

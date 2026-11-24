@@ -79,4 +79,9 @@ export const stopDiagnosisSchema = z.strictObject({
     .max(20),
   workId: z.string().optional(),
   runId: z.string().optional(),
+  /**
+   * Справочник причин отказов (0.1.0-alpha.70): `docs/failure-causes.md#…`
+   * — что значит отказ, кто действует, типичные исправления.
+   */
+  reference: z.string().max(200).optional(),
 });

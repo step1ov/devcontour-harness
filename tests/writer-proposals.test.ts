@@ -147,6 +147,7 @@ test('разбор в начале попытки: разделение — ве
   assert.equal(d.actor, 'lead');
   assert.match(JSON.stringify(d), /предложил разделить работу/);
   assert.match(JSON.stringify(d), new RegExp(split.id));
+  assert.equal(d.reference, 'docs/failure-causes.md#cause-writer-split');
   const diagnosed = h
     .events(0, 500)
     .events.find((e) => e.type === 'attempt.diagnosed') as unknown as {
