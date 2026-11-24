@@ -34,14 +34,15 @@ const env = {
   GIT_COMMITTER_EMAIL: 't@t',
 };
 
-function attemptTree() {
+function attemptTree(branch?: string) {
   const r = repo({ 'README.md': 'app\n', 'src/a.js': 'a\n' });
   // Ветка владельца и запись в его stash — до дерева попытки.
   r.git('branch', 'other');
   execFileSync('sh', ['-c', 'echo owner > README.md'], { cwd: r.dir });
   r.git('stash', 'push', '-q', '-m', 'owner-stash');
   const tree = join(realpathSync(mkdtempSync(join(tmpdir(), 'attempt-tree-'))), 'w');
-  r.git('worktree', 'add', '-q', '--detach', tree);
+  if (branch) r.git('worktree', 'add', '-q', '-b', branch, tree);
+  else r.git('worktree', 'add', '-q', '--detach', tree);
   return { r, tree };
 }
 
@@ -55,6 +56,13 @@ test('каталог git дерева попытки: открыт только 
   const common = realpathSync(join(r.dir, '.git'));
   const guard = gitWorktreeGuard(tree, {})!;
   assert.deepEqual(guard.entries, [{ subpath: join(common, 'worktrees', 'w') }]);
+  const own = attemptTree('harness/run-a1');
+  const ownCommon = realpathSync(join(own.r.dir, '.git'));
+  assert.deepEqual(gitWorktreeGuard(own.tree, {})!.entries, [
+    { subpath: join(ownCommon, 'worktrees', 'w') },
+    { prefix: join(ownCommon, 'refs', 'heads', 'harness', 'run-a1') },
+    { prefix: join(ownCommon, 'logs', 'refs', 'heads', 'harness', 'run-a1') },
+  ]);
   assert.equal(guard.env.GIT_OBJECT_DIRECTORY, join(common, 'worktrees', 'w', 'hx-objects'));
   assert.equal(guard.env.GIT_ALTERNATE_OBJECT_DIRECTORIES, join(common, 'objects'));
   assert.equal(guard.env.GIT_CONFIG_KEY_0, 'gc.auto');
@@ -68,7 +76,8 @@ test(
   'gate под границей: add/commit/checkout/diff в дереве попытки работают; ветки, общие объекты и stash владельца закрыты',
   { skip: !supported },
   async () => {
-    const { r, tree } = attemptTree();
+    // Как у настоящей попытки: дерево на своей ветке harness/run-<id>.
+    const { r, tree } = attemptTree('harness/run-a1');
     const common = realpathSync(join(r.dir, '.git'));
     r.git('repack', '-adq');
     const before = { packs: packs(common), other: r.git('rev-parse', 'other') };
@@ -80,7 +89,9 @@ test(
       'git diff --exit-code',
       'echo b > src/b.js',
       'git add -A',
-      'git commit -qm gate',
+      // На Linux коммит в ветку попытки отказывает (bubblewrap — только
+      // существующие файлы, git пишет .lock рядом): docs/light-mode.md.
+      process.platform === 'darwin' ? 'git commit -qm gate' : 'git commit -qm gate || git reset -q',
       'git diff --exit-code',
       `( echo hacked > ${main} ) 2>/dev/null && echo main=open || echo main=denied`,
       `( echo x >> ${join(common, 'config')} ) 2>/dev/null && echo config=open || echo config=denied`,
@@ -122,17 +133,11 @@ test(
     assert.equal(r.git('rev-parse', 'other'), before.other, 'ветка владельца на месте');
     assert.match(r.git('stash', 'list'), /owner-stash/, 'stash владельца на месте');
     assert.deepEqual(packs(common), before.packs, 'паки владельца не перепакованы');
-    // Коммит gate перенесён в общее хранилище: обычный git его читает.
-    const head = execFileSync('git', ['-C', tree, 'log', '-1', '--format=%s'], {
-      encoding: 'utf8',
-    }).trim();
-    assert.equal(head, 'gate');
-    execFileSync('git', [
-      '-C',
-      r.dir,
-      'cat-file',
-      '-e',
-      `${execFileSync('git', ['-C', tree, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim()}^{tree}`,
-    ]);
+    if (process.platform === 'darwin') {
+      // Коммит gate перенесён в общее хранилище: обычный git его читает; своя
+      // ветка попытки сдвинута.
+      assert.equal(r.git('log', '-1', '--format=%s', 'harness/run-a1'), 'gate');
+      r.git('cat-file', '-e', `${r.git('rev-parse', 'harness/run-a1')}^{tree}`);
+    }
   },
 );

@@ -195,11 +195,14 @@ const gitOut = (cwd: string, args: string[]) =>
 /**
  * Метаданные git рабочего дерева попытки (0.1.0-alpha.70, P8-1; ревью 1).
  * Gate или исполнитель с `git add`, `git commit`, `git checkout -- .`
- * пишет не только в файлы дерева. Открыт на запись только каталог git
- * связанного (detached) дерева попытки — `<common>/worktrees/<имя>`: index,
- * `index.lock`, HEAD, журналы. Общий каталог репозитория закрыт целиком:
- * ни `objects` (паки владельца не перепаковать и не удалить), ни ссылки
- * веток, ни stash владельца. Новые объекты процесс пишет в своё хранилище
+ * пишет не только в файлы дерева. Открыт на запись каталог git связанного
+ * дерева попытки — `<common>/worktrees/<имя>`: index, `index.lock`, HEAD,
+ * журналы — и ссылка его собственной ветки (`refs/heads/harness/run-<id>`
+ * и её журнал, точными путями с `.lock`; на Linux bubblewrap открывает
+ * только существующие файлы, и коммит в ветку там отказывает — git пишет
+ * `.lock` рядом). Общий каталог репозитория в остальном закрыт: ни
+ * `objects` (паки владельца не перепаковать и не удалить), ни другие
+ * ссылки, ни stash владельца. Новые объекты процесс пишет в своё хранилище
  * попытки (`<gitdir>/hx-objects`, `GIT_OBJECT_DIRECTORY`), общее — только
  * чтение (`GIT_ALTERNATE_OBJECT_DIRECTORIES`); автосборка мусора выключена
  * (`gc.auto=0`, `maintenance.auto=false`). После процесса controller
@@ -229,6 +232,14 @@ export function gitWorktreeGuard(
     return undefined;
   }
   if (gitDir === common) return undefined;
+  // Своя ветка дерева попытки (`harness/run-<попытка>`): только её ссылка и
+  // журнал — точными путями (с `.lock`), не каталоги ссылок.
+  let branch: string | undefined;
+  try {
+    branch = gitOut(cwd, ['symbolic-ref', '-q', 'HEAD']) || undefined;
+  } catch {
+    branch = undefined;
+  }
   const own = join(gitDir, 'hx-objects');
   const shared = join(common, 'objects');
   mkdirSync(join(own, 'pack'), { recursive: true });
@@ -236,7 +247,12 @@ export function gitWorktreeGuard(
   // Пары конфигурации git через окружение — к уже заданным процессу.
   const count = Number(env.GIT_CONFIG_COUNT ?? 0) || 0;
   return {
-    entries: [{ subpath: gitDir }],
+    entries: [
+      { subpath: gitDir },
+      ...(branch?.startsWith('refs/heads/')
+        ? [{ prefix: join(common, branch) }, { prefix: join(common, 'logs', branch) }]
+        : []),
+    ],
     env: {
       GIT_OBJECT_DIRECTORY: own,
       GIT_ALTERNATE_OBJECT_DIRECTORIES: shared,
