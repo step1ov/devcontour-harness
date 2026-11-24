@@ -5,6 +5,7 @@ import {
   API_VERSION,
   codeReview,
   HarnessError,
+  harnessModeOf,
   STATE_VERSION,
   inputPolicyOf,
   leadAnswersRule,
@@ -341,6 +342,8 @@ export async function doctor(
   // панели; необычное сочетание — предупреждение, шлюз не до исчерпания — заметка.
   const decisions = policy ? decisionSettingsView(policy) : undefined;
   if (decisions?.warning) warnings.push(decisions.warning.ru);
+  const noBudget = policy ? lightBudgetWarning(policy) : undefined;
+  if (noBudget) warnings.push(noBudget);
   if (policy) {
     const r = recoveryPolicyOf(policy);
     if (r.enabled && r.diagnoseAfter >= policy.maxAttempts)
@@ -447,6 +450,20 @@ function questionRule(policy: ExecutionPolicy) {
 }
 
 /** Назначение политики: кто (writer роли, reviewer вида ревью), каким runtime, моделью и effort. */
+/**
+ * Облегчённый режим без бюджета выпуска (0.1.0-alpha.69): раунды ревью плана
+ * в нём не считают, и единственный предел выпуска — время и стоимость
+ * (`budgets.group` — группа хоста или граф, `budgets.total`). Нет ни одного —
+ * одна строка с советом; умолчания harness не подставляет.
+ */
+export function lightBudgetWarning(
+  policy: Pick<ExecutionPolicy, 'harnessMode' | 'budgets'>,
+): string | undefined {
+  if (harnessModeOf(policy) !== 'light' || policy.budgets?.group || policy.budgets?.total)
+    return undefined;
+  return 'light-no-budget: облегчённый режим без бюджета выпуска — раунды ревью плана не ограничены, время и стоимость тоже; задайте budgets.group (timeMs и/или usd): исчерпание остановит работу решением владельца (BUDGET_EXHAUSTED)';
+}
+
 export interface PolicyModel {
   /** `writer <роль>`, `code-review <роль>`, `plan-review`, `contract-review`; репозиторий — в скобках. */
   use: string;
