@@ -9,6 +9,7 @@ import {
   roleIdSchema,
   trimmedText,
   gateScopeSchema,
+  workLabelSchema,
 } from './primitives.ts';
 import { digestOf } from './digest.ts';
 import type { CodedIssue } from './errors.ts';
@@ -41,6 +42,21 @@ export const requirementSchema = z.strictObject({
   /** testcase отчёта, который проверяет сценарий (`classname.name` в JUnit). */
   testId: z.string().min(1).max(300).optional(),
 });
+
+/**
+ * Источник критерия приёмки (0.1.0-alpha.70, правило «ведущий не добавляет
+ * требований без источника»): `brief` — постановка (задача источника, её
+ * раздел), `owner-answer` — ответ владельца (ID запроса), `review-finding` —
+ * находка ревью (ID находки), `context` — закреплённый документ. `ref` —
+ * где именно; `criterion` — номер критерия в `acceptance` (с 0).
+ */
+export const criterionSourceKinds = ['brief', 'owner-answer', 'review-finding', 'context'] as const;
+export const criterionSourceSchema = z.strictObject({
+  criterion: z.number().int().min(0).max(29),
+  kind: z.enum(criterionSourceKinds),
+  ref: z.string().trim().min(1).max(300),
+});
+export type CriterionSource = z.infer<typeof criterionSourceSchema>;
 
 /** Ссылка на закреплённый контракт: исполнение идёт против этого digest. */
 export const contractRefSchema = z.strictObject({ id: idSchema, digest: digestSchema });
@@ -104,6 +120,19 @@ export const workOrderSchema = z.strictObject({
    * определения gate согласует ревью плана, а не ревью кода.
    */
   gateChanges: z.array(relativePathSchema).min(1).max(50).optional(),
+  /**
+   * Метки работы (0.1.0-alpha.70): `security`, `payments`, `auth` включают
+   * второй проход ревью на каждом раунде; `docs` — работа документации
+   * выпуска. Необязательное поле без умолчания: digest прежних поручений тот же.
+   */
+  labels: z.array(workLabelSchema).min(1).max(10).optional(),
+  /**
+   * Источники критериев, которые написал ведущий (0.1.0-alpha.70,
+   * `criterionSourceSchema`): по номеру критерия `acceptance` — постановка,
+   * ответ владельца или находка ревью. Ревью плана помечает критерий без
+   * источника. Нет поля — поручение прежней версии.
+   */
+  criteriaSources: z.array(criterionSourceSchema).max(30).optional(),
 });
 export type WorkOrder = z.infer<typeof workOrderSchema>;
 export type WorkOrderInput = z.input<typeof workOrderSchema>;

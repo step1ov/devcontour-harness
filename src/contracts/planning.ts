@@ -7,8 +7,14 @@ import {
   relativePathPattern,
   roleIdSchema,
   gateScopeSchema,
+  workLabelSchema,
 } from './primitives.ts';
-import { consumerSchema, propertyIdSchema, workGraphSchema } from './work.ts';
+import {
+  consumerSchema,
+  criterionSourceSchema,
+  propertyIdSchema,
+  workGraphSchema,
+} from './work.ts';
 import { workKindSchema } from './infra.ts';
 
 /**
@@ -115,6 +121,10 @@ export const planDraftSchema = planDraft({
   kind: workKindSchema.optional(),
   /** Только `infra`: файлы gates доверенной базы, которые работа меняет. */
   gateChanges: z.array(draftPathSchema).min(1).max(50).optional(),
+  /** Метки работы (alpha.70): security/payments/auth — второй проход ревью всегда; docs — документация выпуска. */
+  labels: z.array(workLabelSchema).min(1).max(10).optional(),
+  /** Источник каждого критерия, который написал ведущий (alpha.70): постановка, ответ владельца, находка ревью. */
+  criteriaSources: z.array(criterionSourceSchema).max(30).optional(),
 });
 export type PlanDraft = z.output<ReturnType<typeof planDraft<Record<never, never>>>>;
 export type StandalonePlanDraft = z.output<typeof planDraftSchema>;

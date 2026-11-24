@@ -248,3 +248,48 @@ export const technicalReviewOutputSchema = {
     },
   },
 };
+
+/**
+ * Ответ второго прохода ревью (0.1.0-alpha.70, `refuteResultSchema`):
+ * вердикт по каждой блокирующей находке первого прохода и пропущенные
+ * блокирующие находки (только режим `always`). Свойства `approved` нет:
+ * второй проход не выносит вердикт сам — его выводит controller.
+ */
+export const refuteOutputSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    summary: { type: 'string' },
+    verdicts: {
+      type: 'array',
+      maxItems: REVIEW_ITEMS_LIMIT,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          index: { type: 'integer', minimum: 0 },
+          verdict: { type: 'string', enum: ['confirmed', 'refuted'] },
+          basis: { type: 'string', pattern: FINDING_BASIS_PATTERN },
+        },
+        required: ['index', 'verdict', 'basis'],
+      },
+    },
+    missed: {
+      type: 'array',
+      maxItems: 50,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          message: { type: 'string' },
+          path: { type: ['string', 'null'] },
+          line: { type: ['integer', 'null'], minimum: 1 },
+          rule: { type: ['string', 'null'] },
+          evidence: { type: ['string', 'null'] },
+        },
+        required: ['message', 'path', 'line', 'rule', 'evidence'],
+      },
+    },
+  },
+  required: ['summary', 'verdicts', 'missed'],
+};

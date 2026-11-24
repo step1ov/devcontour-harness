@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { reviewPassesRecordSchema } from './review-passes.ts';
 import {
   authorSchema,
   digestSchema,
@@ -88,6 +89,8 @@ export const codeReviewRecordSchema = z.strictObject({
   reviewerBinding: digestSchema,
   /** Итог `harness gates --sha` на head, если он есть в каталоге состояния. */
   gates: codeReviewGatesSchema.optional(),
+  /** Второй проход (0.1.0-alpha.70; приёмка выпуска — умолчание `always`). */
+  passes: reviewPassesRecordSchema.optional(),
   findings: z.array(reviewFindingSchema),
   artifact: z.string().max(1000),
 });

@@ -59,6 +59,13 @@ import {
   gateDigest,
   harnessModeOf,
   writeGuardActive,
+  blockingOf,
+  mergePasses,
+  needsSecondPass,
+  refutePromptText,
+  refuteResultSchema,
+  reviewPassModeOf,
+  type ReviewPassesRecord,
 } from '../contracts/index.ts';
 import { changedFacts, resolvedHostFiles } from './infra-guard.ts';
 import { git, hostGitArgs } from '../environment/process.ts';
@@ -113,6 +120,7 @@ import {
   alreadySatisfiedReviewOutputSchema,
   implementationOutputSchema,
   reviewOutputSchema,
+  refuteOutputSchema,
 } from '../agents/schemas.ts';
 import { reviewInspection } from '../agents/inspect.ts';
 import { reviewerRunsChecks } from '../agents/cli-adapter.ts';
@@ -877,6 +885,8 @@ export class Runner {
       timeoutMs?: number;
       /** Схема ответа вместо обычной для задачи вызова. */
       outputSchema?: Record<string, unknown>;
+      /** Стадия учёта вызова вместо обычной (второй проход ревью — своя). */
+      stage?: string;
     },
     signal: AbortSignal,
   ): Promise<RuntimeResponse & { redact: Redactor; unreadable?: string; callId: string }> {
@@ -985,7 +995,7 @@ export class Runner {
       {
         repositoryId: input.attempt.repositoryId,
         runId: input.attempt.id,
-        stage: review ? input.phase + '-review' : 'implementation',
+        stage: input.stage ?? (review ? input.phase + '-review' : 'implementation'),
       },
     ).finally(() =>
       // Временные файлы исполнителя — не артефакт попытки: каталог свой, создан выше.
@@ -3524,6 +3534,156 @@ export class Runner {
     return spent;
   }
 
+  /**
+   * Второй проход ревью кода (alpha.70, docs/review-protocol.md «Два
+   * прохода»): по режиму `review.passes` свежий вызов того же reviewer
+   * пытается опровергнуть каждую блокирующую находку первого прохода
+   * (`always` — и ищет пропущенные). Итог сливается и проверяется тем же
+   * `checkCodeReview`, что первый проход; любой отказ второго вызова —
+   * `failed`, и действует вердикт первого прохода (находки остаются).
+   */
+  private async secondPass(input: {
+    attempt: AttemptState;
+    work: WorkState;
+    cwd: string;
+    base: string;
+    sha: string;
+    phase: EvidenceRecord['phase'];
+    dir: string;
+    diff: string;
+    context?: ContextSnapshot;
+    gates: GatePolicy[];
+    history: CodeReviewHistory;
+    verdict: Extract<CodeReviewVerdict, { valid: true }>;
+    signal: AbortSignal;
+    remaining: number;
+  }): Promise<{ record?: ReviewPassesRecord; verdict?: CodeReviewVerdict; dirty?: boolean }> {
+    const { attempt, work, verdict } = input;
+    const choice = reviewPassModeOf(this.policy.review.passes, {
+      kind: 'code',
+      labels: work.order.labels,
+    });
+    const first = verdict.result;
+    const blocking = blockingOf(first.findings);
+    const base = {
+      mode: choice.mode,
+      source: choice.source,
+      ...(choice.sensitive ? { sensitive: choice.sensitive } : {}),
+      first: blocking.length,
+      confirmed: blocking.length,
+      refuted: [],
+      missed: 0,
+      overturned: false,
+    } satisfies Omit<ReviewPassesRecord, 'status'>;
+    if (!needsSecondPass(choice.mode, { approved: first.approved, blocking: blocking.length }))
+      return choice.mode === 'off' ? {} : { record: { ...base, status: 'skipped' } };
+    if (input.remaining < 1000)
+      return { record: { ...base, status: 'failed', reason: 'исчерпан срок логического ревью' } };
+    const dir = join(input.dir, 'refute');
+    await mkdir(dir, { recursive: true });
+    const status = await git(input.cwd, 'status', '--porcelain', '--untracked-files=all');
+    let response: Awaited<ReturnType<Runner['call']>>;
+    try {
+      response = await this.call(
+        this.adapter(attempt.reviewer),
+        {
+          task: 'review-code',
+          attempt,
+          cwd: input.cwd,
+          dir,
+          phase: input.phase,
+          stage: input.phase + '-review-refute',
+          prompt:
+            prompt({
+              work,
+              attempt: { ...attempt, baseSha: input.base },
+              history: this.history(attempt),
+              context: input.context,
+              gates: input.gates.map((g) => ({ id: g.id, command: g.command })),
+              review: { sha: input.sha, phase: input.phase, diff: input.diff },
+              notes: this.notes(attempt, true, input.sha),
+            }) +
+            '\n\n' +
+            refutePromptText(blocking, choice.mode),
+          outputSchema: refuteOutputSchema,
+          timeoutMs: input.remaining,
+        },
+        input.signal,
+      );
+    } catch (error) {
+      // Отмена и утрата владения — не итог второго прохода.
+      if (input.signal.aborted || error instanceof HarnessError) throw error;
+      return {
+        record: {
+          ...base,
+          status: 'failed',
+          reason: (error instanceof Error ? error.message : String(error)).slice(0, 1000),
+        },
+      };
+    }
+    const dirty =
+      (await git(input.cwd, 'status', '--porcelain', '--untracked-files=all')) !== status ||
+      (await git(input.cwd, 'rev-parse', 'HEAD')) !== input.sha;
+    const log = join(dir, 'refute.json');
+    await writeFile(
+      log,
+      JSON.stringify(redactDeep({ output: response.output ?? null }, response.redact), null, 2),
+      { flag: 'wx' },
+    );
+    if (dirty)
+      return {
+        record: { ...base, status: 'failed', reason: 'reviewer изменил дерево', log },
+        dirty,
+      };
+    const parsed = refuteResultSchema.safeParse(response.output);
+    if (!parsed.success)
+      return {
+        record: {
+          ...base,
+          status: 'failed',
+          reason: 'ответ второго прохода вне схемы: ' + (parsed.error.issues[0]?.message ?? ''),
+          log,
+        },
+      };
+    const reopened = verdict.transitions.some(
+      (t) =>
+        t.to === 'open' &&
+        input.history.findings.find((f) => f.id === t.id)?.severity === 'blocking',
+    );
+    const merged = mergePasses(
+      { approved: first.approved, findings: first.findings, reopened },
+      parsed.data,
+      choice.mode,
+    );
+    const next = checkCodeReview(
+      { ...first, approved: merged.approved, findings: merged.findings },
+      input.history,
+      { runId: attempt.id, phase: input.phase, sha: input.sha },
+      { redact: response.redact },
+    );
+    if (!next.valid)
+      return {
+        record: {
+          ...base,
+          status: 'failed',
+          reason: 'слитый вердикт не прошёл протокол ревью: ' + protocolText(next.issues),
+          log,
+        },
+      };
+    return {
+      verdict: next,
+      record: {
+        ...base,
+        status: 'ran',
+        confirmed: merged.confirmed,
+        refuted: merged.refuted,
+        missed: merged.missed,
+        overturned: !first.approved && merged.approved,
+        log,
+      },
+    };
+  }
+
   private async reviewOnce(
     attempt: AttemptState,
     work: WorkState,
@@ -3681,11 +3841,11 @@ export class Runner {
       // Reviewer не меняет закреплённые зависимости, как и своё дерево.
       await assertDependencies(attempt.dependencies ?? []);
       const redact = response.redact;
-      const clean =
+      let clean =
         (await git(cwd, 'status', '--porcelain', '--untracked-files=all')) === status &&
         !(await git(cwd, 'status', '--porcelain', '--untracked-files=no')) &&
         (await git(cwd, 'rev-parse', 'HEAD')) === sha;
-      const verdict: CodeReviewVerdict = response.unreadable
+      let verdict: CodeReviewVerdict = response.unreadable
         ? {
             valid: false,
             issues: [
@@ -3702,6 +3862,30 @@ export class Runner {
             { runId: attempt.id, phase, sha },
             { legacy, redact: response.redact },
           );
+      // Второй проход (alpha.70): опровержение блокирующих находок первого
+      // прохода свежим вызовом reviewer; итог — слитый вердикт той же формы.
+      let passes: ReviewPassesRecord | undefined;
+      if (verdict.valid && clean && !unchanged && !legacy) {
+        const second = await this.secondPass({
+          attempt,
+          work,
+          cwd,
+          base,
+          sha,
+          phase,
+          dir: callDir,
+          diff,
+          context,
+          gates,
+          history,
+          verdict,
+          signal,
+          remaining: deadline - Date.now(),
+        });
+        passes = second.record;
+        if (second.verdict) verdict = second.verdict;
+        if (second.dirty) clean = false;
+      }
       const result = verdict.result;
       // Проверки reviewer — по журналу controller, а не по самоотчёту модели.
       const journal = probe ? await readProbeJournal(probe.log) : undefined;
@@ -3742,6 +3926,7 @@ export class Runner {
           // Ответ вне схемы сохраняется как есть (замаскированным) для разбора.
           ...(result ? {} : { raw: response.output ?? null }),
           ...(probes ? { probes } : {}),
+          ...(passes ? { passes } : {}),
         },
         redact,
       );
@@ -3880,8 +4065,10 @@ export class Runner {
         summary: redact(
           `[${inspection.mode}] ${record.summary}` +
             (unconfirmed ? ` (не подтверждено, что приёмка уже выполнена: ${unconfirmed})` : '') +
-            lateText,
+            lateText +
+            passesText(passes),
         ).slice(0, 4000),
+        ...(passes ? { reviewPasses: redactDeep(passes, redact) } : {}),
         ...(unchanged && passed && claim && decision?.ok
           ? {
               alreadySatisfied: {
@@ -4577,6 +4764,20 @@ async function receipts(dir: string): Promise<string[]> {
 }
 
 /** Причины ошибки протокола для сообщения: путь, класс, пояснение. */
+/** Строка второго прохода в итоге evidence ревью. */
+function passesText(passes: ReviewPassesRecord | undefined) {
+  if (!passes || passes.status === 'skipped') return '';
+  if (passes.status === 'failed')
+    return ` [второй проход не дал итога: ${passes.reason ?? 'ошибка'}; действует первый]`;
+  return (
+    ` [второй проход: подтверждено ${passes.confirmed} из ${passes.first}` +
+    (passes.refuted.length ? `, снято ${passes.refuted.length}` : '') +
+    (passes.missed ? `, пропущено первым ${passes.missed}` : '') +
+    (passes.overturned ? '; отказ первого прохода снят' : '') +
+    ']'
+  );
+}
+
 function protocolText(issues: ProtocolIssue[]) {
   return (
     issues

@@ -28,6 +28,7 @@ import {
   writeGuardSchema,
   type HarnessMode,
 } from './light.ts';
+import { reviewPassesPolicySchema } from './review-passes.ts';
 
 const envName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
 /** Переменные `HARNESS_*` и исторические `DEVCONTOUR_*` задаёт сам harness, не политика. */
@@ -474,6 +475,13 @@ export const executionPolicySchema = z.strictObject({
     code: reviewRuleSchema,
     plan: reviewRuleSchema,
     contract: reviewRuleSchema,
+    /**
+     * Второй проход ревью (0.1.0-alpha.70, `reviewPassesPolicySchema`):
+     * `off | on-reject | always` или по видам. Нет поля — `on-reject` для
+     * ревью попыток, `always` для приёмки выпуска и работ с метками
+     * security/payments/auth. Надзор ревью: в `executionDigest` не входит.
+     */
+    passes: reviewPassesPolicySchema.optional(),
   }),
   /**
    * `live` — настоящие runtime; `fixture` — управляемые ответы для тестов и
@@ -714,6 +722,8 @@ export const executionDigest = (policy: ExecutionPolicy) =>
     harnessMode: undefined,
     writeGuard: undefined,
     release: undefined,
+    // Второй проход ревью (alpha.70) — надзор ревью, не условие исполнения.
+    review: { ...policy.review, passes: undefined },
   });
 
 /** Действующий режим политики: нет поля — `light` (alpha.69). */

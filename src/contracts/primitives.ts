@@ -105,3 +105,11 @@ export const trimmedText = (min: number, max: number) =>
     .min(min)
     .max(max)
     .regex(new RegExp(trimmedTextPattern), 'Текст без пробелов по краям и не пустой');
+
+/**
+ * Метка работы (0.1.0-alpha.70): `security`, `payments`, `auth`, `docs`…
+ * Метки выбирают правила ревью (второй проход) и шаг документации выпуска.
+ */
+export const workLabelSchema = z
+  .string()
+  .regex(/^[a-z0-9][a-z0-9_.-]{0,39}$/, 'метка: строчные латинские буквы, цифры, _ . - (до 40)');

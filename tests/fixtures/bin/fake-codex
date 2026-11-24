@@ -31,16 +31,24 @@ const schema =
     ? JSON.parse(readFileSync(arg('--output-schema'), 'utf8'))
     : JSON.parse(arg('--json-schema'));
 // Разбор ведущего (ответ с `action`) — отдельная роль сценария `lead`.
+// Второй проход ревью (alpha.70, ответ с `verdicts`) — роль `refuter`; без
+// шагов сценария он подтверждает все находки первого прохода.
 const role = schema?.properties?.approved
   ? 'reviewer'
-  : schema?.properties?.action
+  : schema?.properties?.verdicts
+    ? 'refuter'
+    : schema?.properties?.action
     ? 'lead'
     : 'writer';
 const counterPath = `${scenarioPath}.${runtime}.${role}.count`;
 const index = existsSync(counterPath) ? Number(readFileSync(counterPath, 'utf8')) : 0;
 writeFileSync(counterPath, String(index + 1));
 const steps = scenario[role] ?? scenario[`${runtime}-${role}`];
-const step = Array.isArray(steps) ? steps[Math.min(index, steps.length - 1)] : steps;
+const step =
+  (Array.isArray(steps) ? steps[Math.min(index, steps.length - 1)] : steps) ??
+  (role === 'refuter'
+    ? { result: { summary: 'fixture: all confirmed', verdicts: [], missed: [] } }
+    : undefined);
 if (!step) {
   console.error(`fixture: no ${role} step`);
   process.exit(2);

@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { reviewPassesRecordSchema } from './review-passes.ts';
 import { STATE_VERSION } from './version.ts';
 import {
   digestSchema,
@@ -446,6 +447,8 @@ export const evidenceRecordSchema = z.strictObject({
   findings: z.array(evidenceFindingSchema).optional(),
   /** Раунд ревью кода: область истории, вызов, протокол, переходы (docs/review-protocol.md). */
   reviewRound: reviewRoundSchema.optional(),
+  /** Второй проход ревью (0.1.0-alpha.70): режим, итог, снятые находки с основанием. */
+  reviewPasses: reviewPassesRecordSchema.optional(),
   tests: z
     .array(
       z.strictObject({
