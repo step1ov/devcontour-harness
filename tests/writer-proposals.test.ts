@@ -297,3 +297,51 @@ test('ревью 2: после правки работы ведущим ново
   );
   h.close();
 });
+
+test('ревью 3: отклонённое разделение без записанного основания (orderDigest) не держит новое', async () => {
+  const split = {
+    result: {
+      completed: false,
+      summary: 'Предлагаю разделить',
+      discoveries: [],
+      triage: {
+        decision: 'split',
+        reason: 'Две части',
+        parts: [
+          { title: 'API', goal: 'Функция greet', acceptance: ['greet'] },
+          { title: 'Экран', goal: 'Экран greet', acceptance: ['экран'] },
+        ],
+      },
+    },
+  };
+  const ctx = hsetup({
+    scenario: { writer: [split, split], reviewer: approve() },
+    policy: (p: any) => (p.maxAttempts = 3),
+  });
+  const h = ctx.open();
+  await h.run({ graph: ctx.graph, author: 'claude' });
+  const first = h.engine.read((v) => v.attempts(WORK)[0]!);
+  h.engine.decideProposal(WORK, first.writerSplit!, {
+    decision: 'reject',
+    by: 'lead',
+    reason: 'Нет' + '!',
+  });
+  // Запись прежнего кандидата alpha.70: без orderDigest.
+  const w = h.engine.read((v) => v.work(WORK)!);
+  h.engine.host.store.transact('run.context', (tx) =>
+    tx.putWork({
+      ...w,
+      proposals: w.proposals!.map((p) => {
+        const legacy = { ...p };
+        delete legacy.orderDigest;
+        return legacy;
+      }),
+    }),
+  );
+  h.engine.retry(WORK, undefined, 'lead');
+  await h.run({ graph: ctx.graph, author: 'claude' }).catch(() => undefined);
+  const second = h.engine.read((v) => v.attempts(WORK)[1]!);
+  assert.equal(second.failureKind, 'needs-lead', second.error);
+  assert.match(second.writerSplit ?? '', /^P-/);
+  h.close();
+});

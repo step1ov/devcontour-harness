@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { readBoundedHandle } from './bounded-read.ts';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -28,7 +28,21 @@ import {
  */
 
 /** Записываемая цель профиля: каталог целиком или файлы с префиксом пути. */
-export type GuardEntry = { subpath: string } | { prefix: string };
+export type GuardEntry =
+  | { subpath: string }
+  | { prefix: string }
+  /** Закрыто на запись и внутри открытого каталога (ревью 3: `config.worktree`). */
+  | { denyWrite: string }
+  /** Закрыто на чтение (ревью 3: общий stash владельца). */
+  | { denyRead: string };
+const pathOf = (e: GuardEntry) =>
+  'subpath' in e
+    ? e.subpath
+    : 'prefix' in e
+      ? e.prefix
+      : 'denyWrite' in e
+        ? e.denyWrite
+        : e.denyRead;
 
 const realOr = (path: string): string => {
   try {
@@ -90,15 +104,24 @@ const sbRegex = (value: string) =>
 export function seatbeltProfile(entries: GuardEntry[]) {
   const allowed = [
     '(subpath "/dev")',
-    ...entries.map((e) =>
-      'subpath' in e ? `(subpath ${sbString(e.subpath)})` : `(regex ${sbRegex(e.prefix)})`,
+    ...entries.flatMap((e) =>
+      'subpath' in e
+        ? [`(subpath ${sbString(e.subpath)})`]
+        : 'prefix' in e
+          ? [`(regex ${sbRegex(e.prefix)})`]
+          : [],
     ),
   ];
+  const denyWrite = entries.flatMap((e) => ('denyWrite' in e ? [e.denyWrite] : []));
+  const denyRead = entries.flatMap((e) => ('denyRead' in e ? [e.denyRead] : []));
   return [
     '(version 1)',
     '(allow default)',
     '(allow process-exec (literal "/bin/ps") (with no-sandbox))',
     `(deny file-write* (require-not (require-any ${allowed.join(' ')})))`,
+    // Позднее правило важнее: точные запреты поверх открытых каталогов.
+    ...denyWrite.map((p) => `(deny file-write* (literal ${sbString(p)}))`),
+    ...denyRead.map((p) => `(deny file-read* file-write* (literal ${sbString(p)}))`),
   ].join('\n');
 }
 
@@ -141,8 +164,14 @@ export function guardedArgv(
   platform = process.platform,
 ): string[] {
   // Настоящие пути: Seatbelt сравнивает их (на macOS /var → /private/var).
-  entries = entries.map((e) =>
-    'subpath' in e ? { subpath: realOr(e.subpath) } : { prefix: realOr(e.prefix) },
+  entries = entries.map((e): GuardEntry =>
+    'subpath' in e
+      ? { subpath: realOr(e.subpath) }
+      : 'prefix' in e
+        ? { prefix: realOr(e.prefix) }
+        : 'denyWrite' in e
+          ? { denyWrite: realOr(e.denyWrite) }
+          : { denyRead: realOr(e.denyRead) },
   );
   const support = writeGuardProbe.support(platform);
   if (!support.ok)
@@ -162,9 +191,24 @@ export function guardedArgv(
       }
   // Файл с префиксом bubblewrap привязывает только существующим путём
   // (каталоги-родители не открываются: ревью alpha.70).
-  const binds = entries.flatMap((e) => {
-    const p = 'subpath' in e ? e.subpath : e.prefix;
-    return ['--bind-try', p, p];
+  const binds = entries.flatMap((e) =>
+    'subpath' in e || 'prefix' in e ? ['--bind-try', pathOf(e), pathOf(e)] : [],
+  );
+  // Точные запреты — после открытых привязок (позднее важнее): запись
+  // закрыта привязкой только для чтения (файл создаётся заранее, пустым),
+  // чтение — пустым файлом поверх существующего (ревью 3).
+  const denies = entries.flatMap((e) => {
+    if ('denyWrite' in e) {
+      try {
+        if (!existsSync(e.denyWrite)) writeFileSync(e.denyWrite, '', { flag: 'wx' });
+      } catch {
+        /* нет прав — путь и так закрыт корнем «только чтение» */
+      }
+      return existsSync(e.denyWrite) ? ['--ro-bind', e.denyWrite, e.denyWrite] : [];
+    }
+    if ('denyRead' in e)
+      return existsSync(e.denyRead) ? ['--ro-bind', '/dev/null', e.denyRead] : [];
+    return [];
   });
   // /proc — привязкой хоста, а не новым procfs: `--proc` требует своего
   // пространства PID, а PID остаются общими с хостом (ps, kill).
@@ -180,6 +224,7 @@ export function guardedArgv(
     '/proc',
     '/proc',
     ...binds,
+    ...denies,
     '--',
     ...argv,
   ];
@@ -219,7 +264,18 @@ export function gitWorktreeGuard(cwd: string): GitWorktreeGuard | undefined {
     return undefined;
   }
   if (gitDir === common) return undefined;
-  return { entries: [{ subpath: gitDir }] };
+  return {
+    entries: [
+      { subpath: gitDir },
+      // `config.worktree` задаёт фильтры и `core.worktree` git хоста при
+      // `extensions.worktreeConfig` — закрыт и внутри открытого gitdir.
+      { denyWrite: join(gitDir, 'config.worktree') },
+      // stash владельца не виден: `git stash pop/apply` под границей не
+      // наложит его на дерево попытки (ревью 3).
+      { denyRead: join(common, 'refs', 'stash') },
+      { denyRead: join(common, 'logs', 'refs', 'stash') },
+    ],
+  };
 }
 
 /** Признаки отказа git под границей записи: запись в общий `.git` закрыта. */

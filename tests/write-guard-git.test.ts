@@ -57,7 +57,12 @@ const packs = (common: string) =>
 test('каталог git дерева попытки: открыт только его gitdir', () => {
   const { r, tree } = attemptTree('harness/run-a1');
   const common = realpathSync(join(r.dir, '.git'));
-  assert.deepEqual(gitWorktreeGuard(tree)!.entries, [{ subpath: join(common, 'worktrees', 'w') }]);
+  assert.deepEqual(gitWorktreeGuard(tree)!.entries, [
+    { subpath: join(common, 'worktrees', 'w') },
+    { denyWrite: join(common, 'worktrees', 'w', 'config.worktree') },
+    { denyRead: join(common, 'refs', 'stash') },
+    { denyRead: join(common, 'logs', 'refs', 'stash') },
+  ]);
   // Основной checkout и каталог вне git — ничего сверх их самих.
   assert.equal(gitWorktreeGuard(r.dir), undefined);
   assert.equal(gitWorktreeGuard(realpathSync(mkdtempSync(join(tmpdir(), 'no-git-')))), undefined);
@@ -94,7 +99,11 @@ test(
       'echo s > src/a.js',
       'git stash -q 2>/dev/null && echo stash=open || echo stash=denied',
       'git checkout -q -- . 2>/dev/null || true',
+      // Чистое дерево: pop/apply не видят stash владельца (чтение закрыто).
       'git stash pop -q 2>/dev/null && echo pop=open || echo pop=denied',
+      'git stash apply -q 2>/dev/null && echo apply=open || echo apply=denied',
+      'git stash list | grep -q owner-stash && echo list=open || echo list=denied',
+      `( echo x > ${join(common, 'worktrees', 'w', 'config.worktree')} ) 2>/dev/null && echo cfgwt=open || echo cfgwt=denied`,
       'git gc -q --prune=now 2>/dev/null || true',
       'rm -f src/b.js',
     ].join('\n');
@@ -119,9 +128,18 @@ test(
       'commit=denied',
       'stash=denied',
       'pop=denied',
+      'apply=denied',
+      'list=denied',
+      'cfgwt=denied',
     ])
       assert.match(result.stdout, new RegExp(line), result.stdout);
     assert.equal(readFileSync(main, 'utf8'), 'a\n', 'основное дерево не тронуто');
+    // Дерево попытки не получило содержимого stash владельца (README.md).
+    assert.equal(readFileSync(join(tree, 'README.md'), 'utf8'), 'app\n');
+    assert.equal(
+      execFileSync('git', ['-C', tree, 'status', '--porcelain'], { encoding: 'utf8' }),
+      '',
+    );
     assert.equal(r.git('rev-parse', 'other'), before.other, 'ветка владельца на месте');
     assert.equal(r.git('rev-parse', 'harness/run-a1'), before.own, 'ветка попытки на месте');
     assert.match(r.git('stash', 'list'), /owner-stash/, 'stash владельца на месте');

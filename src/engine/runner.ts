@@ -190,8 +190,10 @@ import { CleanupFailure, cleanupEnvironment } from '../environment/lifecycle.ts'
 import { defaultResourceDatabase, withResources } from '../environment/resources.ts';
 import { gitWorktreeGuard, guardEntries } from '../environment/write-guard.ts';
 import {
+  attachControllerIndex,
   captureGitMeta,
   commitCandidate,
+  detachControllerIndex,
   gitMetaProblem,
   resetIndex,
   type TrustedGitMeta,
@@ -1003,10 +1005,17 @@ export class Runner {
                         [input.cwd, ...(scratch ? [scratch] : [])],
                         gitGuard?.entries ?? [],
                       );
-                      const prefixes = entries.flatMap((e) => ('prefix' in e ? [e.prefix] : []));
+                      const pick = <K extends 'subpath' | 'prefix' | 'denyWrite' | 'denyRead'>(
+                        k: K,
+                      ) => entries.flatMap((e) => (k in e ? [(e as Record<K, string>)[k]] : []));
+                      const prefixes = pick('prefix');
+                      const denyWrite = pick('denyWrite');
+                      const denyRead = pick('denyRead');
                       return {
-                        guard: entries.flatMap((e) => ('subpath' in e ? [e.subpath] : [])),
+                        guard: pick('subpath'),
                         ...(prefixes.length ? { guardPrefixes: prefixes } : {}),
+                        ...(denyWrite.length ? { guardDenyWrite: denyWrite } : {}),
+                        ...(denyRead.length ? { guardDenyRead: denyRead } : {}),
                       };
                     })()
                   : {},
@@ -1898,6 +1907,8 @@ export class Runner {
           worktrees.push(cwd);
           // Доверенные метаданные git дерева — до любого процесса попытки (ревью 2).
           this.trustedGit.set(attempt.id, await captureGitMeta(cwd, `refs/heads/${branch}`));
+          // Свой index controller: index дерева пишут исполнитель и gates (ревью 3).
+          await attachControllerIndex(cwd, 'HEAD');
           this.engine.phase(attempt.id, attempt.token, 'running', { baseSha: base, worktree: cwd });
           attempt = { ...attempt, baseSha: base, worktree: cwd };
           const gates = ordered(repo.gates, attempt.requiredGates ?? repo.gates.map((g) => g.id));
@@ -2127,7 +2138,15 @@ export class Runner {
                     // Метаданные git дерева — те, что создал controller (ревью 2):
                     // иначе запись кандидата пошла бы через чужую ветку.
                     const meta = this.trustedGit.get(attempt.id);
-                    const metaProblem = meta ? await gitMetaProblem(meta) : undefined;
+                    // Без запомненных метаданных кандидат не пишется (ревью 3):
+                    // запись через HEAD дерева — путь, который исполнитель мог
+                    // перенаправить.
+                    if (!meta)
+                      throw new TaskFailure(
+                        'environment',
+                        'Метаданные git дерева попытки не запомнены controller: кандидат не записывается',
+                      );
+                    const metaProblem = await gitMetaProblem(meta);
                     if (metaProblem)
                       throw new TaskFailure(
                         'scope-violation',
@@ -2139,7 +2158,7 @@ export class Runner {
                         'Исполнитель изменил HEAD; интеграцией владеет harness',
                       );
                     // Index — заново от базы: флаги index исполнителя не прячут изменения.
-                    if (meta) await resetIndex(meta, base);
+                    await resetIndex(meta, base);
                     await git(cwd, 'add', '-A');
                     const changed = (
                       await git(cwd, 'diff', '--cached', '--no-renames', '--name-only', '-z')
@@ -2237,7 +2256,7 @@ export class Runner {
                           p.kind === 'split' &&
                           p.status === 'rejected' &&
                           // Только отклонённое для этой же постановки (ревью 2).
-                          (!p.orderDigest || p.orderDigest === contentDigest(work.order)),
+                          p.orderDigest === contentDigest(work.order),
                       )
                     )
                       throw new TaskFailure(
@@ -2305,19 +2324,11 @@ export class Runner {
                     }
                     // Кандидат — не через HEAD: write-tree, commit-tree и
                     // update-ref ветки попытки с ожидаемым прежним значением.
-                    const committed = meta
-                      ? await commitCandidate(meta, base, `${work.id}: ${work.order.title}`)
-                      : (await git(
-                          cwd,
-                          '-c',
-                          'core.hooksPath=/dev/null',
-                          'commit',
-                          '--no-gpg-sign',
-                          '-q',
-                          '-m',
-                          `${work.id}: ${work.order.title}`,
-                        ),
-                        await git(cwd, 'rev-parse', 'HEAD'));
+                    const committed = await commitCandidate(
+                      meta,
+                      base,
+                      `${work.id}: ${work.order.title}`,
+                    );
                     await this.options.hooks?.implemented?.({
                       attempt,
                       output: result.data,
@@ -2626,12 +2637,14 @@ export class Runner {
     const left: Retained = keep ? pending : { worktrees: [], snapshots: [] };
     const errors: string[] = [];
     if (!keep) {
-      for (const tree of pending.worktrees)
+      for (const tree of pending.worktrees) {
+        await detachControllerIndex(tree.dir);
         await git(tree.checkout, 'worktree', 'remove', '--force', tree.dir).catch((e: unknown) => {
           if (!existsSync(tree.dir)) return;
           left.worktrees.push(tree);
           errors.push(`${tree.dir}: ${e instanceof Error ? e.message : String(e)}`);
         });
+      }
       errors.push(...(await removeSnapshots(this.repositories(), pending.snapshots)));
       left.snapshots.push(...pending.snapshots.filter((d) => existsSync(d.path)));
     }
@@ -3791,6 +3804,7 @@ export class Runner {
     let dirty = false;
     try {
       await git(input.cwd, 'worktree', 'add', '--detach', checkout, input.sha);
+      await attachControllerIndex(checkout, 'HEAD');
       response = await this.call(
         this.adapter(attempt.reviewer),
         {
@@ -3832,6 +3846,7 @@ export class Runner {
         },
       };
     } finally {
+      await detachControllerIndex(checkout);
       await git(input.cwd, 'worktree', 'remove', '--force', checkout).catch(() => undefined);
       // Каталог создан выше этим вызовом (mkdtemp под временным каталогом controller).
       await rm(tree, { recursive: true, force: true }).catch(() => undefined);
@@ -4771,6 +4786,8 @@ export class Runner {
     const base = await git(repoPath, 'rev-parse', repo.targetRef);
     await git(repoPath, 'worktree', 'add', '--detach', cwd, base);
     worktrees.push(cwd);
+    // Свой index controller и в дереве интеграции (ревью 3).
+    await attachControllerIndex(cwd, 'HEAD');
     try {
       await git(
         cwd,
@@ -5004,7 +5021,7 @@ function proposalNotes(work: WorkState): string[] {
       (p) =>
         p.kind === 'split' &&
         p.status === 'rejected' &&
-        (!p.orderDigest || p.orderDigest === contentDigest(work.order)),
+        p.orderDigest === contentDigest(work.order),
     )
     .slice(-1)
     .map(

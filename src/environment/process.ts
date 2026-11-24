@@ -3,7 +3,7 @@ import { lsofName, osTool, osToolEnv } from './os-tools.ts';
 import { randomUUID } from 'node:crypto';
 import { readdirSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import { StringDecoder } from 'node:string_decoder';
-import { resolve } from 'node:path';
+import { resolve, sep } from 'node:path';
 import {
   assertTrustedCheckout,
   forgetWorktree,
@@ -476,8 +476,34 @@ export function hostGitArgs(cwd: string, args: string[]) {
   assertTrustedCheckout(cwd);
   return [...gitHardening, ...args];
 }
-const gitEnv = () => ({
+/**
+ * Index controller для рабочих деревьев попыток (0.1.0-alpha.70, ревью 3).
+ * Собственный index дерева (`<gitdir>/index`) пишут исполнитель и gates:
+ * флаги `assume-unchanged`/`skip-worktree` прятали бы изменения, а ссылка
+ * вместо файла направила бы запись controller в чужой index. Git хоста в
+ * зарегистрированном дереве работает со своим файлом index controller
+ * (`GIT_INDEX_FILE`); index дерева он не читает и не пишет.
+ */
+const controllerIndexes = new Map<string, string>();
+export function useControllerIndex(worktree: string, file: string) {
+  controllerIndexes.set(resolve(worktree), file);
+}
+export function releaseControllerIndex(worktree: string) {
+  const root = resolve(worktree);
+  const file = controllerIndexes.get(root);
+  controllerIndexes.delete(root);
+  return file;
+}
+export function controllerIndexOf(cwd: string): string | undefined {
+  const at = resolve(cwd);
+  for (const [root, file] of controllerIndexes)
+    if (at === root || at.startsWith(root + sep)) return file;
+  return undefined;
+}
+
+const gitEnv = (cwd?: string) => ({
   ...process.env,
+  ...((file) => (file ? { GIT_INDEX_FILE: file } : {}))(cwd ? controllerIndexOf(cwd) : undefined),
   GIT_TERMINAL_PROMPT: '0',
   // Дублирует `--no-replace-objects` из `gitHardening` для дочерних git.
   GIT_NO_REPLACE_OBJECTS: '1',
@@ -499,7 +525,7 @@ export async function gitOutput(cwd: string, ...args: string[]) {
 export async function gitRawOutput(cwd: string, ...args: string[]) {
   let text = '';
   const result = await command(['git', ...hostGitArgs(cwd, args)], cwd, {
-    env: gitEnv(),
+    env: gitEnv(cwd),
     onRawStdout: (chunk) => {
       text += chunk;
     },
@@ -519,7 +545,7 @@ export async function gitBlobs(cwd: string, ids: readonly string[]) {
   const data = await new Promise<Buffer>((done, fail) => {
     const child = spawn('git', hostGitArgs(cwd, ['cat-file', '--batch']), {
       cwd,
-      env: gitEnv(),
+      env: gitEnv(cwd),
       stdio: ['pipe', 'pipe', 'pipe'],
     });
     const chunks: Buffer[] = [];
@@ -590,7 +616,7 @@ export async function gitWithLimit(cwd: string, limit: number, ...args: string[]
   let over = false;
   const stop = new AbortController();
   const result = await command(['git', ...hostGitArgs(cwd, args)], cwd, {
-    env: gitEnv(),
+    env: gitEnv(cwd),
     signal: stop.signal,
     onRawStdout: (chunk) => {
       if (over || !chunk) return;

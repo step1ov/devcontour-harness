@@ -12,9 +12,30 @@
 // `commit-tree -p <база>`, `update-ref refs/heads/<ветка попытки> <новый>
 // <база>` — с явным `--git-dir`.
 
-import { lstat, readFile } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
+import { lstat, readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { git } from '../environment/process.ts';
+import { controllerTemp } from '../environment/controller-temp.ts';
+import { git, releaseControllerIndex, useControllerIndex } from '../environment/process.ts';
+
+/**
+ * Свой index controller для дерева (ревью 3): git хоста в этом дереве
+ * читает и пишет только его (`GIT_INDEX_FILE`), index дерева — нет.
+ * Наполняется деревом `ref`.
+ */
+export async function attachControllerIndex(cwd: string, ref: string) {
+  useControllerIndex(cwd, join(controllerTemp.dir(), `hx-index-${randomUUID()}`));
+  await git(cwd, 'read-tree', ref);
+  // Сведения о файлах — сразу: иначе `apply --3way` и `status` сочли бы
+  // каждый файл изменённым (у свежего index нет их stat).
+  await git(cwd, 'update-index', '-q', '--refresh').catch(() => undefined);
+}
+
+/** Снять index controller дерева и удалить его файл (создан `attachControllerIndex`). */
+export async function detachControllerIndex(cwd: string) {
+  const file = releaseControllerIndex(cwd);
+  if (file) await rm(file, { force: true }).catch(() => undefined);
+}
 
 export interface TrustedGitMeta {
   cwd: string;
@@ -22,7 +43,20 @@ export interface TrustedGitMeta {
   common: string;
   /** Ветка дерева попытки: `refs/heads/<prefix><попытка>`. */
   branch: string;
-  files: { dotGit: string; commondir: string; gitdir: string };
+  files: { dotGit: string; commondir: string; gitdir: string; configWorktree: string | null };
+}
+
+/** Файл, которого может не быть: `null` — нет; ссылка — особое значение. */
+async function optional(path: string): Promise<string | null> {
+  try {
+    const st = await lstat(path);
+    if (!st.isFile()) return '\0not-a-file';
+    // Пустой файл — как отсутствующий: bubblewrap создаёт его заранее, чтобы
+    // закрыть на запись (ревью 3).
+    return (await readFile(path, 'utf8')) || null;
+  } catch {
+    return null;
+  }
 }
 
 async function regular(path: string): Promise<string | undefined> {
@@ -43,6 +77,7 @@ export async function captureGitMeta(cwd: string, branch: string): Promise<Trust
     dotGit: (await regular(join(cwd, '.git'))) ?? '',
     commondir: (await regular(join(gitDir, 'commondir'))) ?? '',
     gitdir: (await regular(join(gitDir, 'gitdir'))) ?? '',
+    configWorktree: await optional(join(gitDir, 'config.worktree')),
   };
   return { cwd, gitDir, common, branch, files };
 }
@@ -61,6 +96,20 @@ export async function gitMetaProblem(meta: TrustedGitMeta): Promise<string | und
   for (const k of ['dotGit', 'commondir', 'gitdir'] as const)
     if (now[k] !== meta.files[k])
       return `метаданные git дерева попытки изменены (${k === 'dotGit' ? '.git' : k})`;
+  // `config.worktree` (фильтры, `core.worktree`) и `config` каталога дерева —
+  // как при создании (ревью 3).
+  if ((await optional(join(meta.gitDir, 'config.worktree'))) !== meta.files.configWorktree)
+    return 'метаданные git дерева попытки изменены (config.worktree)';
+  if ((await optional(join(meta.gitDir, 'config'))) !== null)
+    return 'метаданные git дерева попытки изменены (config в каталоге дерева)';
+  // Ссылка вместо файла в каталоге дерева — отказ, какой бы ни была цель.
+  for (const name of ['HEAD', 'index', 'commondir', 'gitdir'])
+    try {
+      if ((await lstat(join(meta.gitDir, name))).isSymbolicLink())
+        return `метаданные git дерева попытки изменены (${name} — символическая ссылка)`;
+    } catch {
+      /* нет файла: HEAD/commondir/gitdir проверены выше, index может отсутствовать */
+    }
   const head = await regular(join(meta.gitDir, 'HEAD'));
   if (head?.trim() !== `ref: ${meta.branch}`)
     return `HEAD дерева попытки переключён (${(head ?? 'не файл').trim().slice(0, 100)}), а не на ${meta.branch}`;
@@ -69,7 +118,10 @@ export async function gitMetaProblem(meta: TrustedGitMeta): Promise<string | und
 
 const explicit = (meta: TrustedGitMeta) => [`--git-dir=${meta.gitDir}`, `--work-tree=${meta.cwd}`];
 
-/** Index дерева — заново от базы: флаги исполнителя (assume-unchanged и т. п.) не действуют. */
+/**
+ * Index controller — заново от базы перед записью кандидата (ревью 3): свой
+ * файл controller (`attachControllerIndex`), index дерева не трогается.
+ */
 export async function resetIndex(meta: TrustedGitMeta, base: string) {
   await git(meta.cwd, ...explicit(meta), 'read-tree', base);
 }
