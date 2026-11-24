@@ -23,6 +23,7 @@ import {
   writeGuardActive,
 } from '../contracts/index.ts';
 import { guardCaches, writeGuardSupport } from '../environment/write-guard.ts';
+import { securityProbe, securityTierOf } from '../environment/security-tier.ts';
 import { credentialPaths, isolationSupport } from '../environment/isolation.ts';
 import { chooseCheckoutRoot } from '../environment/checkout-root.ts';
 import { inspectPort, PORT_ADVICE } from '../environment/port-probe.ts';
@@ -347,6 +348,8 @@ export async function doctor(
   const mode = policy ? modeReport(policy) : undefined;
   if (mode) {
     notes.unshift(mode.line);
+    // Уровень безопасности (alpha.70) — второй строкой: что на деле отделяет исполнителя.
+    notes.splice(1, 0, mode.securityTier.line);
     const login = policy ? claudeLoginWarning(policy) : undefined;
     if (login) warnings.push(login);
     const copy = policy ? loginCopyNote(policy) : undefined;
@@ -689,7 +692,20 @@ export function modeReport(policy: ExecutionPolicy) {
           ? 'The write guard protects against accidents, it is not a security boundary; Docker and the chosen caches bypass it'
           : 'There is no write boundary (isolation.mode: none or writeGuard.off): the writer and gates can write anywhere')
       : 'mode: strict (harnessMode: strict, frozen — may be removed after the next pilots); light — remove the harnessMode field';
-  if (mode === 'strict') return { mode, default: byDefault, line, lineEn };
+  // Уровень безопасности (alpha.70): определяется, выбирает владелец.
+  const tier = securityTierOf(
+    { strict: mode === 'strict', guard: writeGuardActive(policy) },
+    securityProbe.facts(policy.repositories.map((r) => r.path)),
+  );
+  const securityTier = {
+    current: tier.current,
+    container: tier.facts.container,
+    vm: tier.facts.vm,
+    separateUser: tier.facts.separateUser,
+    line: tier.line,
+    lineEn: tier.lineEn,
+  };
+  if (mode === 'strict') return { mode, default: byDefault, line, lineEn, securityTier };
   const active = writeGuardActive(policy);
   const support = writeGuardSupport();
   return {
@@ -707,6 +723,7 @@ export function modeReport(policy: ExecutionPolicy) {
         : {}),
       caches: active ? guardCaches(policy.writeGuard).map((c) => c.path) : [],
     },
+    securityTier,
   };
 }
 

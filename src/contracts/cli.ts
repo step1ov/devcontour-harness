@@ -2735,6 +2735,21 @@ export const doctorDataSchema = z.strictObject({
           caches: z.array(z.string()).max(200),
         })
         .optional(),
+      /**
+       * Уровень безопасности (0.1.0-alpha.70): определённый текущий уровень
+       * шкалы write-guard → os-user → container → vm (строгий режим —
+       * `os-sandbox`); выбирает владелец.
+       */
+      securityTier: z
+        .strictObject({
+          current: z.enum(['none', 'write-guard', 'os-user', 'container', 'vm', 'os-sandbox']),
+          container: z.boolean(),
+          vm: z.boolean(),
+          separateUser: z.boolean(),
+          line: z.string(),
+          lineEn: z.string(),
+        })
+        .optional(),
     })
     .optional(),
   problems: z.array(z.string()),
