@@ -328,7 +328,7 @@ test('несогласованный контекст после всех пов
     return original(...items);
   };
   try {
-    const out = await srv.transport.readTaskContext!('WEB-1', {
+    const out = await srv.transport.readTaskContext('WEB-1', {
       targetDocuments: false,
       maxBytes: 1 << 20,
     });
@@ -361,7 +361,7 @@ test('несогласованный контекст после всех пов
     return push2(...items);
   };
   try {
-    const out = await srv2.transport.readTaskContext!('WEB-1', {
+    const out = await srv2.transport.readTaskContext('WEB-1', {
       targetDocuments: false,
       maxBytes: 1 << 20,
     });
@@ -378,7 +378,7 @@ test('паспорт: нет записи — раздел пуст; нет ма
     // Предел меньше суммы текстов с кратким описанием: too-large.
     const passport = w.entities.find((e) => e.ref.kind === 'product')!;
     passport.summary = 'x'.repeat(5000);
-    const small = await srv.transport.readTaskContext!('WEB-1', {
+    const small = await srv.transport.readTaskContext('WEB-1', {
       targetDocuments: false,
       maxBytes: 4000,
     });
@@ -390,7 +390,7 @@ test('паспорт: нет записи — раздел пуст; нет ма
   const broken = await relay013(world(), ['relay-projects-v1'], '/entities/get');
   try {
     await assert.rejects(
-      broken.transport.readTaskContext!('WEB-1', { targetDocuments: false, maxBytes: 1 << 20 }),
+      broken.transport.readTaskContext('WEB-1', { targetDocuments: false, maxBytes: 1 << 20 }),
     );
   } finally {
     await broken.close();

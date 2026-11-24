@@ -1504,7 +1504,7 @@
                 "type": "object",
                 "propertyNames": {
                   "type": "string",
-                  "pattern": "^(?!HARNESS_|DEVCONTOUR_)[A-Z_][A-Z0-9_]*$"
+                  "pattern": "^(?!HARNESS_|DEVCONTOUR_|DYLD_)[A-Z_][A-Z0-9_]*$"
                 },
                 "additionalProperties": {
                   "type": "string",
@@ -2911,7 +2911,7 @@
           "type": "array",
           "items": {
             "type": "string",
-            "pattern": "^(?!HARNESS_|DEVCONTOUR_)[A-Z_][A-Z0-9_]*$"
+            "pattern": "^(?!HARNESS_|DEVCONTOUR_|DYLD_)[A-Z_][A-Z0-9_]*$"
           }
         },
         "portRange": {
