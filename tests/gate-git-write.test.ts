@@ -182,3 +182,33 @@ test(
     assert.equal(evidence.failureSummary?.gitWrite, true);
   },
 );
+
+test(
+  'ревью 6: только общий провал обёртки в отчёте («Gate execution failed») и отказ git — отметка gitWrite, на базе так же — удержание',
+  { skip: !supported },
+  async () => {
+    const wrapper = `
+const fs = require('fs');
+try {
+  require('child_process').execSync('git checkout -- .', { stdio: 'inherit' });
+} catch (e) {
+  fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH, '<testsuite><testcase classname="gate" name="run"><failure>Gate execution failed</failure></testcase></testsuite>');
+  process.exit(1);
+}
+`;
+    const ctx = setup({
+      scenario: { writer: implement(), reviewer: approve() },
+      files: { 'test/clean.js': wrapper },
+      runner: adapters(),
+      policy: guarded,
+    });
+    baseRun(ctx, { failureSummary: { gitWrite: true } });
+    await runAll(ctx);
+    const a = ctx.engine.read((v) => v.attempts(WORK)[0]!);
+    assert.equal(a.failureKind, 'environment', a.error);
+    assert.match(a.error ?? '', /GATE_DEFINITION_NO_CAUSE: GATE_GIT_WRITE/);
+    const w = ctx.engine.read((v) => v.work(WORK)!);
+    assert.equal(w.attempt, 0, 'не засчитано');
+    assert.equal(w.environmentHold?.cause, 'gate-definition');
+  },
+);

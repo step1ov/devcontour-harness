@@ -1753,8 +1753,9 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
         !property &&
         !reaped &&
         GUARDED_GIT_DENIAL.test(result.stderr + '\n' + result.stdout);
+      // Упавшие testcases — по выжимке: она уже не считает общий провал
+      // обёртки («Gate execution failed», `opaqueFailure`) причиной (ревью 6).
       const independent =
-        !!counts?.failures ||
         !!failureSummary.tests?.length ||
         !!result.diagnostics?.signal ||
         // Утверждение — независимое, только если оно не про сам git (строка
