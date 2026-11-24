@@ -14,6 +14,7 @@ import {
   type GraphState,
   type WorkState,
   WORKSPACE_OWNER,
+  digestOf,
 } from '../contracts/index.ts';
 import { requestsOf } from '../engine/input-requests.ts';
 import {
@@ -123,36 +124,46 @@ export async function reviewRelease(
       repositoryId: repo.id,
       ...(input.signal ? { signal: input.signal } : {}),
     },
-    { contract: ({ path, head: sha }) => releaseContractText(ctx, repo.id, path, sha) },
+    {
+      contract: async ({ path, head: sha }) => {
+        const c = await releaseContract(ctx, repo.id, path, sha);
+        return { prompt: c.prompt, digest: c.digest };
+      },
+    },
   );
 }
 
 /**
- * Текст договора выпуска для репозитория на `head` (его digest — основание
- * раунда ревью выпуска): постановки и критерии, ответы владельца, файлы
- * топологии на head. Тот же текст пересчитывает `release done`: раунд по
- * прежнему договору выпуск не принимает (alpha.69, ревью).
+ * Договор выпуска для репозитория на `head`: постановки и критерии, ответы
+ * владельца, файлы топологии на head. `digest` — по ПОЛНОМУ тексту (без
+ * обрезки): основание раунда ревью выпуска, его же пересчитывает
+ * `release done` — правка за пределом обрезки запроса тоже делает раунд
+ * устаревшим. `prompt` — тот же текст в пределах запроса reviewer.
  */
-export async function releaseContractText(
+export async function releaseContract(
   ctx: Pick<CodeReviewContext, 'engine' | 'policy'>,
   repositoryId: string,
   path: string,
   sha: string,
-): Promise<string> {
+): Promise<{ prompt: string; digest: string }> {
   const state = ctx.engine.read((v) => contractFromState(v, repositoryId));
   const topology = ctx.policy.release?.topology ?? [];
-  const files: string[] = [];
+  const files: { full: string; clipped: string }[] = [];
   for (const file of topology) {
     let text: string;
     try {
       text = (await rawGit(path, ['show', `${sha}:${file}`])).toString('utf8');
     } catch {
-      files.push(`--- ${file}: MISSING at head (the file does not exist in the accepted target)`);
+      const missing = `--- ${file}: MISSING at head (the file does not exist in the accepted target)`;
+      files.push({ full: missing, clipped: missing });
       continue;
     }
-    files.push(`--- ${file}\n${clip(text, RELEASE_TOPOLOGY_FILE_LIMIT)}`);
+    files.push({
+      full: `--- ${file}\n${text}`,
+      clipped: `--- ${file}\n${clip(text, RELEASE_TOPOLOGY_FILE_LIMIT)}`,
+    });
   }
-  return clip(
+  const compose = (list: string[]) =>
     [
       'RELEASE CONTRACT.',
       '(a) Orders of all registered graphs (engine state): every acceptance criterion must hold in the accepted target as deployed, not only in tests. ' +
@@ -162,11 +173,13 @@ export async function releaseContractText(
           JSON.stringify(state.answers)
         : '(b) Owner answers: none recorded.',
       topology.length
-        ? '(c) Deploy topology (policy release.topology, read from head):\n' + files.join('\n')
+        ? '(c) Deploy topology (policy release.topology, read from head):\n' + list.join('\n')
         : '(c) Deploy topology: the policy names no topology files (release.topology). Find the production gateway/proxy configs and production env files in the checkout yourself; their absence for a deployed app is a finding.',
       'Topology check: compare the production routing and env (gateway/proxy routes, production env files, public base URLs for media, uploads and API) with what the gates and tests exercised (often the API port directly). Every user-visible URL the works produce must be routed by the production gateway; report mismatches as blocking.',
       '(d) The diff base..head follows.',
-    ].join('\n\n'),
-    RELEASE_CONTRACT_LIMIT,
-  );
+    ].join('\n\n');
+  return {
+    prompt: clip(compose(files.map((f) => f.clipped)), RELEASE_CONTRACT_LIMIT),
+    digest: digestOf(compose(files.map((f) => f.full))),
+  };
 }

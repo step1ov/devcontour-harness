@@ -32,7 +32,8 @@ import { cliAdapter } from '../src/agents/cli-adapter.ts';
 import { releaseDone } from '../src/control/lead.ts';
 import {
   releaseBaseOf,
-  releaseContractText,
+  releaseContract,
+  RELEASE_TOPOLOGY_FILE_LIMIT,
   reviewRelease,
   type ReleaseReviewInput,
 } from '../src/control/review-release.ts';
@@ -435,9 +436,7 @@ test('ревью выпуска — только от базы выпуска и
   // Ревью от базы выпуска одобрено; договор изменился (ответ владельца) — снова нет.
   await f.review();
   const before = {
-    app: digestOf(
-      await releaseContractText({ engine: f.engine, policy: f.policy }, 'app', f.app, head),
-    ),
+    app: (await releaseContract({ engine: f.engine, policy: f.policy }, 'app', f.app, head)).digest,
   };
   state = f.engine.read((v) =>
     releaseReviewState(v, f.policy, { app: head }, { strict: true, contracts: before }),
@@ -486,4 +485,30 @@ test('выпуск, начатый до alpha.69: база — самая ран
   const state = f.engine.read((v) => releaseReviewState(v, f.policy));
   assert.equal(state.base, f.base);
   assert.equal(state.baseSource, 'attempt');
+});
+
+test('digest договора выпуска — по полному тексту: правка за пределом обрезки запроса делает раунд устаревшим', async () => {
+  const f = fixture();
+  ready(f.engine, graphOf({ w: [] }));
+  accept(f.engine, f.base, f.head);
+  const long = 'x'.repeat(RELEASE_TOPOLOGY_FILE_LIMIT + 100);
+  const a = f.commit({ 'deploy/Caddyfile': long + 'A\n' }, 'a');
+  const b = f.commit({ 'deploy/Caddyfile': long + 'B\n' }, 'b');
+  const ctx = { engine: f.engine, policy: f.policy };
+  const ca = await releaseContract(ctx, 'app', f.app, a);
+  const cb = await releaseContract(ctx, 'app', f.app, b);
+  assert.equal(ca.prompt, cb.prompt, 'в запросе правка за пределом не видна');
+  assert.notEqual(ca.digest, cb.digest, 'но договор — другой');
+  // Раунд по договору A на той же цели с договором B выпуск не принимает.
+  f.git('update-ref', f.targetRef, a);
+  f.scenario({ reviewer: verdict(true) });
+  await f.review();
+  const state = f.engine.read((v) =>
+    releaseReviewState(v, f.policy, { app: a }, { strict: true, contracts: { app: cb.digest } }),
+  );
+  assert.equal(state.repositories[0]!.staleReason, 'contract-changed');
+  const ok = f.engine.read((v) =>
+    releaseReviewState(v, f.policy, { app: a }, { strict: true, contracts: { app: ca.digest } }),
+  );
+  assert.equal(ok.status, 'approved');
 });

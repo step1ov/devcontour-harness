@@ -126,7 +126,12 @@ export function reviewRepository(policy: ExecutionPolicy, repositoryId: string |
  * выпуска, прочитанный на проверяемом head, — разделы запроса reviewer.
  */
 export interface ReleaseContract {
-  contract(at: { path: string; head: string }): Promise<string>;
+  /**
+   * Договор выпуска на head: текст для запроса (обрезан пределами запроса) и
+   * digest ПОЛНОГО текста — основание раунда (правка за пределом обрезки —
+   * тоже другой договор).
+   */
+  contract(at: { path: string; head: string }): Promise<{ prompt: string; digest: string }>;
 }
 
 /** Роли, применимые к репозиторию: общие и свои роли репозитория. */
@@ -287,7 +292,7 @@ export async function reviewBranch(
         head: input.head,
       });
   const contract = release ? await release.contract({ path, head }) : undefined;
-  const contextDigest = contract === undefined ? undefined : digestOf(contract);
+  const contextDigest = contract?.digest;
 
   const rounds = engine.read((v) =>
     v
@@ -385,7 +390,7 @@ export async function reviewBranch(
       ? 'Previous open findings. For each, report its state in `previous` (closed, open or withdrawn) with a concrete basis: ' +
         JSON.stringify(open.map((f) => ({ id: f.id, severity: f.severity, message: f.message })))
       : '',
-    contract ?? '',
+    contract?.prompt ?? '',
     'Report execution.commands or an empty list with execution.noCommandsReason. Findings need a message; use null where a field does not apply.',
     names.length
       ? 'Exact diff to review:\n' + diff

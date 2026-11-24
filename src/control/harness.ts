@@ -61,7 +61,7 @@ import { planRoundEpoch, reviewRoundCap, technicalReview } from './review.ts';
 import { reviewCode, type CodeReviewInput } from './review-code.ts';
 import {
   releaseBaseOf,
-  releaseContractText,
+  releaseContract,
   reviewRelease,
   type ReleaseReviewInput,
 } from './review-release.ts';
@@ -503,14 +503,14 @@ export class Harness {
     for (const repo of this.policy.repositories) {
       const head = heads[repo.id];
       if (!head || !repositories.has(repo.id)) continue;
-      contracts[repo.id] = digestOf(
-        await releaseContractText(
+      contracts[repo.id] = (
+        await releaseContract(
           { engine: this.engine, policy: this.policy },
           repo.id,
           this.repoPath(repo.path),
           head,
-        ),
-      );
+        )
+      ).digest;
     }
     return { heads, contracts };
   }

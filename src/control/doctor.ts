@@ -382,6 +382,8 @@ export async function doctor(
   }
   if (decisions?.warning) warnings.push(decisions.warning.ru);
   const noBudget = policy ? lightBudgetWarning(policy) : undefined;
+  const contractBudget = policy ? lightContractBudgetNote(policy) : undefined;
+  if (contractBudget) notes.push(contractBudget);
   if (noBudget) warnings.push(noBudget);
   if (policy) {
     const r = recoveryPolicyOf(policy);
@@ -741,4 +743,17 @@ export function claudeLoginWarning(
   return covered
     ? undefined
     : 'LIGHT_CLAUDE_LOGIN: исполнитель claude в облегчённом режиме получает свой каталог настроек, а вход по подписке на macOS хранится в Keychain и туда не переносится: выполните claude setup-token и передайте CLAUDE_CODE_OAUTH_TOKEN исполнителю (environment.inherit) или задайте ANTHROPIC_API_KEY';
+}
+
+/**
+ * Ревью контрактов в облегчённом режиме (alpha.69): их вызовы не относятся к
+ * группе (графу), поэтому `budgets.group` их не ограничивает — только защита
+ * от круга ревью и `budgets.total`. С одним бюджетом группы — заметка.
+ */
+export function lightContractBudgetNote(
+  policy: Pick<ExecutionPolicy, 'harnessMode' | 'budgets'>,
+): string | undefined {
+  if (harnessModeOf(policy) !== 'light' || !policy.budgets?.group || policy.budgets.total)
+    return undefined;
+  return 'light-contract-budget: ревью контрактов бюджет группы (budgets.group) не ограничивает — их держат защита от круга ревью (6 раундов — ведущий, 12 — владелец) и budgets.total; задайте budgets.total, чтобы ограничить и их';
 }

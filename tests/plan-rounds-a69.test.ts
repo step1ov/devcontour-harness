@@ -539,3 +539,18 @@ test('A69-1a: новые цель или критерии принятой ра�
   assert.equal(goal.counted, true, 'новая цель принятой работы — раунд засчитан');
   assert.deepEqual(goal.changes?.orders?.changed, ['w']);
 });
+
+test('A69-2: только бюджет группы — doctor говорит, что ревью контрактов он не ограничивает', async () => {
+  const { lightContractBudgetNote } = await import('../src/control/doctor.ts');
+  const light = (budgets?: unknown) =>
+    policyOf((p: any) => {
+      p.harnessMode = 'light';
+      if (budgets) p.budgets = budgets;
+    });
+  assert.match(
+    lightContractBudgetNote(light({ group: { usd: 5 } })) ?? '',
+    /^light-contract-budget: .*budgets\.total/,
+  );
+  assert.equal(lightContractBudgetNote(light({ group: { usd: 5 }, total: { usd: 9 } })), undefined);
+  assert.equal(lightContractBudgetNote(light()), undefined);
+});
