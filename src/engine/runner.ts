@@ -1092,6 +1092,8 @@ export class Runner {
   private history(attempt: AttemptState) {
     return this.engine.read((v) => v.attempts(attempt.workId));
   }
+  /** Попытки, чей исполнитель уже вызывался (P8-4: отказ до вызова — окружение). */
+  private writerCalled = new Set<string>();
   /** Поддержка протокола переходов находок адаптером reviewer, по runtime. */
   private protocols = new Map<RuntimeName, Promise<boolean>>();
   /**
@@ -2045,6 +2047,8 @@ export class Runner {
                         ),
                       );
                     const fork = await this.forkOf(attempt, work);
+                    // Исполнитель вызван: прежний отказ — уже не «до работы» (P8-4).
+                    this.writerCalled.add(attempt.id);
                     const response = await this.call(
                       this.adapter(attempt.runtime),
                       {
@@ -2423,11 +2427,21 @@ export class Runner {
           return;
         }
       try {
-        const kind = stalled
+        const classified = stalled
           ? 'stalled'
           : expired && !(origin instanceof TaskFailure)
             ? 'timeout'
             : classifyFailure(error, message);
+        // Отказ до вызова исполнителя (P8-4, alpha.70): подготовка окружения
+        // (lifecycle, docker/compose, установка) упала, кандидата нет, writer
+        // не вызывался — это отказ окружения, а не «неизвестно»: попытка не
+        // засчитана, выдача держится как остановка окружения.
+        const preWriter =
+          classified === 'unknown' &&
+          !this.writerCalled.has(attempt.id) &&
+          !this.engine.read((v) => v.attempt(attempt.id))?.candidateSha;
+        this.writerCalled.delete(attempt.id);
+        const kind: FailureKind = preWriter ? 'environment' : classified;
         // Незакоммиченная работа сохраняется при любом отказе до кандидата:
         // по времени, «не закончил», обрыв. Иначе повтор начинал с пустого
         // дерева и тратил попытку на сделанное.
@@ -2435,7 +2449,9 @@ export class Runner {
         // могут ещё писать в дерево: снимок черновика был бы снимком чужой
         // записи на ходу. Попытка — отказ среды без черновика; следующая
         // начинает с базы в новом дереве.
-        const cause = environmentCauseOf(stalled ? undefined : error, message, kind);
+        const named = environmentCauseOf(stalled ? undefined : error, message, kind);
+        // Отказ до вызова исполнителя без названной причины — `preflight`.
+        const cause = preWriter && named === 'other' ? 'preflight' : named;
         let reported = message;
         const ports = this.portWarnings.get(attempt.id);
         if (ports?.length) reported += `; предупреждение пробы портов: ${ports.join('; ')}`;
@@ -2465,6 +2481,7 @@ export class Runner {
           blocked:
             (origin instanceof BlockedError ||
               kind === 'provider-auth' ||
+              preWriter ||
               // Отказ до работы с известной причиной preflight: не засчитывается.
               (origin instanceof TaskFailure && origin.diagnosis === 'preflight')) &&
             !attempt.candidateSha,
