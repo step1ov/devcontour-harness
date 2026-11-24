@@ -139,6 +139,10 @@ export function guardedArgv(
   entries: GuardEntry[],
   platform = process.platform,
 ): string[] {
+  // Настоящие пути: Seatbelt сравнивает их (на macOS /var → /private/var).
+  entries = entries.map((e) =>
+    'subpath' in e ? { subpath: realOr(e.subpath) } : { prefix: realOr(e.prefix) },
+  );
   const support = writeGuardProbe.support(platform);
   if (!support.ok)
     throw new WriteGuardUnavailable(
@@ -185,48 +189,82 @@ export function guardEntries(
  * Свой домашний каталог CLI исполнителя (alpha.69, ревью): настройки,
  * хуки, AGENTS.md/CLAUDE.md и конфигурация MCP пользователя — общие с
  * ведущим, reviewer и владельцем — исполнителю на запись не открыты. Вызов
- * получает свой каталог (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`) с копией только
- * того, что нужно для входа; обратно ничего не копируется.
- *
- * - codex: `auth.json` (копия файла; конфигурацию пользователя вызов и так
- *   не читает — `--ignore-user-config`);
- * - claude: `.credentials.json`, если вход хранится файлом (Linux); на macOS
- *   вход по подписке лежит в Keychain и в свой каталог не переносится —
- *   нужен `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`) или
- *   `ANTHROPIC_API_KEY` в окружении исполнителя (`missing` называет это).
+ * получает свой каталог (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`) под каталогом
+ * временных файлов controller, а в нём — ссылку на настоящий файл входа
+ * (`auth.json` codex, `.credentials.json` claude, если вход хранится файлом):
+ * обновлённый токен попадает в настоящий файл, копий входа нет (копия
+ * обновила бы токен только у себя и разлогинила бы пользователя). Граница
+ * записи открывает ровно этот файл (`entries`). Если CLI заменил ссылку
+ * файлом (запись через переименование), controller переносит его в
+ * настоящий файл (`writeBack`). На macOS вход claude по подписке лежит в
+ * Keychain: нужен `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`) или
+ * `ANTHROPIC_API_KEY` в окружении исполнителя (`missing` называет это).
  */
 export async function writerRuntimeHome(
   runtime: 'codex' | 'claude',
   dir: string,
   env: Record<string, string>,
   home = homedir(),
-): Promise<{ env: Record<string, string>; missing?: string }> {
-  const { mkdir, copyFile, writeFile } = await import('node:fs/promises');
+): Promise<{
+  env: Record<string, string>;
+  missing?: string;
+  /** Записываемые файлы входа (настоящие пути) — для границы записи. */
+  entries: GuardEntry[];
+  /** Перенести вход, заменённый CLI файлом, в настоящий файл. */
+  writeBack(): Promise<void>;
+}> {
+  const { mkdir, symlink, writeFile, lstat, readFile, rename } = await import('node:fs/promises');
   await mkdir(dir, { recursive: true, mode: 0o700 });
-  const copy = async (from: string, to: string) => {
+  const links: { link: string; real: string }[] = [];
+  const linkTo = async (real: string, name: string) => {
     try {
-      await copyFile(from, to);
-      return true;
+      const st = await lstat(real);
+      if (!st.isFile()) return false;
     } catch {
       return false;
     }
+    const link = join(dir, name);
+    await symlink(real, link);
+    links.push({ link, real });
+    return true;
   };
+  const writeBack = async () => {
+    for (const { link, real } of links) {
+      try {
+        const st = await lstat(link);
+        if (st.isSymbolicLink() || !st.isFile() || st.size > 1024 * 1024) continue;
+        const text = await readFile(link, 'utf8');
+        JSON.parse(text);
+        // Атомарно и рядом с настоящим файлом: та же файловая система.
+        const tmp = `${real}.hx-${process.pid}`;
+        await writeFile(tmp, text, { mode: 0o600, flag: 'wx' });
+        await rename(tmp, real);
+      } catch {
+        /* вход не изменён или не JSON — настоящий файл не трогается */
+      }
+    }
+  };
+  const entries = () => links.map(({ real }) => ({ prefix: realOr(real) }));
   if (runtime === 'codex') {
     const codexHome = env.CODEX_HOME ?? join(home, '.codex');
-    const ok = await copy(join(codexHome, 'auth.json'), join(dir, 'auth.json'));
+    const ok = await linkTo(join(codexHome, 'auth.json'), 'auth.json');
     return {
       env: { CODEX_HOME: dir },
+      entries: entries(),
+      writeBack,
       ...(ok || env.OPENAI_API_KEY || env.CODEX_API_KEY
         ? {}
         : { missing: `нет ${join(codexHome, 'auth.json')}: выполните codex login` }),
     };
   }
   const claudeHome = env.CLAUDE_CONFIG_DIR ?? join(home, '.claude');
-  const file = await copy(join(claudeHome, '.credentials.json'), join(dir, '.credentials.json'));
+  const file = await linkTo(join(claudeHome, '.credentials.json'), '.credentials.json');
   // Без файла настроек claude спрашивает начальную настройку: отвечено.
   await writeFile(join(dir, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true }));
   return {
     env: { CLAUDE_CONFIG_DIR: dir },
+    entries: entries(),
+    writeBack,
     ...(file || env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY
       ? {}
       : {

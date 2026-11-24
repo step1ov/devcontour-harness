@@ -1,4 +1,5 @@
 import { appendFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { controllerTemp } from '../environment/controller-temp.ts';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
@@ -240,8 +241,20 @@ export function cliAdapter(
       const dir = r.artifactDir ?? (await mkdtemp(join(controllerTemp.dir(), 'harness-call-')));
       await mkdir(dir, { recursive: true });
       const schemaPath = join(dir, 'schema.json'),
-        resultPath = join(dir, 'result.json'),
         logPath = join(dir, 'runtime.log');
+      // Облегчённый режим (alpha.69): только исполнитель — без песочницы
+      // runtime, сеть открыта; граница записи — обёртка процесса ниже.
+      const light = review ? undefined : r.sandbox.light;
+      // Каталог вызова — файлы controller (журнал, схема, итог), исполнителю
+      // не открыт. Файл ответа codex исполнитель пишет в свой отдельный
+      // каталог под каталогом controller; controller читает его без ссылок
+      // и с пределом и переносит итог в каталог вызова.
+      const outDir =
+        light && runtime === 'codex'
+          ? await mkdtemp(join(controllerTemp.dir(), 'hx-out-'))
+          : undefined;
+      const resultPath = join(outDir ?? dir, 'result.json');
+      const savedResult = join(dir, 'result.json');
       await writeFile(schemaPath, JSON.stringify(r.outputSchema ?? {}));
       const profile = r.binding.toolProfile
         ? options.toolProfiles?.[r.binding.toolProfile]
@@ -259,9 +272,6 @@ export function cliAdapter(
       // Явный режим без интернета закрывает и инструменты runtime, которые
       // ходят в сеть мимо песочницы shell: веб-поиск codex, WebFetch и
       // WebSearch claude. Без поля `network` вызов прежний.
-      // Облегчённый режим (alpha.69): только исполнитель — без песочницы
-      // runtime, сеть открыта; граница записи — обёртка процесса ниже.
-      const light = review ? undefined : r.sandbox.light;
       const offline =
         !light && !review && (profile?.network === 'none' || profile?.network === 'loopback');
       if (runtime === 'codex' && network === 'loopback' && !light) {
@@ -389,32 +399,40 @@ export function cliAdapter(
       // Граница записи облегчённого режима: процесс runtime и все его
       // потомки пишут только в свои каталоги, кеши и состояние своего CLI.
       let launch = argv;
-      // Свой домашний каталог CLI на вызов: настройки пользователя (общие с
-      // ведущим и reviewer) исполнителю на запись не открыты (alpha.69).
-      const runtimeHome = light ? join(dir, 'runtime-home') : undefined;
+      // Свой домашний каталог CLI на вызов (под каталогом controller, не в
+      // артефактах): настройки пользователя исполнителю на запись не
+      // открыты; файл входа — ссылкой на настоящий (alpha.69, ревью).
+      const runtimeHome = light
+        ? join(controllerTemp.dir(), `hx-home-${randomUUID().slice(0, 12)}`)
+        : undefined;
+      const userHome = r.env.HOME ?? homedir();
+      const authFile =
+        runtime === 'codex'
+          ? join(r.env.CODEX_HOME ?? join(userHome, '.codex'), 'auth.json')
+          : join(r.env.CLAUDE_CONFIG_DIR ?? join(userHome, '.claude'), '.credentials.json');
       let homeEnv: Record<string, string> = {};
       // Входа для своего каталога не нашлось: вызов идёт (вход может прийти
       // иначе), а отказ runtime получит подсказку, что сделать.
       let homeHint: string | undefined;
-      if (runtimeHome) {
-        const prepared = await writerRuntimeHome(
-          runtime,
-          runtimeHome,
-          r.env,
-          r.env.HOME ?? homedir(),
-        );
-        homeEnv = prepared.env;
-        homeHint = prepared.missing;
-      }
+      let writeBack: (() => Promise<void>) | undefined;
+      const cleanup = async () => {
+        await writeBack?.().catch(() => undefined);
+        for (const d of [runtimeHome, outDir])
+          if (d) await rm(d, { recursive: true, force: true }).catch(() => undefined);
+      };
       if (light?.guard)
         try {
-          // Каталог вызова открыт на запись: в нём файл ответа runtime
-          // (`--output-last-message`) и свой домашний каталог CLI.
+          // Граница проверяется до создания домашнего каталога: на отказе
+          // механизма ничего не создаётся. Открыты: каталог ответа, свой
+          // домашний каталог CLI и ровно настоящий файл входа.
           launch = guardedArgv(argv, [
             ...light.guard.map((subpath) => ({ subpath })),
-            { subpath: dir },
+            ...(outDir ? [{ subpath: outDir }] : []),
+            ...(runtimeHome ? [{ subpath: runtimeHome }] : []),
+            { prefix: authFile },
           ]);
         } catch (error) {
+          await cleanup();
           if (!(error instanceof WriteGuardUnavailable)) throw error;
           return {
             status: 'unavailable',
@@ -452,6 +470,12 @@ export function cliAdapter(
       // хвоста stdout: итоговое событие долгого вызова лежит за ними.
       const telemetry = usageStream(runtime);
       try {
+        if (runtimeHome) {
+          const prepared = await writerRuntimeHome(runtime, runtimeHome, r.env, userHome);
+          homeEnv = prepared.env;
+          homeHint = prepared.missing;
+          writeBack = prepared.writeBack;
+        }
         result = await command(launch, r.cwd, {
           activity: { kind: 'agent', label: `${runtime} ${r.task}`.slice(0, 300) },
           contain: { dirs: review ? [] : r.sandbox.writable },
@@ -481,129 +505,141 @@ export function cliAdapter(
           return unavailable(`${runtime}: runtime не запускается: ${String(error)}`);
         throw error;
       } finally {
-        // Копия входа живёт только на время вызова; обратно ничего не копируется.
+        // Домашний каталог вызова убирается на любом исходе; вход, заменённый
+        // CLI файлом, переносится в настоящий файл.
+        await writeBack?.().catch(() => undefined);
+        writeBack = undefined;
         if (runtimeHome)
           await rm(runtimeHome, { recursive: true, force: true }).catch(() => undefined);
       }
-      const usage = telemetry.usage(result.code === 0 && !result.timedOut && !signal.aborted);
-      const model = telemetry.model();
-      const terminalReason = telemetry.terminalReason();
-      const compactions = telemetry.compactions();
-      // Сообщённые runtime счётчики и стоимость — и в диагностике вызова:
-      // runtime.log ограничен и итоговой строки может не содержать. Там же
-      // исход хода claude и число сжатий контекста (успешное сжатие — не отказ).
-      await writeFile(
-        join(dir, 'runtime.json'),
-        JSON.stringify(
-          {
-            ...result.diagnostics,
-            usage,
-            ...(terminalReason ? { terminalReason } : {}),
-            ...(compactions ? { compactions } : {}),
-          },
-          null,
-          2,
-        ),
-      );
-      // Нехватка окна контекста — по `terminal_reason` итогового события
-      // claude, а не по тексту причины (в нём числа токенов).
-      const contextExhausted =
-        runtime === 'claude' ? claudeContextLimit(terminalReason, telemetry.numTurns()) : undefined;
-      const bookkeeping = ['system', 'result', 'error', 'session.created', 'thread.started'];
-      const started =
-        result.timedOut ||
-        runtimeEvents(result.stdout).events.some((e) => !bookkeeping.includes(String(e.type)));
-      const reason = () => {
-        let text: string | undefined;
-        if (runtime === 'claude') {
-          const last = runtimeEvents(result.stdout).events.findLast((e) => e.type === 'result') as
-            { result?: unknown } | undefined;
-          if (typeof last?.result === 'string') text = last.result;
-        }
-        text ??= result.stderr
-          .split('\n')
-          .map((l) => l.trim())
-          .filter(Boolean)
-          .at(-1);
-        return text ? redact(text).slice(0, 300) : undefined;
-      };
-      const base = {
-        text: redact(result.stdout).slice(-20000),
-        model,
-        runtimeVersion: version,
-        usage,
-        ...(review ? { inspection: inspectReview(runtime, raw, redact) } : {}),
-      };
-      const diagnostics = (why?: string) => ({
-        exitCode: result.code,
-        ...(why ? { reason: why } : {}),
-        log: logPath,
-        ...(contextExhausted ? { contextExhausted } : {}),
-      });
-      const expired =
-        signal.aborted && (signal.reason as Error | undefined)?.name === 'TimeoutError';
-      if (result.timedOut || expired)
-        return {
-          ...base,
-          status: 'timeout',
-          diagnostics: diagnostics(`исчерпан лимит времени: ${Math.round(r.timeoutMs / 1000)} с`),
-        };
-      if (signal.aborted)
-        return { ...base, status: 'cancelled', diagnostics: diagnostics('прогон прерван') };
-      if (result.code !== 0)
-        return {
-          ...base,
-          // Нехватка окна — ответ runtime о запросе, а не недоступный runtime.
-          status: started || contextExhausted ? 'failed' : 'unavailable',
-          diagnostics: diagnostics(
-            `код ${result.code}${reason() ? ': ' + reason() : ''}` +
-              (!started && homeHint ? `; облегчённый режим: ${homeHint}` : ''),
-          ),
-        };
-      let output: unknown;
       try {
-        if (runtime === 'codex') {
-          const cleaned = redact(await readBounded(resultPath, CODEX_RESULT_LIMIT));
-          await writeFile(resultPath, cleaned);
-          output = JSON.parse(cleaned);
-        } else {
-          const { events, malformed } = runtimeEvents(result.stdout);
-          const last = events.findLast((e) => e.type === 'result');
-          // `is_error` проверяется до разбора: `claudeResult` требует поле
-          // `structured_output`, которого у такого `result` нет, и отказ
-          // runtime при коде 0 читался как непрочитанный ответ.
-          if (last?.is_error === true)
-            return {
-              ...base,
-              status: 'failed',
-              diagnostics: diagnostics(
-                redact(typeof last.result === 'string' ? last.result : 'ошибка runtime').slice(
-                  0,
-                  300,
-                ),
-              ),
-            };
-          // Строки `result` нет, а поток содержит неразобранную строку (итог
-          // оборван на выходе процесса): ответ — принятый вызов
-          // `StructuredOutput` из того же потока (F59). Целая строка `result`
-          // без ответа — решение CLI, она остаётся отказом.
-          const accepted =
-            last === undefined && malformed ? acceptedStructuredOutput(events) : undefined;
-          output = accepted ? accepted.value : claudeResult.parse(last).structured_output;
-        }
-      } catch (error) {
-        // Непрочитанный файл не замаскирован: на диске он не остаётся.
-        if (error instanceof OversizedFile)
-          await rm(resultPath, { force: true }).catch(() => undefined);
-        return {
-          ...base,
-          status: 'failed',
-          diagnostics: diagnostics(
-            'структурированный ответ не прочитан: ' + redact(String(error)).slice(0, 300),
+        const usage = telemetry.usage(result.code === 0 && !result.timedOut && !signal.aborted);
+        const model = telemetry.model();
+        const terminalReason = telemetry.terminalReason();
+        const compactions = telemetry.compactions();
+        // Сообщённые runtime счётчики и стоимость — и в диагностике вызова:
+        // runtime.log ограничен и итоговой строки может не содержать. Там же
+        // исход хода claude и число сжатий контекста (успешное сжатие — не отказ).
+        await writeFile(
+          join(dir, 'runtime.json'),
+          JSON.stringify(
+            {
+              ...result.diagnostics,
+              usage,
+              ...(terminalReason ? { terminalReason } : {}),
+              ...(compactions ? { compactions } : {}),
+            },
+            null,
+            2,
           ),
+        );
+        // Нехватка окна контекста — по `terminal_reason` итогового события
+        // claude, а не по тексту причины (в нём числа токенов).
+        const contextExhausted =
+          runtime === 'claude'
+            ? claudeContextLimit(terminalReason, telemetry.numTurns())
+            : undefined;
+        const bookkeeping = ['system', 'result', 'error', 'session.created', 'thread.started'];
+        const started =
+          result.timedOut ||
+          runtimeEvents(result.stdout).events.some((e) => !bookkeeping.includes(String(e.type)));
+        const reason = () => {
+          let text: string | undefined;
+          if (runtime === 'claude') {
+            const last = runtimeEvents(result.stdout).events.findLast(
+              (e) => e.type === 'result',
+            ) as { result?: unknown } | undefined;
+            if (typeof last?.result === 'string') text = last.result;
+          }
+          text ??= result.stderr
+            .split('\n')
+            .map((l) => l.trim())
+            .filter(Boolean)
+            .at(-1);
+          return text ? redact(text).slice(0, 300) : undefined;
         };
+        const base = {
+          text: redact(result.stdout).slice(-20000),
+          model,
+          runtimeVersion: version,
+          usage,
+          ...(review ? { inspection: inspectReview(runtime, raw, redact) } : {}),
+        };
+        const diagnostics = (why?: string) => ({
+          exitCode: result.code,
+          ...(why ? { reason: why } : {}),
+          log: logPath,
+          ...(contextExhausted ? { contextExhausted } : {}),
+        });
+        const expired =
+          signal.aborted && (signal.reason as Error | undefined)?.name === 'TimeoutError';
+        if (result.timedOut || expired)
+          return {
+            ...base,
+            status: 'timeout',
+            diagnostics: diagnostics(`исчерпан лимит времени: ${Math.round(r.timeoutMs / 1000)} с`),
+          };
+        if (signal.aborted)
+          return { ...base, status: 'cancelled', diagnostics: diagnostics('прогон прерван') };
+        if (result.code !== 0)
+          return {
+            ...base,
+            // Нехватка окна — ответ runtime о запросе, а не недоступный runtime.
+            status: started || contextExhausted ? 'failed' : 'unavailable',
+            diagnostics: diagnostics(
+              `код ${result.code}${reason() ? ': ' + reason() : ''}` +
+                (!started && homeHint ? `; облегчённый режим: ${homeHint}` : ''),
+            ),
+          };
+        let output: unknown;
+        try {
+          if (runtime === 'codex') {
+            // Без ссылок (O_NOFOLLOW) и с пределом; итог — в каталог вызова.
+            const cleaned = redact(await readBounded(resultPath, CODEX_RESULT_LIMIT));
+            await writeFile(savedResult, cleaned);
+            output = JSON.parse(cleaned);
+          } else {
+            const { events, malformed } = runtimeEvents(result.stdout);
+            const last = events.findLast((e) => e.type === 'result');
+            // `is_error` проверяется до разбора: `claudeResult` требует поле
+            // `structured_output`, которого у такого `result` нет, и отказ
+            // runtime при коде 0 читался как непрочитанный ответ.
+            if (last?.is_error === true)
+              return {
+                ...base,
+                status: 'failed',
+                diagnostics: diagnostics(
+                  redact(typeof last.result === 'string' ? last.result : 'ошибка runtime').slice(
+                    0,
+                    300,
+                  ),
+                ),
+              };
+            // Строки `result` нет, а поток содержит неразобранную строку (итог
+            // оборван на выходе процесса): ответ — принятый вызов
+            // `StructuredOutput` из того же потока (F59). Целая строка `result`
+            // без ответа — решение CLI, она остаётся отказом.
+            const accepted =
+              last === undefined && malformed ? acceptedStructuredOutput(events) : undefined;
+            output = accepted ? accepted.value : claudeResult.parse(last).structured_output;
+          }
+        } catch (error) {
+          // Непрочитанный файл не замаскирован: на диске он не остаётся.
+          if (error instanceof OversizedFile)
+            await rm(savedResult, { force: true }).catch(() => undefined);
+          return {
+            ...base,
+            status: 'failed',
+            diagnostics: diagnostics(
+              'структурированный ответ не прочитан: ' + redact(String(error)).slice(0, 300),
+            ),
+          };
+        }
+        return { ...base, status: 'ok', output, diagnostics: diagnostics() };
+      } finally {
+        // Каталог ответа исполнителя убирается на любом исходе.
+        if (outDir) await rm(outDir, { recursive: true, force: true }).catch(() => undefined);
       }
-      return { ...base, status: 'ok', output, diagnostics: diagnostics() };
     },
   };
 }

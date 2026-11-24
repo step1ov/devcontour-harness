@@ -177,6 +177,8 @@ while [ $# -gt 0 ]; do [ "$1" = "--output-last-message" ] && OUT="$2"; shift; do
 ( echo hacked > "$HOME/.claude/settings.json" ) 2>/dev/null && echo "claude-settings=ok" >> "$R" || echo "claude-settings=denied" >> "$R"
 ( echo hacked > "$HOME/.codex/config.toml" ) 2>/dev/null && echo "codex-config=ok" >> "$R" || echo "codex-config=denied" >> "$R"
 [ -f "$CODEX_HOME/auth.json" ] && [ "$CODEX_HOME" != "$HOME/.codex" ] && echo "codex-home=own" >> "$R" || echo "codex-home=shared" >> "$R"
+( echo '{"refreshed":true}' > "$CODEX_HOME/auth.json" ) 2>/dev/null && echo "auth-refresh=ok" >> "$R" || echo "auth-refresh=denied" >> "$R"
+( ln -sf "$HOME/.codex/config.toml" "$CALL_DIR/runtime.log" ) 2>/dev/null && echo "call-dir=ok" >> "$R" || echo "call-dir=denied" >> "$R"
 ( echo inside > "${cwd}/inside.txt" ) && echo "write-inside=ok" >> "$R" || echo "write-inside=fail" >> "$R"
 ( echo outside > "${outside}" ) 2>/dev/null && echo "write-outside=ok" >> "$R" || echo "write-outside=denied" >> "$R"
 ( echo tmp > "$TMPDIR/t.txt" ) && echo "write-tmp=ok" >> "$R" || echo "write-tmp=fail" >> "$R"
@@ -209,7 +211,7 @@ echo '{}'
           light: { guard: [cwd, scratch] },
         },
         timeoutMs: 150_000,
-        env: { PATH: process.env.PATH!, HOME: home, TMPDIR: scratch },
+        env: { PATH: process.env.PATH!, HOME: home, TMPDIR: scratch, CALL_DIR: call },
         artifactDir: call,
       },
       AbortSignal.timeout(170_000),
@@ -226,7 +228,18 @@ echo '{}'
     assert.equal(report['codex-config'], 'denied');
     assert.equal(readFileSync(join(home, '.codex', 'config.toml'), 'utf8'), 'model = "x"\n');
     assert.equal(report['codex-home'], 'own');
-    assert.equal(existsSync(join(call, 'runtime-home')), false, 'копия входа убрана');
+    // Вход — ссылкой на настоящий файл: обновление токена попадает в него,
+    // копий входа нет ни в каталоге вызова, ни после вызова.
+    assert.equal(report['auth-refresh'], 'ok');
+    assert.equal(
+      readFileSync(join(home, '.codex', 'auth.json'), 'utf8').trim(),
+      '{"refreshed":true}',
+    );
+    assert.equal(existsSync(join(call, 'auth.json')), false);
+    assert.equal(existsSync(join(call, 'runtime-home')), false);
+    // Каталог вызова (журнал, итог controller) исполнителю не открыт.
+    assert.equal(report['call-dir'], 'denied');
+    assert.equal(existsSync(join(call, 'result.json')), true, 'итог перенесён controller');
     assert.equal(report['write-inside'], 'ok');
     assert.equal(report['write-tmp'], 'ok');
     assert.equal(report['write-outside'], 'denied');
@@ -236,5 +249,54 @@ echo '{}'
     else t.diagnostic('docker недоступен: проверка docker пропущена');
     if (browser) assert.equal(report.browser, 'ok');
     else t.diagnostic('headless-браузер не найден: проверка браузера пропущена');
+  },
+);
+
+test(
+  'отказ механизма границы: домашний каталог CLI не создаётся, вход нигде не оседает',
+  { skip: !supported },
+  async () => {
+    const { writeGuardProbe } = await import('../src/environment/write-guard.ts');
+    const { controllerTemp } = await import('../src/environment/controller-temp.ts');
+    const root = realpathSync(mkdtempSync(join(tmpdir(), 'light-refuse-')));
+    const home = join(root, 'home');
+    execFileSync('mkdir', ['-p', join(home, '.codex'), join(root, 'call'), join(root, 'w')]);
+    writeFileSync(join(home, '.codex', 'auth.json'), '{"fake":true}');
+    const before = readdirSync(controllerTemp.dir()).filter((n) => n.startsWith('hx-home-'));
+    const original = writeGuardProbe.support;
+    writeGuardProbe.support = () => ({ ok: false, detail: 'нет механизма (тест)' });
+    try {
+      const out = await cliAdapter('codex', { executable: '/bin/echo' }).invoke(
+        {
+          callId: 'c2',
+          task: 'implement',
+          binding: { runtime: 'codex' },
+          cwd: join(root, 'w'),
+          prompt: 'p',
+          session: { kind: 'fresh' },
+          sandbox: {
+            mode: 'os',
+            writable: [join(root, 'w')],
+            denied: [],
+            network: { domains: [] },
+            light: { guard: [join(root, 'w')] },
+          },
+          timeoutMs: 10_000,
+          env: { PATH: process.env.PATH!, HOME: home },
+          artifactDir: join(root, 'call'),
+        },
+        AbortSignal.timeout(20_000),
+      );
+      assert.equal(out.status, 'unavailable');
+      assert.match(out.diagnostics.reason ?? '', /нет механизма \(тест\)/);
+      const after = readdirSync(controllerTemp.dir()).filter((n) => n.startsWith('hx-home-'));
+      assert.deepEqual(after, before, 'домашний каталог не создан');
+      assert.deepEqual(
+        readdirSync(join(root, 'call')).filter((n) => /auth|credentials|home/.test(n)),
+        [],
+      );
+    } finally {
+      writeGuardProbe.support = original;
+    }
   },
 );
