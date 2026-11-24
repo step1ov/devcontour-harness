@@ -498,3 +498,24 @@ test('A68-r3: macOS открывает компоненты отчёта с O_NO
   if (process.platform === 'darwin') assert.equal(reportNoFollowAny(), true);
   else assert.equal(reportNoFollowAny(), false);
 });
+
+test('молчал ли gate на базе — по итогу harness gates на этом коммите', async () => {
+  const { silentGateOnSha } = await import('../src/verification/gates-at.ts');
+  const state = realpathSync(mkdtempSync(join(tmpdir(), 'harness-silent-')));
+  const sha = 'a'.repeat(40);
+  mkdirSync(join(state, 'gates-at', 'G1'), { recursive: true });
+  writeFileSync(
+    join(state, 'gates-at', 'G1', 'result.json'),
+    JSON.stringify({
+      at: new Date().toISOString(),
+      data: {
+        repositoryId: 'app',
+        sha,
+        gates: [{ gate: 'unit', status: 'failed', summary: 'GATE_SILENT_FAILURE: …' }],
+      },
+    }),
+  );
+  assert.equal(silentGateOnSha(state, 'app', sha, 'unit'), true);
+  assert.equal(silentGateOnSha(state, 'app', sha, 'other'), false);
+  assert.equal(silentGateOnSha(state, 'app', 'b'.repeat(40), 'unit'), false);
+});
