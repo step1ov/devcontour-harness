@@ -381,3 +381,33 @@ test('ревью 1: env-up там, где файл окружения не за�
   });
   assert.doesNotMatch(failed.readiness?.logs.rabbit ?? '', /VALUE-XYZ|ALUE/);
 });
+
+test('ревью 3: env-up пишет запись владения своего репозитория (compose-services.<репозиторий>.json)', async () => {
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'compose-rec-')));
+  const file = join(dir, 'attempt-env.api.json');
+  writeFileSync(file, '{}');
+  const project = composeProjectName('r1', 'api');
+  await composeUp({
+    env: {
+      COMPOSE_PROJECT_NAME: project,
+      HARNESS_ATTEMPT_ENV_FILE: file,
+      HARNESS_ATTEMPT_ID: 'r1',
+      DEVCONTOUR_REPOSITORY_ID: 'api',
+    },
+    cwd: dir,
+    docker: fake(0).docker,
+  });
+  const record = JSON.parse(readFileSync(join(dir, 'compose-services.api.json'), 'utf8')) as Record<
+    string,
+    unknown
+  >;
+  assert.deepEqual(
+    [record.owner, record.project, record.attemptId, record.repositoryId],
+    ['harness-env-up', project, 'r1', 'api'],
+  );
+  const owned = await ownedComposeProjects([{ id: 'r1', dir }], ['app', 'api']);
+  assert.deepEqual(
+    owned.map((o) => [o.repositoryId, o.project]),
+    [['api', project]],
+  );
+});

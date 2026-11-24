@@ -15,7 +15,7 @@ import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
@@ -663,4 +663,26 @@ test('ревью 2: второй проход приёмки выпуска, и�
   assert.equal(r.passes?.status, 'failed');
   assert.match(r.passes?.reason ?? '', /изменил своё дерево/);
   assert.equal(r.findings.length, 1);
+});
+
+test('ревью 3: отмена во время второго прохода — деревья обоих проходов убраны', async () => {
+  const f = fixture();
+  ready(f.engine, graphOf({ w: [] }));
+  accept(f.engine, f.base, f.head);
+  f.scenario({
+    reviewer: verdict(false, { findings: [finding('Медиа не через Caddy')] }),
+    refuter: { sleepMs: 5000, result: { summary: 'x', verdicts: [], missed: [] } },
+  });
+  const abort = new AbortController();
+  setTimeout(() => abort.abort(), 1500);
+  await assert.rejects(f.review({ signal: abort.signal }));
+  assert.ok(
+    existsSync(`${f.scenarioPath}.refuter.0.started`),
+    'отмена пришла во время второго прохода',
+  );
+  const trees = f
+    .git('worktree', 'list', '--porcelain')
+    .split('\n')
+    .filter((l) => l.startsWith('worktree '));
+  assert.equal(trees.length, 1, trees.join('\n'));
 });

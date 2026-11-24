@@ -16,6 +16,7 @@ import {
   mergePasses,
   needsSecondPass,
   refuteResultSchema,
+  refutePromptText,
   reviewPassModeOf,
 } from '../src/contracts/index.ts';
 import { refuteOutputSchema } from '../src/agents/schemas.ts';
@@ -315,4 +316,14 @@ test('ревью 1: второй проход, изменивший своё д�
   assert.equal(r.passed, true);
   assert.equal(r.reviewPasses?.status, 'failed');
   assert.match(r.reviewPasses?.reason ?? '', /изменил своё дерево/);
+});
+
+test('ревью 3: запрос второго прохода называет дерево чистым и неподготовленным', () => {
+  const text = refutePromptText(
+    [{ index: 0, finding: { severity: 'blocking', message: 'A' } }],
+    'on-reject',
+  );
+  assert.match(text, /clean checkout of the same commit/);
+  assert.match(text, /no installed dependencies, build output or running services/);
+  assert.match(text, /do not rely on running the project commands/);
 });

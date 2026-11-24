@@ -32,6 +32,7 @@ import {
   reviewPassModeOf,
 } from '../contracts/index.ts';
 import { refuteOutputSchema, reviewOutputSchema } from '../agents/schemas.ts';
+import { attachControllerIndex, detachControllerIndex } from '../engine/trusted-git.ts';
 import { redactInspection } from '../agents/inspect.ts';
 import { chooseCheckoutRoot, checkoutPath } from '../environment/checkout-root.ts';
 import { credentialPaths } from '../environment/isolation.ts';
@@ -418,6 +419,9 @@ export async function reviewBranch(
   try {
     await git(path, 'worktree', 'add', '--detach', cwd, head);
     added = true;
+    // Свой index controller: проверка дерева после reviewer не верит флагам
+    // index дерева (ревью 3).
+    await attachControllerIndex(cwd, 'HEAD');
     response = await measuredInvoke(
       engine,
       adapter,
@@ -488,66 +492,72 @@ export async function reviewBranch(
           passes = choice2.mode === 'off' ? undefined : { ...record0, status: 'skipped' };
         else {
           const refuteCwd = cwd + '-refute';
-          const refute = await git(path, 'worktree', 'add', '--detach', refuteCwd, head)
-            .then(() =>
-              measuredInvoke(
-                engine,
-                adapter,
-                {
-                  callId: randomUUID(),
-                  task: 'review-refute',
-                  binding: choice.reviewer,
-                  cwd: refuteCwd,
-                  prompt: prompt + '\n\n' + refutePromptText(blocking, choice2.mode),
-                  outputSchema: refuteOutputSchema,
-                  session: { kind: 'fresh' },
-                  sandbox: {
-                    mode: policy.isolation.mode,
-                    writable: [],
-                    denied: hidden,
-                    ...(placement.root ? { checkouts: [placement.root] } : {}),
-                    readable: [refuteCwd, ...repos.map((r) => join(r, '.git'))],
-                    network: { domains: policy.isolation.domains },
-                  },
-                  timeoutMs: policy.runTimeoutMs,
-                  env: Object.fromEntries(
-                    Object.entries(execution.env).filter(
-                      (e): e is [string, string] => e[1] !== undefined,
+          let refute: Awaited<ReturnType<typeof measuredInvoke>> | undefined;
+          let refuteDirty = false;
+          // Уборка дерева второго прохода — на любом исходе, и при отмене или
+          // исчерпанном бюджете (ревью 3).
+          try {
+            refute = await git(path, 'worktree', 'add', '--detach', refuteCwd, head)
+              .then(() => attachControllerIndex(refuteCwd, 'HEAD'))
+              .then(() =>
+                measuredInvoke(
+                  engine,
+                  adapter,
+                  {
+                    callId: randomUUID(),
+                    task: 'review-refute',
+                    binding: choice.reviewer,
+                    cwd: refuteCwd,
+                    prompt: prompt + '\n\n' + refutePromptText(blocking, choice2.mode),
+                    outputSchema: refuteOutputSchema,
+                    session: { kind: 'fresh' },
+                    sandbox: {
+                      mode: policy.isolation.mode,
+                      writable: [],
+                      denied: hidden,
+                      ...(placement.root ? { checkouts: [placement.root] } : {}),
+                      readable: [refuteCwd, ...repos.map((r) => join(r, '.git'))],
+                      network: { domains: policy.isolation.domains },
+                    },
+                    timeoutMs: policy.runTimeoutMs,
+                    env: Object.fromEntries(
+                      Object.entries(execution.env).filter(
+                        (e): e is [string, string] => e[1] !== undefined,
+                      ),
                     ),
-                  ),
-                  artifactDir: join(dir, 'refute'),
-                  secrets: [...(execution.redact.secrets ?? [])],
-                },
-                signal,
-                {
-                  repositoryId: repo.id,
-                  subjectId: subject,
-                  subjectKind: 'other',
-                  stage: 'code-review-refute',
-                },
-              ),
-            )
-            .catch((error: unknown) => {
-              if (signal.aborted) throw cancelled(signal);
-              if (error instanceof TaskFailure && error.kind === 'budget')
-                throw new HarnessError('BUDGET_EXHAUSTED', error.message);
-              return undefined;
-            });
-          // Дерево второго прохода проверяется до уборки (ревью 2): изменённое
-          // reviewer — второй проход не состоялся, действует первый.
-          const refuteDirty =
-            !!refute &&
-            (!!(await git(
-              refuteCwd,
-              'status',
-              '--porcelain',
-              '--untracked-files=all',
-              '--ignored',
-            ).catch(() => 'unknown')) ||
-              (await git(refuteCwd, 'rev-parse', 'HEAD').catch(() => '')) !== head);
-          await git(path, 'worktree', 'remove', '--force', refuteCwd).catch(() => undefined);
-          // Дерево создано выше этим вызовом.
-          await rm(refuteCwd, { recursive: true, force: true }).catch(() => undefined);
+                    artifactDir: join(dir, 'refute'),
+                    secrets: [...(execution.redact.secrets ?? [])],
+                  },
+                  signal,
+                  {
+                    repositoryId: repo.id,
+                    subjectId: subject,
+                    subjectKind: 'other',
+                    stage: 'code-review-refute',
+                  },
+                ),
+              )
+              .catch((error: unknown) => {
+                if (signal.aborted) throw cancelled(signal);
+                if (error instanceof TaskFailure && error.kind === 'budget')
+                  throw new HarnessError('BUDGET_EXHAUSTED', error.message);
+                return undefined;
+              });
+            // Дерево второго прохода проверяется до уборки (ревью 2) — с index
+            // controller, так что флаги index дерева изменений не прячут; то же
+            // правило, что у ревью попытки: без игнорируемых файлов (ревью 3).
+            refuteDirty =
+              !!refute &&
+              (!!(await git(refuteCwd, 'status', '--porcelain', '--untracked-files=all').catch(
+                () => 'unknown',
+              )) ||
+                (await git(refuteCwd, 'rev-parse', 'HEAD').catch(() => '')) !== head);
+          } finally {
+            await detachControllerIndex(refuteCwd);
+            await git(path, 'worktree', 'remove', '--force', refuteCwd).catch(() => undefined);
+            // Дерево создано выше этим вызовом.
+            await rm(refuteCwd, { recursive: true, force: true }).catch(() => undefined);
+          }
           const parsed2 =
             refute?.status === 'ok' && !refuteDirty
               ? refuteResultSchema.safeParse(refute.output)
@@ -599,6 +609,7 @@ export async function reviewBranch(
       }
     }
   } finally {
+    await detachControllerIndex(cwd);
     if (added) await git(path, 'worktree', 'remove', '--force', cwd).catch(() => undefined);
     await rm(cwd, { recursive: true, force: true }).catch(() => undefined);
     if (trees !== dir) await rmdir(trees).catch(() => undefined);
