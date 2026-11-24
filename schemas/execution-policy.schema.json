@@ -398,6 +398,191 @@
                         "paths"
                       ],
                       "additionalProperties": false
+                    },
+                    "ui": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "browser"
+                            },
+                            "runner": {
+                              "default": "playwright",
+                              "type": "string",
+                              "const": "playwright"
+                            },
+                            "specs": {
+                              "maxItems": 50,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 500,
+                                "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
+                              }
+                            },
+                            "browser": {
+                              "default": "chromium",
+                              "type": "string",
+                              "enum": [
+                                "chromium",
+                                "firefox",
+                                "webkit"
+                              ]
+                            },
+                            "headless": {
+                              "default": true,
+                              "type": "boolean"
+                            },
+                            "artifacts": {
+                              "minItems": 1,
+                              "maxItems": 20,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 500,
+                                "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
+                              }
+                            }
+                          },
+                          "required": [
+                            "type"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "mobile"
+                            },
+                            "runner": {
+                              "default": "maestro",
+                              "type": "string",
+                              "const": "maestro"
+                            },
+                            "platform": {
+                              "type": "string",
+                              "enum": [
+                                "ios",
+                                "android"
+                              ]
+                            },
+                            "flows": {
+                              "minItems": 1,
+                              "maxItems": 50,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 500,
+                                "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
+                              }
+                            },
+                            "device": {
+                              "type": "object",
+                              "properties": {
+                                "pool": {
+                                  "minItems": 1,
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                                  }
+                                },
+                                "name": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 100
+                                },
+                                "os": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 40
+                                },
+                                "perAttempt": {
+                                  "default": false,
+                                  "type": "boolean"
+                                },
+                                "locale": {
+                                  "type": "string",
+                                  "pattern": "^[a-z]{2,3}(_[A-Z]{2})?$"
+                                }
+                              },
+                              "additionalProperties": false
+                            },
+                            "app": {
+                              "type": "object",
+                              "properties": {
+                                "id": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 200
+                                },
+                                "build": {
+                                  "minItems": 1,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  }
+                                },
+                                "install": {
+                                  "minItems": 1,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  }
+                                },
+                                "buildTimeoutMs": {
+                                  "type": "integer",
+                                  "exclusiveMinimum": 0,
+                                  "maximum": 3600000
+                                }
+                              },
+                              "required": [
+                                "id"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "artifacts": {
+                              "minItems": 1,
+                              "maxItems": 20,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 500,
+                                "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
+                              }
+                            },
+                            "flowTimeoutMs": {
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "maximum": 3600000
+                            },
+                            "driverStartupTimeoutMs": {
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "maximum": 600000
+                            }
+                          },
+                          "required": [
+                            "type",
+                            "platform",
+                            "flows",
+                            "device",
+                            "app"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -513,6 +698,191 @@
                         "paths"
                       ],
                       "additionalProperties": false
+                    },
+                    "ui": {
+                      "oneOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "browser"
+                            },
+                            "runner": {
+                              "default": "playwright",
+                              "type": "string",
+                              "const": "playwright"
+                            },
+                            "specs": {
+                              "maxItems": 50,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 500,
+                                "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
+                              }
+                            },
+                            "browser": {
+                              "default": "chromium",
+                              "type": "string",
+                              "enum": [
+                                "chromium",
+                                "firefox",
+                                "webkit"
+                              ]
+                            },
+                            "headless": {
+                              "default": true,
+                              "type": "boolean"
+                            },
+                            "artifacts": {
+                              "minItems": 1,
+                              "maxItems": 20,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 500,
+                                "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
+                              }
+                            }
+                          },
+                          "required": [
+                            "type"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "type": {
+                              "type": "string",
+                              "const": "mobile"
+                            },
+                            "runner": {
+                              "default": "maestro",
+                              "type": "string",
+                              "const": "maestro"
+                            },
+                            "platform": {
+                              "type": "string",
+                              "enum": [
+                                "ios",
+                                "android"
+                              ]
+                            },
+                            "flows": {
+                              "minItems": 1,
+                              "maxItems": 50,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 500,
+                                "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
+                              }
+                            },
+                            "device": {
+                              "type": "object",
+                              "properties": {
+                                "pool": {
+                                  "minItems": 1,
+                                  "maxItems": 20,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "pattern": "^[A-Za-z0-9_-]{1,80}$"
+                                  }
+                                },
+                                "name": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 100
+                                },
+                                "os": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 40
+                                },
+                                "perAttempt": {
+                                  "default": false,
+                                  "type": "boolean"
+                                },
+                                "locale": {
+                                  "type": "string",
+                                  "pattern": "^[a-z]{2,3}(_[A-Z]{2})?$"
+                                }
+                              },
+                              "additionalProperties": false
+                            },
+                            "app": {
+                              "type": "object",
+                              "properties": {
+                                "id": {
+                                  "type": "string",
+                                  "minLength": 1,
+                                  "maxLength": 200
+                                },
+                                "build": {
+                                  "minItems": 1,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  }
+                                },
+                                "install": {
+                                  "minItems": 1,
+                                  "type": "array",
+                                  "items": {
+                                    "type": "string",
+                                    "minLength": 1
+                                  }
+                                },
+                                "buildTimeoutMs": {
+                                  "type": "integer",
+                                  "exclusiveMinimum": 0,
+                                  "maximum": 3600000
+                                }
+                              },
+                              "required": [
+                                "id"
+                              ],
+                              "additionalProperties": false
+                            },
+                            "artifacts": {
+                              "minItems": 1,
+                              "maxItems": 20,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 500,
+                                "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
+                              }
+                            },
+                            "flowTimeoutMs": {
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "maximum": 3600000
+                            },
+                            "driverStartupTimeoutMs": {
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "maximum": 600000
+                            }
+                          },
+                          "required": [
+                            "type",
+                            "platform",
+                            "flows",
+                            "device",
+                            "app"
+                          ],
+                          "additionalProperties": false
+                        }
+                      ]
                     }
                   },
                   "required": [
@@ -1118,6 +1488,34 @@
             },
             "required": [
               "paths"
+            ],
+            "additionalProperties": false
+          },
+          "gateway": {
+            "type": "object",
+            "properties": {
+              "url": {
+                "type": "string",
+                "minLength": 8,
+                "maxLength": 300,
+                "pattern": "^https?:\\/\\/"
+              },
+              "env": {
+                "type": "object",
+                "propertyNames": {
+                  "type": "string",
+                  "pattern": "^(?!HARNESS_|DEVCONTOUR_|DYLD_)[A-Z_][A-Z0-9_]*$"
+                },
+                "additionalProperties": {
+                  "type": "string",
+                  "maxLength": 300,
+                  "pattern": "^(\\/|$)"
+                }
+              }
+            },
+            "required": [
+              "url",
+              "env"
             ],
             "additionalProperties": false
           }
@@ -2466,6 +2864,100 @@
       "required": [
         "mode"
       ],
+      "additionalProperties": false
+    },
+    "harnessMode": {
+      "type": "string",
+      "enum": [
+        "light",
+        "strict"
+      ]
+    },
+    "writeGuard": {
+      "type": "object",
+      "properties": {
+        "off": {
+          "type": "boolean",
+          "const": true
+        },
+        "add": {
+          "maxItems": 64,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 500,
+            "pattern": "^(\\/|~\\/)"
+          }
+        },
+        "replace": {
+          "maxItems": 64,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 500,
+            "pattern": "^(\\/|~\\/)"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "attemptEnv": {
+      "type": "object",
+      "properties": {
+        "ports": {
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(?!HARNESS_|DEVCONTOUR_|DYLD_)[A-Z_][A-Z0-9_]*$"
+          }
+        },
+        "portRange": {
+          "type": "object",
+          "properties": {
+            "from": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 65535
+            },
+            "to": {
+              "type": "integer",
+              "minimum": 1024,
+              "maximum": 65535
+            }
+          },
+          "required": [
+            "from",
+            "to"
+          ],
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "release": {
+      "type": "object",
+      "properties": {
+        "review": {
+          "type": "string",
+          "enum": [
+            "required",
+            "advisory"
+          ]
+        },
+        "topology": {
+          "maxItems": 50,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 500,
+            "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
+          }
+        }
+      },
       "additionalProperties": false
     },
     "maxAttempts": {

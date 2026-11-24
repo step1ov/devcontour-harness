@@ -171,6 +171,8 @@ export interface InitOptions {
    * `leadTechnicalAnswers`.
    */
   recovery?: { mode: 'lead' | 'user'; diagnoseAfter?: number; leadResets?: number };
+  /** Режим harness новой политики (`--harness-mode`, alpha.69); нет — облегчённый. */
+  harnessMode?: 'light' | 'strict';
   env?: NodeJS.ProcessEnv;
   probe?: ToolProbe;
 }
@@ -374,6 +376,7 @@ export async function planProject(options: InitOptions): Promise<InitPlanned> {
       : {}),
     ...(options.leadTechnicalAnswers ? { leadTechnicalAnswers: true } : {}),
     ...(options.recovery ? { recovery: options.recovery } : {}),
+    ...(options.harnessMode ? { harnessMode: options.harnessMode } : {}),
   });
   const policyPath = join(root, PROJECT_POLICY_PATH);
   const policy = savedPolicy ?? executionPolicySchema.parse(generated.input);

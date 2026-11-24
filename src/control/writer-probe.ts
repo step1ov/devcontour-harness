@@ -22,6 +22,8 @@ import {
   roleBinding,
   type ExecutionPolicy,
   type RuntimeName,
+  strictSandbox,
+  harnessModeOf,
 } from '../contracts/index.ts';
 import { writerRunsChecks } from '../agents/cli-adapter.ts';
 import {
@@ -473,8 +475,12 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
     notes.push(
       `У репозитория ${repo.id} нет writerProbe: перечислите команды, которые правила проекта (AGENTS.md, навыки) требуют от исполнителя, — harness-setup предлагает их.`,
     );
-  if (policy.isolation.mode !== 'os')
-    notes.push('isolation.mode не os: исполнитель работает без песочницы, проба тоже.');
+  if (!strictSandbox(policy))
+    notes.push(
+      harnessModeOf(policy) === 'light'
+        ? 'Облегчённый режим: исполнитель работает на хосте с границей записи (своё дерево, TMPDIR, кеши); проба идёт без песочницы.'
+        : 'isolation.mode не os: исполнитель работает без песочницы, проба тоже.',
+    );
   const writers: WriterProbeWriter[] = [];
   let n = 0;
   for (const w of writersOf(policy, repo)) {
@@ -682,12 +688,11 @@ type WriterSpec = { runtime: 'codex' | 'claude'; toolProfile?: string; roles: st
 /** Профиль, механизм изоляции и сеть исполнителя. */
 function writerShape(policy: ExecutionPolicy, w: WriterSpec) {
   const profile = w.toolProfile ? policy.toolProfiles[w.toolProfile] : undefined;
-  const mechanism: WriterProbeWriter['mechanism'] =
-    policy.isolation.mode !== 'os'
-      ? 'none'
-      : w.runtime === 'codex'
-        ? 'codex-sandbox'
-        : 'sandbox-runtime';
+  const mechanism: WriterProbeWriter['mechanism'] = !strictSandbox(policy)
+    ? 'none'
+    : w.runtime === 'codex'
+      ? 'codex-sandbox'
+      : 'sandbox-runtime';
   const network = profileNetwork(w.runtime, profile);
   // Без поля `network` граница прежняя и инструменты runtime не закрыты:
   // проба не называет её режимом `none` или `loopback`.

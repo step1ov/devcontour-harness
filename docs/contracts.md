@@ -568,6 +568,29 @@ reviewer и автор те же — изменились только конт�
 изменилось против прежнего (`changes: {plan, policy, reviewer, context:
 {added, removed, changed}}`). Хост передаёт `planDigest` и `roundEpoch`
 сам; без них предел считается как прежде, по засчитанным раундам.
+**Что тратит предел раундов (0.1.0-alpha.69).** Предел тратит только
+настоящее изменение плана. Хост передаёт состав плана `planOrders`
+(`planOrderDigests(graph)`: ID поручения → digest значимого содержания —
+всех полей постановки, кроме версии API и источника `source` с ревизией; у
+требований без digest документа-источника, у контрактов — только ID), и
+раунд засчитан, только если против прежнего одобренного раунда (и против
+последнего, если он отклонён) добавлено, убрано или изменено поручение,
+работа которого не принята. Изменение поручения, работа которого принята
+(`done`) или дорабатывается после приёмки, — доработка: предел не тратит
+(`changes.orders.rework`). Указания ведущего (ревизия источника, документы и
+заметки в контексте), ответы владельца, политика и reviewer предел тоже не
+тратят. Эпоха доработки остаётся (свой счёт для изменений плана после неё),
+но израсходована она, только когда первый раунд после неё засчитан —
+бесплатная доработка эпоху не тратит. Защита от круга: бесплатных раундов
+подряд после последнего одобренного — не больше предела; дальше раунд
+неизменённого плана засчитан (`freeRoundsSinceApproved`). Без `planOrders`
+у прежнего раунда или во входе — сравнение `planDigest`, как в alpha.68.
+В облегчённом режиме (`harnessMode: light`) счёта раундов нет:
+`technicalReview` не отказывает по пределу раундов (`maxRounds` не
+действует), `reviewRoundCap` — `null`, строка — «раундов N, без предела
+(облегчённый режим; бюджет — время/стоимость выпуска)»; предел выпуска —
+`budgets.group`/`budgets.total`, исчерпание — `BUDGET_EXHAUSTED`, решает
+владелец. Без этих бюджетов `doctor` предупреждает строкой `light-no-budget`.
 Хост, который вёл раунды предмета до harness и хранит их сам, передаёт их
 как `history: {rounds, findings[]}`: пока у предмета нет раундов в движке,
 первый раунд получает номер `rounds + 1`, а находки последнего прежнего
@@ -1821,10 +1844,9 @@ view` в сеть не ходит. Тексты маскируются и обр
   нет. Не больше 50 (`truncated.sourceQuestions`).
 - `health.sources[] {connector, provider, level?, taskContext?,
 contractVersion?, line?, checkedAt}` — совместимость с Relay по последнему
-  наблюдению связки: `level` (`recommended`, `below-recommended`), объявил ли
-  Relay контекст задачи, версия договора REST и строка простыми словами
-  («Relay без контекста задачи: исполнитель не получит описание функции и
-  сценария; нужна Relay ≥ 0.14.0»).
+  наблюдению связки: `level` (`recommended`, `below-recommended`), есть ли
+  контекст задачи (с alpha.69 — у любой Relay 0.13: его собирает harness),
+  версия договора REST и строка простыми словами.
 - `questions[].options[] {id, label, recommended?}` и `questions[].rationale`
   — варианты ответа с рекомендуемым и обоснование исполнителя, как в `harness
 input-show` (маскируются, обрезаются до 200 символов; с `--no-titles` их
@@ -2271,7 +2293,10 @@ reason?}` (не больше 12 этапов, 20 компонентов в эт�
 before, after, added[], removed[], reason}` (причина — `--reason`, `reason`
   файла или «план вырос: +A (было ~N задач → стало ~M задач)»), строка
   журнала ведущего `lead.outline`. Регистрация графа записывает первое
-  появление новой работы (`work-seen`, `{at, graphId}`).
+  появление новой работы (`work-seen`, `{at, graphId}`). До первого `run`
+  каталог состояния ещё не привязан: `--policy P` привязывает и создаёт его
+  (как `run`), и план записывается до первого графа; без `--policy` у
+  непривязанного каталога — `NOT_FOUND` с подсказкой (0.1.0-alpha.69).
 - **Нет плана** — подсказка, а не блокировка: `status.outline {state:
 missing, code: RELEASE_OUTLINE_MISSING, line, lineEn}`, пока работы есть и
   выпуск не закрыт; `forecast.outline {state: missing, code, line}` —
@@ -2737,6 +2762,7 @@ stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` 
 | `input-carry`      | `--state D --request ID --reason T [--author A] [--policy F] [--reset]`                                                     | да    | `carried`, `superseded`, `changed`, `contextDigest`, `reviewRound`, поручение; `active` или `blocker`                                                                                                                                                       | Замена вопроса той же работой (если остановка не держится), снимок, ревью плана и перенос; повтор — `changed: false`                                                                                  |
 | `gates`            | `--state D [--policy F] --sha SHA\|HEAD [--gate a,b,@g] [--repository ID] [--fail-fast] [--human]`                          | да    | исход каждого gate (`passed`, `failed`, `not-run`, `skipped`), SHA, каталог логов                                                                                                                                                                           |
 | `review-code`      | `--state D [--policy F] --base REF --head REF [--role R] [--author A] [--repository ID]`                                    | да    | `CodeReviewRecord` (`kind: code`, `acceptance: false`)                                                                                                                                                                                                      | Те же ref — следующий раунд; тот же одобренный `head` и reviewer — тот же раунд без вызова; не приёмка                                                                                                |
+| `review-release`   | `--state D [--policy F] [--base REF] [--head REF] [--role R] [--author A] [--repository ID]`                                | да    | `CodeReviewRecord` (`kind: release`, `acceptance: false`, `contextDigest`)                                                                                                                                                                                  | Предмет — репозиторий, роль, SHA базы выпуска; head — target ref; договор выпуска в запросе; `release done` при `release.review: required` требует одобренного раунда на текущей цели                 |
 | `smoke`            | `--state D [--policy F] --sha SHA\|HEAD [--repository ID] [--human]`                                                        | да    | шаги окружения с длительностью, `passed`, класс отказа и совет, каталог логов                                                                                                                                                                               | Каждый вызов — новая проверка; gates и модели не вызываются, база состояния не открывается                                                                                                            |
 | `preview-start`    | `--state D [--policy F] [--preview ID] [--ref accepted\|SHA\|REF] [--work ID] [--repository ID] [--ttl DUR] [--idle DUR]`   | да    | `{preview, changed}`: receipt превью — адрес на loopback, коммит, срок, PID                                                                                                                                                                                 | То же превью на том же коммите — `changed: false`; другой коммит заменяет прежнее; внутри попытки и gate — `NOT_READY`                                                                                |
 | `preview-stop`     | `--state D [--policy F] [--preview ID] [--repository ID] [--all]`                                                           | да    | `{previews[], changed}`: итоговые receipt                                                                                                                                                                                                                   | Остановленное — `changed: false`                                                                                                                                                                      |
@@ -2746,7 +2772,7 @@ stdout — один JSON `CliEnvelope`: `{apiVersion, command, ok: true, data}` 
 | `lead-note`        | `--state D --text T [--work ID]` (синоним `lead note "T"`)                                                                  | да    | `lead {active, lastNote}`, запись, `line`                                                                                                                                                                                                                   | Каждый вызов — новая запись (до 200 символов, без управляющих символов и секретов); старые вытесняются пределом 200                                                                                   |
 | `lead-end`         | `--state D [--text T]` (синоним `lead end`)                                                                                 | да    | `lead {active: false, endedAt}`, запись, `line`                                                                                                                                                                                                             | Закрывает сессию                                                                                                                                                                                      |
 | `release-done`     | `--state D --summary T` (синоним `release done "T"`)                                                                        | да    | `release {doneAt, summary, works}`, `lead`, запись, `line`                                                                                                                                                                                                  | Только когда весь код принят (иначе `NOT_READY`); повтор заменяет отчёт                                                                                                                               |
-| `lead-outline`     | `--state D --file F [--reason T]` (синоним `lead outline`)                                                                  | да    | `outline` (редакция, этапы, `units`, `changes`), `changed`, `change?`, `line`                                                                                                                                                                               | Тот же план — `changed: false`; другой — новая редакция с причиной и строкой журнала ведущего                                                                                                         |
+| `lead-outline`     | `--state D --file F [--reason T] [--policy P]` (синоним `lead outline`)                                                     | да    | `outline` (редакция, этапы, `units`, `changes`), `changed`, `change?`, `line`                                                                                                                                                                               | Тот же план — `changed: false`; другой — новая редакция с причиной и строкой журнала ведущего                                                                                                         |
 | `capabilities`     | —                                                                                                                           | нет   | каталог общих операций (`OperationCatalog`)                                                                                                                                                                                                                 | Чистая функция установленной версии пакета                                                                                                                                                            |
 | `--version`        | —                                                                                                                           | нет   | версия пакета и API                                                                                                                                                                                                                                         | —                                                                                                                                                                                                     |
 

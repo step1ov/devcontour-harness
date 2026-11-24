@@ -53,6 +53,12 @@ export const environmentCauses = [
    * стартует (`GATE_SANDBOX_BROWSER`, 0.1.0-alpha.68).
    */
   'sandbox-browser',
+  /**
+   * Gate упал, не назвав причины: в выводе нет ни упавших тестов, ни строки
+   * ошибки (`GATE_DEFINITION_NO_CAUSE`, 0.1.0-alpha.69). Это правка команды
+   * gate (ход ведущего), а не кода задачи; попытка не засчитана.
+   */
+  'gate-definition',
   'dependency-network',
   'provider-auth',
   'provider-limit',

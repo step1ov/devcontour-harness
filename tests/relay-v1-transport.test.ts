@@ -801,6 +801,8 @@ void describe('relay-v1 transport (fake HTTP)', () => {
     } finally {
       await srv.close();
     }
+    // Без capability (alpha.69) маршрут сервера не вызывается: контекст
+    // собирает транспорт из обычных маршрутов (их здесь нет — not-found).
     const old = await fake(contextRoutes(() => ok(contextBody()), CAPS));
     try {
       await rejects(
@@ -808,10 +810,10 @@ void describe('relay-v1 transport (fake HTTP)', () => {
           targetDocuments: true,
           maxBytes: 1 << 20,
         }),
-        'unsupported',
+        'not-found',
       );
       assert.ok(
-        !old.seen.some((x) => x.path.includes('/board-tasks/')),
+        !old.seen.some((x) => x.path.endsWith('/context') && x.path.includes('/board-tasks/')),
         'route контекста не вызван',
       );
     } finally {

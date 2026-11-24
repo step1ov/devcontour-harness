@@ -83,8 +83,9 @@ import { Harness } from './harness.ts';
 import { carriedInput, statusOf } from './status.ts';
 import { acceptedTargets } from './target.ts';
 import { WorkflowQueue } from './workflow.ts';
-import { reviewRoundCap } from './review.ts';
-import { reviewSubjectSummary, subjectRoundBudget } from './review-summary.ts';
+import { reviewRoundCap, strictReviewRoundCap } from './review.ts';
+import { releaseReviewState } from './release-review-state.ts';
+import { LIGHT_ROUNDS_EN, reviewSubjectSummary, subjectRoundBudget } from './review-summary.ts';
 import { stageOfStep } from './stage.ts';
 import { setupProgress } from './setup-progress.ts';
 import { cachedUpdates, installedHarness, loadUpdatesConfig } from '../update/check.ts';
@@ -422,7 +423,7 @@ export function reviewsOf(
           en: subjectLineParts(en, s.kind, s.subject),
         },
       }))(
-        `${s.kind} ${s.subject}: ${reviewVerdictText(s.approved, counts, 'en')}; rounds ${s.rounds.used}${s.rounds.max === null ? '' : '/' + s.rounds.max}`,
+        `${s.kind} ${s.subject}: ${reviewVerdictText(s.approved, counts, 'en')}; rounds ${s.rounds.max === null ? `${r.round}, ${LIGHT_ROUNDS_EN}` : `${s.rounds.used}/${s.rounds.max}`}`,
       ),
     };
   });
@@ -431,7 +432,7 @@ export function reviewsOf(
     (r): OperatorReviewInput => {
       const counts = findingCounts(r.findings);
       return {
-        kind: 'code',
+        kind: r.kind === 'release' ? 'release' : 'code',
         subject: r.subject,
         at: r.at,
         approved: r.approved,
@@ -1365,7 +1366,9 @@ export function collectOperatorViewInput(
       effective: {
         inputPolicy,
         stall: policy.stallSweep ?? DEFAULT_STALL_SWEEP,
-        reviewRoundCap: reviewRoundCap(policy),
+        // Порог настроек — предел строгого режима; в облегчённом раундов не
+        // считают (строки ревью: «без предела»), поле договора — число.
+        reviewRoundCap: strictReviewRoundCap(policy),
       },
       defaulted: defaultedPaths(policy, raw),
       ...((layers) => (layers ? { manifestLayers: layers } : {}))(manifestLayers(view.baseDir)),
@@ -1464,6 +1467,23 @@ export function collectOperatorViewInput(
       ...((outline) => (outline ? { outline } : {}))(
         v.local('release-outline', WORKSPACE_OWNER, 'outline'),
       ),
+      // Приёмка выпуска (ревизия 9): цель — по состоянию (принятая работа).
+      ...((r) =>
+        r.repositories.length
+          ? {
+              releaseReview: {
+                required: r.required,
+                status: r.status,
+                ...(r.round !== undefined ? { round: r.round } : {}),
+                ...(r.open !== undefined ? { open: r.open } : {}),
+                ...(r.blocking !== undefined ? { blocking: r.blocking } : {}),
+                ...(r.base ? { base: r.base, baseSource: r.baseSource! } : {}),
+                ...(r.head ? { head: r.head } : {}),
+                ...(r.target ? { target: r.target } : {}),
+                ...(r.at ? { at: r.at } : {}),
+              },
+            }
+          : {})(releaseReviewState(v, policy)),
       ...((r) => (r ? { resources: r } : {}))(
         resourcesInputOf(policy, h.stateDir, view.baseDir, {
           // Попытка закончилась по снимку хранилища: квитанция окружения
@@ -1472,9 +1492,12 @@ export function collectOperatorViewInput(
             const a = v.attempt(runId);
             return a ? a.status !== 'active' : undefined;
           },
-          heldGates: h.engine
-            .environmentGateHolds(v)
-            .map((x) => ({ repositoryId: x.repositoryId, gate: x.gate, workId: x.workId })),
+          heldGates: h.engine.environmentGateHolds(v).map((x) => ({
+            repositoryId: x.repositoryId,
+            gate: x.gate,
+            workId: x.workId,
+            ...(x.cause ? { cause: x.cause } : {}),
+          })),
         }),
       ),
       ...(status.budgets ? { budgets: status.budgets.budgets } : {}),
@@ -1957,7 +1980,7 @@ function emptyInput(policy: ViewPolicy, now: number, stateDir: string): Operator
     effective: {
       inputPolicy: policy.policy.inputPolicy ?? DEFAULT_INPUT_POLICY,
       stall: policy.policy.stallSweep ?? DEFAULT_STALL_SWEEP,
-      reviewRoundCap: reviewRoundCap(policy.policy),
+      reviewRoundCap: strictReviewRoundCap(policy.policy),
     },
     defaulted: defaultedPaths(policy.policy, policy.raw),
     ...((layers) => (layers ? { manifestLayers: layers } : {}))(manifestLayers(policy.baseDir)),

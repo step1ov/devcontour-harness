@@ -129,14 +129,17 @@ export type ContextLimit = (typeof contextLimits)[number];
  * (0.1.0-alpha.66): `sandbox-process-list` — gate запускает `ps`, а
  * песочница ОС проверок его не даёт; `sandbox-signal` — gate шлёт сигнал
  * процессу вне песочницы (`kill EPERM`), `sandbox-browser` — gate запускает
- * браузер, который в песочнице не стартует (0.1.0-alpha.68). Попытка их не
- * засчитывает, автоматического повтора нет: ход ведущего — поменять gate или
- * команду.
+ * браузер, который в песочнице не стартует (0.1.0-alpha.68); `gate-definition`
+ * — gate упал, не назвав причины (ни упавших тестов, ни строки ошибки: обёртка
+ * скрыла вывод), и это правка команды gate, а не кода задачи
+ * (0.1.0-alpha.69). Попытка их не засчитывает, автоматического повтора нет:
+ * ход ведущего — поменять gate или команду.
  */
 export const noRetryEnvironmentCauses = [
   'sandbox-process-list',
   'sandbox-signal',
   'sandbox-browser',
+  'gate-definition',
 ] as const;
 export type NoRetryEnvironmentCause = (typeof noRetryEnvironmentCauses)[number];
 /** Код отказа gate, с которого начинается сводка evidence отказа без повтора. */
@@ -144,6 +147,7 @@ export const NO_RETRY_GATE_CODES: Record<NoRetryEnvironmentCause, string> = {
   'sandbox-process-list': 'GATE_SANDBOX_PROCESS_LIST',
   'sandbox-signal': 'GATE_SANDBOX_SIGNAL',
   'sandbox-browser': 'GATE_SANDBOX_BROWSER',
+  'gate-definition': 'GATE_DEFINITION_NO_CAUSE',
 };
 
 /**
@@ -1025,7 +1029,8 @@ export const workStateSchema = z.strictObject({
   /**
    * Удержание gate по отказу окружения без повтора (0.1.0-alpha.66):
    * попытка этой работы упала `sandbox-process-list` на вызове `ps`, который
-   * есть уже в базе (или `sandbox-signal`, `sandbox-browser` — 0.1.0-alpha.68). Пока определение gate (`gateDigest`) то же и ведущий не
+   * есть уже в базе (или `sandbox-signal`, `sandbox-browser` — 0.1.0-alpha.68;
+   * `gate-definition` — gate упал, не назвав причины, 0.1.0-alpha.69). Пока определение gate (`gateDigest`) то же и ведущий не
    * повторил эту работу (`retry --by lead`), работы репозитория, которым
    * нужен этот gate, не выдаются (`ENVIRONMENT_GATE_HELD`): тот же gate в той
    * же песочнице откажет снова. Держит, пока работа не принята и не отменена.
@@ -1040,13 +1045,15 @@ export const workStateSchema = z.strictObject({
       /**
        * Режим изоляции проверок при отказе (`os`): отказ — свойство
        * песочницы ОС; `isolation.mode: none` снимает удержание. Нет поля
-       * (состояние до этого поля) — `os`.
+       * (состояние до этого поля) — `os`. У `gate-definition` поля нет:
+       * причина в определении gate, а не в песочнице.
        */
       isolation: z.enum(['os', 'none']).optional(),
       /**
        * Причина отказа без повтора, удержавшего gate (0.1.0-alpha.68):
-       * `sandbox-process-list`, `sandbox-signal`, `sandbox-browser`. Нет поля
-       * (состояние до этого поля) — `sandbox-process-list`.
+       * `sandbox-process-list`, `sandbox-signal`, `sandbox-browser`;
+       * `gate-definition` (0.1.0-alpha.69) — gate не назвал причину провала.
+       * Нет поля (состояние до этого поля) — `sandbox-process-list`.
        */
       cause: z.enum(noRetryEnvironmentCauses).optional(),
     })
@@ -1575,6 +1582,18 @@ export const localSchemas = {
    * остаётся израсходованной и после отказа от доработки. Пишет регистрация
    * графа.
    */
+  /**
+   * База выпуска (0.1.0-alpha.69): запись по ID репозитория у `@workspace` —
+   * target ref репозитория при первой регистрации графа выпуска или при
+   * `lead outline` (что раньше). Новый выпуск (после `release done`)
+   * записывает новую базу. Читает приёмка выпуска (`review-release`).
+   */
+  'release-base': z.strictObject({
+    sha: gitShaSchema,
+    at: isoTimeSchema,
+    /** `attempt` — выпуск, начатый до alpha.69: база самой ранней его попытки. */
+    source: z.enum(['register', 'outline', 'attempt']),
+  }),
   'round-epochs': z.strictObject({
     epochs: z.array(z.strictObject({ at: isoTimeSchema, workId: idSchema })).max(100),
   }),

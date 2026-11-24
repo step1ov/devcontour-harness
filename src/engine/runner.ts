@@ -1,4 +1,6 @@
 import { freshDiagnosis } from '../projections/lead-recovery.ts';
+import { silentGateOnSha } from '../verification/gates-at.ts';
+import { controllerTemp } from '../environment/controller-temp.ts';
 import type { LeadDiagnosis } from '../contracts/execution.ts';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -53,6 +55,10 @@ import {
   type WorkState,
   hostStepFiles,
   infraViolations,
+  strictSandbox,
+  gateDigest,
+  harnessModeOf,
+  writeGuardActive,
 } from '../contracts/index.ts';
 import { changedFacts, resolvedHostFiles } from './infra-guard.ts';
 import { git, hostGitArgs } from '../environment/process.ts';
@@ -169,6 +175,13 @@ import {
 } from '../verification/dependencies.ts';
 import { CleanupFailure, cleanupEnvironment } from '../environment/lifecycle.ts';
 import { defaultResourceDatabase, withResources } from '../environment/resources.ts';
+import { guardEntries } from '../environment/write-guard.ts';
+import {
+  attemptEnvFile,
+  allocateAttemptPorts,
+  attemptVariables,
+  type AttemptPorts,
+} from '../environment/attempt-ports.ts';
 import { REQUIREMENT_GATE, assertRequirements } from '../verification/requirements.ts';
 import {
   BlockedError,
@@ -354,6 +367,9 @@ export class Runner {
   constructor(readonly options: RunnerOptions) {
     this.engine = options.engine;
     this.policy = options.engine.policy;
+    // Временные файлы controller — под каталогом состояния, когда граница
+    // записи открывает исполнителю системный временный каталог (alpha.69).
+    controllerTemp.use(writeGuardActive(this.policy) ? options.stateDir : undefined);
     this.owner = options.owner ?? 'harness-' + randomUUID();
     this.corpus = new CorpusStore(
       this.engine,
@@ -374,6 +390,8 @@ export class Runner {
   private placement?: CheckoutRoot;
   /** Когда истекает текущий предел времени попытки: от остатка считается бюджет хранилища. */
   private phaseDeadlines = new Map<string, number>();
+  /** Порты попытки облегчённого режима (alpha.69, `attemptEnv.ports`). */
+  private attemptPorts = new Map<string, Map<string, Record<string, number>>>();
   /**
    * Текст провала gates попытки-источника для writer продолжения (по ID
    * попытки): собирается при наложении черновика, расходуется запросом.
@@ -818,6 +836,24 @@ export class Runner {
           ...Object.fromEntries(dependencies.map((d) => [d.repositoryId, d.path])),
           [repo.id]: cwd,
         }),
+        // Облегчённый режим (alpha.69): своё имя проекта compose, свои порты
+        // и шлюз gates — исполнителю и gates одинаково.
+        ...(harnessModeOf(this.policy) === 'light'
+          ? {
+              ...attemptVariables(
+                attempt.id,
+                this.attemptPorts.get(attempt.id)?.get(repo.id) ?? {},
+                repo.gateway,
+                repo.id,
+                join(
+                  this.dirOf(attempt.repositoryId),
+                  'artifacts',
+                  attempt.id,
+                  attemptEnvFile(repo.id, repo.id === attempt.repositoryId),
+                ),
+              ),
+            }
+          : {}),
       },
       this.options.environment ?? process.env,
       this.policy.toolchain,
@@ -921,6 +957,20 @@ export class Runner {
               : []),
           ],
           network: { domains: this.policy.isolation.domains },
+          // Облегчённый режим (alpha.69): исполнитель как обычный разработчик,
+          // одна граница — запись в своё дерево, свой TMPDIR и кеши.
+          ...(!review && harnessModeOf(this.policy) === 'light'
+            ? {
+                light: writeGuardActive(this.policy)
+                  ? {
+                      guard: guardEntries(this.policy, [
+                        input.cwd,
+                        ...(scratch ? [scratch] : []),
+                      ]).map((e) => ('subpath' in e ? e.subpath : e.prefix)),
+                    }
+                  : {},
+              }
+            : {}),
         },
         timeoutMs: Math.min(this.policy.runTimeoutMs, input.timeoutMs ?? Infinity),
         env: Object.fromEntries(
@@ -1632,7 +1682,64 @@ export class Runner {
     const worktrees: string[] = [];
     const snapshots: DependencySnapshot[] = [];
     let preserve = false;
+    const leases: AttemptPorts[] = [];
     try {
+      // Облегчённый режим: свои порты попытки — до любой фазы, у каждого
+      // репозитория попытки (её и проверяемых потребителей) свои: стеки
+      // поставщика и потребителя не делят порты. Постоянные ресурсы-порты
+      // политики не выделяются. Нет свободного — отказ среды, попытка не
+      // засчитывается.
+      if (harnessModeOf(this.policy) === 'light' && this.policy.attemptEnv?.ports?.length) {
+        const byRepo = new Map<string, Record<string, number>>();
+        const exclude = this.policy.resources
+          .filter((r) => r.kind === 'port')
+          .map((r) => Number(r.value));
+        try {
+          for (const repositoryId of new Set([
+            repo.id,
+            ...(claimed.consumers ?? []).map((c) => c.repositoryId),
+          ])) {
+            const lease = await allocateAttemptPorts(
+              this.policy.attemptEnv,
+              this.options.resourceDatabase ?? defaultResourceDatabase(),
+              `${this.options.stateDir}:${attempt.id}:${repositoryId}`,
+              { exclude: [...exclude, ...leases.flatMap((l) => Object.values(l.ports))] },
+            );
+            leases.push(lease);
+            byRepo.set(repositoryId, lease.ports);
+          }
+        } catch (error) {
+          throw new BlockedError(error instanceof Error ? error.message : String(error));
+        }
+        this.attemptPorts.set(attempt.id, byRepo);
+      }
+      // Окружение попытки файлом (alpha.69, P6-11): имя проекта compose,
+      // порты и шлюз — для lifecycle, gates и инструментов, которые читают
+      // файл, а не переменные. У каждого репозитория попытки (её и
+      // проверяемых потребителей) — свой файл. Секретов в нём нет.
+      if (harnessModeOf(this.policy) === 'light') {
+        await mkdir(artifacts, { recursive: true });
+        for (const repositoryId of new Set([
+          repo.id,
+          ...(claimed.consumers ?? []).map((c) => c.repositoryId),
+        ])) {
+          const file = join(artifacts, attemptEnvFile(repositoryId, repositoryId === repo.id));
+          await writeFile(
+            file,
+            JSON.stringify(
+              attemptVariables(
+                attempt.id,
+                this.attemptPorts.get(attempt.id)?.get(repositoryId) ?? {},
+                this.repo(repositoryId).gateway,
+                repositoryId,
+                file,
+              ),
+              null,
+              2,
+            ) + '\n',
+          );
+        }
+      }
       // Ресурсы поручения, gates его репозитория и выбранных проверок
       // потребителей — одним резервированием на всю попытку.
       const reserve = [
@@ -1744,7 +1851,7 @@ export class Runner {
           const gates = ordered(repo.gates, attempt.requiredGates ?? repo.gates.map((g) => g.id));
           const execution = this.environment(attempt, 'candidate', cwd);
           const prepared = preparation.guard(
-            this.policy.isolation.mode === 'os',
+            strictSandbox(this.policy),
             cwd,
             preparesTree(
               repo.lifecycle ?? this.policy.lifecycle,
@@ -1839,7 +1946,7 @@ export class Runner {
                     // его ещё не трогал.
                     let guarded: Map<string, string> | undefined;
                     try {
-                      if (this.policy.isolation.mode === 'os') guarded = protectedSnapshot(cwd);
+                      if (strictSandbox(this.policy)) guarded = protectedSnapshot(cwd);
                     } catch (error) {
                       if (error instanceof SandboxPolicyError)
                         throw new TaskFailure(
@@ -2306,6 +2413,13 @@ export class Runner {
       clearInterval(heartbeat);
       this.selfChecks.delete(attempt.id);
       this.portWarnings.delete(attempt.id);
+      this.attemptPorts.delete(attempt.id);
+      for (const lease of leases)
+        try {
+          lease.release();
+        } catch {
+          /* аренда умершего процесса снимется при следующем выделении */
+        }
       this.gateFeedback.delete(attempt.id);
       // Рабочие деревья попытки убираются; ветка попытки и объекты остаются —
       // по ним recovery и следующая попытка видят кандидата. Снимки
@@ -2994,6 +3108,20 @@ export class Runner {
       ...(recheck ? { recheck } : {}),
       // Дерево потребителя — не база попытки: его входы установки не сверить.
       ...(!consumer && attempt.baseSha ? { trustedBase: attempt.baseSha } : {}),
+      // Молчаливый провал — определение gate, только если так же падает база
+      // (`harness gates --sha <база>`, alpha.69).
+      ...(!consumer && attempt.baseSha
+        ? {
+            silentOnBase: (id: string) =>
+              silentGateOnSha(
+                this.options.stateDir,
+                attempt.repositoryId,
+                attempt.baseSha!,
+                id,
+                gateDigest(gate),
+              ),
+          }
+        : {}),
       signal,
       execution,
       boundary: this.boundary(consumer?.dependencies ?? attempt.dependencies),
@@ -3108,7 +3236,7 @@ export class Runner {
           dependencies,
         );
         const prepared = preparation.guard(
-          this.policy.isolation.mode === 'os',
+          strictSandbox(this.policy),
           dir,
           preparesTree(repo.lifecycle ?? this.policy.lifecycle, repo.prepare, repo.dependencyStore),
         );
@@ -3262,6 +3390,9 @@ export class Runner {
       readable: [cwd, ...boundary.readable],
       ...(boundary.checkouts.length ? { checkouts: boundary.checkouts } : {}),
       isolation: this.policy.isolation,
+      harnessMode: harnessModeOf(this.policy),
+      ...(this.policy.writeGuard ? { writeGuard: this.policy.writeGuard } : {}),
+      ...(controllerTemp.active() ? { controllerTemp: controllerTemp.dir() } : {}),
       commandTimeoutMs: limits.commandTimeoutMs,
       budgetMs,
       deadline,
@@ -4325,7 +4456,7 @@ export class Runner {
     else {
       const execution = this.environment(attempt, 'integration', cwd);
       const prepared = preparation.guard(
-        this.policy.isolation.mode === 'os',
+        strictSandbox(this.policy),
         cwd,
         preparesTree(repo.lifecycle ?? this.policy.lifecycle, repo.prepare, repo.dependencyStore),
       );

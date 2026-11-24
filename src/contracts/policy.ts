@@ -18,6 +18,16 @@ import type { CodedIssue, ErrorCode } from './errors.ts';
 import { toolchainPinSchema, toolchainSchema } from './toolchain.ts';
 import { gateArtifactLimits } from './result.ts';
 import { infraIssues, infraScopeSchema } from './infra.ts';
+import {
+  DEFAULT_HARNESS_MODE,
+  attemptEnvSchema,
+  gatewaySchema,
+  harnessModeSchema,
+  releasePolicySchema,
+  uiGateSchema,
+  writeGuardSchema,
+  type HarnessMode,
+} from './light.ts';
 
 const envName = z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/);
 /** Переменные `HARNESS_*` и исторические `DEVCONTOUR_*` задаёт сам harness, не политика. */
@@ -168,6 +178,8 @@ export const gateSchema = z.discriminatedUnion('kind', [
     report: junitReport,
     artifacts: gateArtifacts,
     when: gateWhen,
+    /** UI gate (alpha.69, `light.ts`): браузер (Playwright) или мобильный (Maestro). */
+    ui: uiGateSchema.optional(),
   }),
   z.strictObject({
     ...gateCommon,
@@ -175,6 +187,8 @@ export const gateSchema = z.discriminatedUnion('kind', [
     report: junitReport.optional(),
     artifacts: gateArtifacts,
     when: gateWhen,
+    /** UI gate (alpha.69, `light.ts`): браузер (Playwright) или мобильный (Maestro). */
+    ui: uiGateSchema.optional(),
   }),
 ]);
 export type GatePolicy = z.infer<typeof gateSchema>;
@@ -355,6 +369,11 @@ export const repositoryPolicySchema = z.strictObject({
    * Необязательное поле без умолчания: политика без него сохраняет digest.
    */
   infra: infraScopeSchema.optional(),
+  /**
+   * Шлюз gates (alpha.69, `gatewaySchema`, docs/light-mode.md): gates идут к
+   * приложению через шлюз проекта, как в production. Необязательное поле.
+   */
+  gateway: gatewaySchema.optional(),
 });
 
 /** Предел расходов (USD) и/или времени вызовов; хотя бы одно поле — выражено вариантами. */
@@ -604,6 +623,19 @@ export const executionPolicySchema = z.strictObject({
       leadResets: z.number().int().min(0).max(5).default(2),
     })
     .optional(),
+  /**
+   * Режим harness (alpha.69, `light.ts`): нет поля — `light` (по умолчанию),
+   * `strict` — прежняя изоляция, заморожена. Имя `harnessMode`, потому что
+   * `mode` политики — режим runtime (`live`/`fixture`). Не входит ни в
+   * `executionDigest`, ни в `isolationDigest`.
+   */
+  harnessMode: harnessModeSchema.optional(),
+  /** Граница записи облегчённого режима (`writeGuardSchema`); не входит в digests. */
+  writeGuard: writeGuardSchema.optional(),
+  /** Окружение попытки облегчённого режима: выделенные порты (`attemptEnvSchema`). */
+  attemptEnv: attemptEnvSchema.optional(),
+  /** Приёмка выпуска (`releasePolicySchema`, P7-6); надзор, не входит в digests. */
+  release: releasePolicySchema.optional(),
   maxAttempts: z.number().int().min(1).max(10).default(3),
   repairBudget: z.number().int().min(0).max(50).default(6),
   reuseImplementation: z.boolean().default(true),
@@ -677,7 +709,35 @@ export const executionDigest = (policy: ExecutionPolicy) =>
       previews: r.infra ? r.previews : undefined,
     })),
     recovery: undefined,
+    // Режим, граница записи и приёмка выпуска (alpha.69) — надзор: смена
+    // режима не делает согласования устаревшими (решение владельца).
+    harnessMode: undefined,
+    writeGuard: undefined,
+    release: undefined,
   });
+
+/** Действующий режим политики: нет поля — `light` (alpha.69). */
+export const harnessModeOf = (policy: { harnessMode?: HarnessMode | undefined }): HarnessMode =>
+  policy.harnessMode ?? DEFAULT_HARNESS_MODE;
+/**
+ * Прежняя песочница ОС проверок и исполнителя действует: строгий режим с
+ * `isolation.mode: os`. В облегчённом режиме её место занимает граница
+ * записи (`writeGuardActive`).
+ */
+export const strictSandbox = (
+  policy: Pick<ExecutionPolicy, 'isolation'> & { harnessMode?: HarnessMode | undefined },
+) => harnessModeOf(policy) === 'strict' && policy.isolation.mode === 'os';
+/**
+ * Граница записи облегчённого режима действует: режим `light`,
+ * `isolation.mode` не `none` и граница не снята (`writeGuard.off`).
+ */
+export const writeGuardActive = (
+  policy: Pick<ExecutionPolicy, 'isolation'> & {
+    harnessMode?: HarnessMode | undefined;
+    writeGuard?: { off?: true | undefined } | undefined;
+  },
+) =>
+  harnessModeOf(policy) === 'light' && policy.isolation.mode !== 'none' && !policy.writeGuard?.off;
 
 /** Пути `toolProfile` и `runtime` назначений в ролях и правилах ревью: какой профиль у кого. */
 function profileSelections(value: unknown, path: string, out: [string, unknown][]) {
@@ -1058,6 +1118,26 @@ export function policyIssues(policy: ExecutionPolicy): Issue[] {
       ['gateTimeoutFloorMs'],
       `gateTimeoutFloorMs (${policy.gateTimeoutFloorMs} мс) больше runTimeoutMs (${policy.runTimeoutMs} мс)`,
     );
+  // Облегчённый режим (alpha.69, ревью): сеть исполнителя не ограничивается
+  // (сам CLI ходит к модели), поэтому явное `network: none|loopback` профиля
+  // исполнителя не выполняется — отказ, а не молчаливое игнорирование.
+  if (harnessModeOf(policy) === 'light') {
+    const writerProfiles = new Set(
+      [
+        ...Object.values(policy.roles),
+        ...policy.repositories.flatMap((r) => Object.values(r.roles ?? {})),
+      ].flatMap((b) => (b.writer.toolProfile ? [b.writer.toolProfile] : [])),
+    );
+    for (const id of writerProfiles) {
+      const net = policy.toolProfiles[id]?.network;
+      if (net === 'none' || net === 'loopback')
+        add(
+          'INVALID_INPUT',
+          ['toolProfiles', id, 'network'],
+          `network: ${net} профиля исполнителя в облегчённом режиме не выполняется (исполнитель работает на хосте с сетью): уберите поле или выберите harnessMode: strict (решение владельца)`,
+        );
+    }
+  }
   // Сеть профиля однозначна: `network` не спорит с `codexNetwork`, а вся сеть
   // claude задаётся доменами `isolation.domains`, не профилем.
   for (const [id, profile] of Object.entries(policy.toolProfiles)) {
@@ -1127,6 +1207,37 @@ export function policyIssues(policy: ExecutionPolicy): Issue[] {
       add('INVALID_INPUT', ['repositories', r, 'id'], 'Повтор репозитория ' + repo.id);
     repos.set(repo.id, repo);
     gateChecks(repo.gates, ['repositories', r, 'gates']);
+    // Шлюз gates (alpha.69) ссылается только на объявленные порты попытки.
+    if (repo.gateway)
+      for (const [, name] of repo.gateway.url.matchAll(/\$\{([^}]*)\}/g))
+        if (!policy.attemptEnv?.ports?.includes(name!))
+          add(
+            'INVALID_INPUT',
+            ['repositories', r, 'gateway', 'url'],
+            `Шлюз ссылается на \${${name}}, а такого порта нет в attemptEnv.ports`,
+          );
+    // UI gates (alpha.69) — только облегчённый режим: в песочнице ОС
+    // проверок на macOS не стартует ни Chromium (нужен mach-register), ни
+    // симулятор (CoreSimulator XPC, запись в ~/Library/Developer).
+    repo.gates.forEach((g, i) => {
+      if (g.ui && harnessModeOf(policy) === 'strict' && policy.isolation.mode === 'os')
+        add(
+          'INVALID_INPUT',
+          ['repositories', r, 'gates', i, 'ui'],
+          `UI gate ${g.id} (${g.ui.type}) в строгом режиме не исполняется: в песочнице ОС проверок браузер и симулятор не стартуют. Облегчённый режим (решение владельца) или браузер в контейнере обычным gate без блока ui`,
+        );
+    });
+    // Пул устройств мобильного UI gate — ресурсы kind: device.
+    repo.gates.forEach((g, i) => {
+      if (g.ui?.type !== 'mobile') return;
+      for (const id of g.ui.device.pool ?? [])
+        if (!policy.resources.some((x) => x.id === id && x.kind === 'device'))
+          add(
+            'INVALID_INPUT',
+            ['repositories', r, 'gates', i, 'ui', 'device', 'pool'],
+            `Устройство ${id} пула не объявлено ресурсом kind: device`,
+          );
+    });
     if (!repo.gates.some((g) => g.kind === 'test'))
       add(
         'INVALID_INPUT',

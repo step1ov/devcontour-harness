@@ -83,6 +83,8 @@ import {
   type WorkGraph,
   type WorkOrder,
   type WorkState,
+  harnessModeOf,
+  strictSandbox,
 } from '../contracts/index.ts';
 import { HARNESS_VERSION } from '../package.ts';
 import {
@@ -4751,6 +4753,37 @@ export class Engine {
     });
   }
 
+  /**
+   * База выпуска (alpha.69): записывается для репозиториев без базы текущего
+   * выпуска — нет записи или она старше итога прежнего выпуска (`release
+   * done`). Записанная база не переписывается. Возвращает записанные.
+   */
+  recordReleaseBases(
+    heads: Record<string, string>,
+    source: 'register' | 'outline',
+    /** Выпуск, начатый до alpha.69: база его самой ранней попытки (не нынешняя цель). */
+    earlier: Record<string, string | undefined> = {},
+  ) {
+    return this.tx('lead.recorded', (tx) => {
+      const done = tx.local('lead', WORKSPACE_OWNER, 'log')?.release?.doneAt;
+      const at = new Date(this.now()).toISOString();
+      const written: string[] = [];
+      for (const [repositoryId, sha] of Object.entries(heads)) {
+        const prev = tx.local('release-base', WORKSPACE_OWNER, repositoryId);
+        if (prev && !(done && prev.at < done)) continue;
+        const early = earlier[repositoryId];
+        tx.putLocal(
+          'release-base',
+          WORKSPACE_OWNER,
+          repositoryId,
+          early ? { sha: early, at, source: 'attempt' } : { sha, at, source },
+        );
+        written.push(repositoryId);
+      }
+      return written;
+    });
+  }
+
   recordPolicy(owner: string) {
     this.tx('config.started', (tx) => {
       const lease = tx.controller();
@@ -5739,7 +5772,7 @@ export class Engine {
   /** Удержание выдачи правилом восстановления ведущим (`policy.recovery`). */
   /**
    * Удержание gate по отказу без повтора попытки (`sandbox-process-list`,
-   * `sandbox-signal`, `sandbox-browser`): упавший gate — последний
+   * `sandbox-signal`, `sandbox-browser`, `gate-definition`): упавший gate — последний
    * непройденный evidence попытки с кодом этой причины (не проверка
    * потребителя), его определение — в политике репозитория попытки.
    */
@@ -5758,7 +5791,12 @@ export class Engine {
       digest: gateDigest(gate),
       runId: a.id,
       at: iso(this.now()),
-      isolation: this.policy.isolation.mode,
+      // Gate без названной причины удержан своим определением, не песочницей.
+      // Среда отказа песочницы: строгая песочница ОС (`os`) или без неё
+      // (облегчённый режим, alpha.69) — смена режима снимает удержание.
+      ...(cause === 'gate-definition'
+        ? {}
+        : { isolation: strictSandbox(this.policy) ? ('os' as const) : ('none' as const) }),
       ...(cause === 'sandbox-process-list' ? {} : { cause }),
     };
   }
@@ -5774,7 +5812,7 @@ export class Engine {
         return gate ? gateDigest(gate) : undefined;
       },
       {
-        isolation: this.policy.isolation.mode,
+        isolation: strictSandbox(this.policy) ? 'os' : 'none',
         ...(processListSeen.status ? { processList: processListSeen.status } : {}),
       },
     );
@@ -6450,7 +6488,8 @@ export function infraPendingOf(work: WorkState, view: ExecutionView): string[] {
 export function budgetLimitsOf(policy: ExecutionPolicy): Record<string, number | null> {
   const out: Record<string, number | null> = {
     maxAttempts: policy.maxAttempts,
-    reviewRounds: policy.maxAttempts * 2,
+    // Облегчённый режим (0.1.0-alpha.69): раундов ревью не считают — без предела.
+    reviewRounds: harnessModeOf(policy) === 'light' ? null : policy.maxAttempts * 2,
     repairBudget: policy.repairBudget,
     leadResets: recoveryPolicyOf(policy).leadResets,
   };

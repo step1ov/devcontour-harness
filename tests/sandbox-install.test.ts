@@ -45,7 +45,9 @@ import { repo } from './git-fixture.ts';
  * `node_modules`. Вне дерева зависимостей запрет остаётся.
  */
 const support = isolationSupport();
-const os = { config: { isolation: { mode: 'os' as const, domains: [] } } };
+const os = {
+  config: { harnessMode: 'strict' as const, isolation: { mode: 'os' as const, domains: [] } },
+};
 // Ограничение записано явно: без песочницы здесь нечего проверять.
 const noSandbox = support.ok ? false : 'песочница ОС недоступна: ' + support.detail;
 const mac = process.platform === 'darwin';

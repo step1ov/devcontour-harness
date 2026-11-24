@@ -154,6 +154,56 @@ export const planContentDigest = (graph: WorkGraph) =>
   digestOf({ ...graph, source: { connector: graph.source.connector, ref: graph.source.ref } });
 
 /**
+ * Содержание поручения, значимое для плана (0.1.0-alpha.69): всё, что
+ * исполнитель делает и чем доказывает, — заголовок, цель, критерии приёмки,
+ * роль, репозитории, область записи, зависимости, gates и потребители,
+ * свойства, ресурсы, требования (без digest документа-источника), привязанные
+ * контракты (по ID; содержание контракта проверяет своё ревью), обязательный
+ * контекст (ID источников), вид работы и меняемые gates. Не входит: версия
+ * API и источник постановки (`source`: коннектор, ключ, ревизия) — новая
+ * ревизия источника без изменения этих полей планом не считается.
+ */
+export const planOrderDigest = (order: WorkOrder) =>
+  digestOf({
+    ...order,
+    apiVersion: undefined,
+    source: undefined,
+    requirements: order.requirements.map((r) => ({ ...r, digest: undefined })),
+    contracts: order.contracts.map((c) => c.id),
+  });
+
+/**
+ * Состав плана для счёта раундов ревью (0.1.0-alpha.69): ID поручения →
+ * `planOrderDigest`. Настоящее изменение плана — другой набор ID или другой
+ * digest поручения против прежнего одобренного раунда; предпосылки графа
+ * (доказательства выполненного) и ревизия набора сюда не входят.
+ */
+export const planOrderDigests = (graph: WorkGraph): Record<string, string> =>
+  Object.fromEntries(graph.orders.map((o) => [o.id, planOrderDigest(o)]));
+
+/**
+ * Постановка поручения для доработки (alpha.69, ревью): цель и критерии
+ * приёмки. Их изменение у принятой работы — настоящее изменение плана, а не
+ * бесплатная доработка.
+ */
+export const planStatementDigest = (order: Pick<WorkOrder, 'goal' | 'acceptance'>) =>
+  digestOf({ goal: order.goal, acceptance: order.acceptance });
+export const planStatementDigests = (graph: WorkGraph): Record<string, string> =>
+  Object.fromEntries(graph.orders.map((o) => [o.id, planStatementDigest(o)]));
+
+/**
+ * Какие поручения изменились против прежнего состава плана: добавленные,
+ * убранные и с другим содержанием (`planOrderDigests`), по ID.
+ */
+export function planOrderChanges(
+  before: Readonly<Record<string, string>>,
+  after: Readonly<Record<string, string>>,
+): string[] {
+  const ids = new Set([...Object.keys(before), ...Object.keys(after)]);
+  return [...ids].filter((id) => before[id] !== after[id]).sort();
+}
+
+/**
  * Структурная проверка графа до любой записи: повтор ID, неизвестная
  * зависимость, цикл. Зависимость разрешается поручением этого графа либо
  * подтверждённой предпосылкой; другого способа считать её выполненной нет.

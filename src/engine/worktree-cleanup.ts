@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { controllerTemp } from '../environment/controller-temp.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import {
@@ -448,7 +449,7 @@ export async function treeUnchanged(
 ) {
   if ((await treeHead(dir)) !== head || (await treeStatus(dir)).raw !== status) return false;
   if (!edits) return true;
-  const scratch = await mkdtemp(join(tmpdir(), 'harness-worktree-index-'));
+  const scratch = await mkdtemp(join(controllerTemp.dir(), 'harness-worktree-index-'));
   try {
     return (await editsTree(dir, head, { GIT_INDEX_FILE: join(scratch, 'index') })) === edits;
   } finally {
@@ -464,7 +465,7 @@ export async function treeUnchanged(
  * то же дерево, что и правки. Иначе отказ, и дерево остаётся.
  */
 export async function savePatch(dir: string, artifacts: string, name: string, head: string) {
-  const scratch = await mkdtemp(join(tmpdir(), 'harness-worktree-index-'));
+  const scratch = await mkdtemp(join(controllerTemp.dir(), 'harness-worktree-index-'));
   const temporary = join(artifacts, `.${name}.${process.pid}.tmp`);
   try {
     await mkdir(artifacts, { recursive: true });

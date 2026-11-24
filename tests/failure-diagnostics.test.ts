@@ -108,7 +108,12 @@ test('выжимка: скрытый вывод — withheld; spec-вывод р
   assert.doesNotMatch(JSON.stringify(masked), new RegExp(SECRET));
 });
 
-async function gate(r: ReturnType<typeof repo>, command: string[], report?: string) {
+async function gate(
+  r: ReturnType<typeof repo>,
+  command: string[],
+  report?: string,
+  silentOnBase?: (id: string) => boolean,
+) {
   const recorded: Omit<EvidenceRecord, 'id' | 'runId' | 'createdAt'>[] = [];
   let failure: TaskFailure | undefined;
   try {
@@ -132,6 +137,7 @@ async function gate(r: ReturnType<typeof repo>, command: string[], report?: stri
       signal: new AbortController().signal,
       execution: { env: { ...process.env, DIAG_SECRET: SECRET }, redact },
       boundary: { hidden: [], readable: [] },
+      ...(silentOnBase ? { silentOnBase } : {}),
     });
   } catch (error) {
     if (!(error instanceof TaskFailure)) throw error;
@@ -169,10 +175,21 @@ test('gate со скрытым выводом: имена из JUnit, котор
   assert.match(named.evidence.summary, /^Код выхода 1: упали admin sees photo: /);
   assert.doesNotMatch(JSON.stringify(named.evidence), new RegExp(SECRET), 'секрет замаскирован');
   const r2 = repo();
-  const hidden = await gate(r2, hidingGate(false));
-  assert.equal(hidden.failure?.kind, 'gate', 'скрытый вывод — по-прежнему засчитанный провал');
+  // Ревью alpha.69: молчаливый провал засчитан исполнителю, пока тот же
+  // gate не падает так же на базе.
+  const counted = await gate(r2, hidingGate(false));
+  assert.equal(counted.failure?.kind, 'gate');
+  assert.match(
+    counted.evidence.summary,
+    /GATE_SILENT_FAILURE: проверка упала, ничего не напечатав/,
+  );
+  // Так же молчит и база — определение gate: отказ без повтора `gate-definition`.
+  const hidden = await gate(r2, hidingGate(false), undefined, (id) => id === 'ui-e2e');
+  assert.equal(hidden.failure?.kind, 'environment', 'база падает так же — не провал кода задачи');
+  assert.equal(hidden.failure?.diagnosis, 'gate-definition');
   assert.equal(hidden.evidence.failureSummary?.withheld, true);
   assert.ok(hidden.evidence.summary.includes(WITHHELD_NOTE), hidden.evidence.summary);
+  assert.match(hidden.evidence.summary, /^GATE_DEFINITION_NO_CAUSE: /);
   // `harness gates --human`: строка причины под gate.
   const text = gatesText({
     id: 'g',
@@ -480,4 +497,28 @@ test('smoke: отказ ready несёт хвост шага, таблица --h
 test('A68-r3: macOS открывает компоненты отчёта с O_NOFOLLOW_ANY — ссылка в любом родителе отклоняется ядром', () => {
   if (process.platform === 'darwin') assert.equal(reportNoFollowAny(), true);
   else assert.equal(reportNoFollowAny(), false);
+});
+
+test('молчал ли gate на базе — по самому позднему итогу harness gates с тем же определением', async () => {
+  const { silentGateOnSha } = await import('../src/verification/gates-at.ts');
+  const state = realpathSync(mkdtempSync(join(tmpdir(), 'harness-silent-')));
+  const sha = 'a'.repeat(40);
+  const put = (id: string, at: string, status: string, summary: string, definition = 'D1') => {
+    mkdirSync(join(state, 'gates-at', id), { recursive: true });
+    writeFileSync(
+      join(state, 'gates-at', id, 'result.json'),
+      JSON.stringify({
+        at,
+        data: { repositoryId: 'app', sha, gates: [{ gate: 'unit', status, summary, definition }] },
+      }),
+    );
+  };
+  put('G1', '2026-11-24T10:00:00.000Z', 'failed', 'GATE_SILENT_FAILURE: …');
+  assert.equal(silentGateOnSha(state, 'app', sha, 'unit', 'D1'), true);
+  assert.equal(silentGateOnSha(state, 'app', sha, 'unit', 'D2'), false, 'другое определение gate');
+  assert.equal(silentGateOnSha(state, 'app', sha, 'other', 'D1'), false);
+  assert.equal(silentGateOnSha(state, 'app', 'b'.repeat(40), 'unit', 'D1'), false);
+  // Поздний успешный прогон на базе снимает основание.
+  put('G2', '2026-11-24T11:00:00.000Z', 'passed', 'ok');
+  assert.equal(silentGateOnSha(state, 'app', sha, 'unit', 'D1'), false);
 });

@@ -38,7 +38,10 @@ import {
 import { requirementProof } from '../src/verification/proof.ts';
 import { junit, nodeGate, repo, write } from './git-fixture.ts';
 
-const policy = { isolation: { mode: 'none' as const, domains: [] } };
+const policy = {
+  harnessMode: 'strict' as const,
+  isolation: { mode: 'none' as const, domains: [] },
+};
 
 async function gate(
   dir: string,
@@ -61,6 +64,7 @@ async function gate(
   try {
     await runGate({
       policy: {
+        harnessMode: 'strict',
         isolation: { ...policy.isolation, mode: isolationMode },
         ...(gateTimeoutFloorMs ? { gateTimeoutFloorMs } : {}),
       },
@@ -242,8 +246,29 @@ test('T06: test gate принимается только по свежему н�
   assert.equal(ok.evidence.passed, true);
   assert.deepEqual(ok.evidence.tests, [{ id: 'g.greets', status: 'passed' }]);
 
+  // Код выхода без упавших тестов и без вывода (ревью alpha.69): провал
+  // засчитан исполнителю с меткой молчаливого провала; удержание
+  // определения gate — только когда так же падает база.
+  const silent = await gate(r.dir, sha, {
+    command: nodeGate(`${junit('<testcase name="a"/>')};process.exit(3)`),
+  });
+  assert.equal(silent.failure?.kind, 'gate');
+  assert.match(silent.evidence.summary, /GATE_SILENT_FAILURE/);
+  assert.equal(silent.evidence.passed, false);
+  // Аварийное завершение сигналом — тоже провал кода, не определение gate.
+  const crashed = await gate(r.dir, sha, {
+    command: nodeGate(`process.kill(process.pid, 'SIGSEGV')`),
+  });
+  assert.equal(crashed.failure?.kind, 'gate');
+  assert.match(crashed.evidence.summary, /сигналом SIGSEGV/);
   const variants: [string, string[], RegExp][] = [
-    ['exit != 0', nodeGate(`${junit('<testcase name="a"/>')};process.exit(3)`), /Код выхода 3/],
+    [
+      'exit != 0',
+      nodeGate(
+        `${junit('<testcase name="a"/>')};console.error('assertion failed');process.exit(3)`,
+      ),
+      /Код выхода 3/,
+    ],
     [
       'нет отчёта, слово PASS в stdout',
       nodeGate(`console.log('PASS: all tests passed')`),

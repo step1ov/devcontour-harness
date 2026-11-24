@@ -26,6 +26,73 @@ Modes: **install** (first setup), **upgrade** (change the installed version),
 request; when the repository already has `.harness/` and a pinned or
 installed `$H`, it is upgrade or check, not install.
 
+## Mode: light by default, strict is the owner's decision
+
+Since 0.1.0-alpha.69 a policy without `harnessMode` runs in **light mode**
+(`<pkg>/docs/light-mode.md`): writers and gates run on the host like a
+normal developer — Docker, network, browsers, ports and `ps` work — with
+one guard: writes only into the attempt worktree, its temp dir and tool
+caches (`writeGuard`). Attempts are separated by their worktree, their
+`COMPOSE_PROJECT_NAME` and their own ports (`attemptEnv.ports`).
+
+The write guard protects against accidents; it is not a security boundary:
+Docker and the chosen caches bypass it, and reads and network are open. Each
+writer call gets its own CLI config dir with a copy of the login only; a
+`claude` writer on macOS with a subscription login needs
+`CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`) in `environment.inherit`.
+Light mode with `isolation.mode: none` has no write boundary at all (doctor
+`LIGHT_NO_WRITE_BOUNDARY`); a writer tool profile with `network: none` or
+`loopback` is refused in light mode.
+
+**Strict mode** (`harness init --harness-mode strict`, `"harnessMode":
+"strict"`) is the old OS sandbox. It is frozen and may be removed after the
+next pilots. Choosing it is the **owner's** decision: ask only when the
+project runs untrusted code (a foreign fork, unreviewed generated
+dependencies) or the machine holds production secrets the writer must not
+read. Never switch the mode yourself; `doctor` prints the current mode as
+its first note.
+
+In light mode:
+
+- declare the ports the project's services need in `attemptEnv.ports` and
+  make the compose file and gates read them (`"${API_PORT}:3000"`);
+- when production routes through a gateway (Caddy, nginx), run gates
+  through the project's gateway service (`repositories[].gateway`) and
+  declare the production routing files in `release.topology`
+  (`<pkg>/docs/release-review.md`);
+- browser checks run as ordinary gates (`ui: {type: "browser"}`,
+  `<pkg>/docs/ui-gates.md`); no external browser controller is needed;
+- infra tasks, `infra.paths` and `gateChanges` (below) are **not
+  required**, and there is no separate infra phase: acceptance tests,
+  fixtures and compose test services live with the product code inside
+  product works and are reviewed as code. **Don't split test
+  infrastructure into a separate stage.** Use the harness helpers instead:
+  per-attempt services (`COMPOSE_PROJECT_NAME`, `attemptEnv.ports`, the
+  `attempt-env.json` file named by `HARNESS_ATTEMPT_ENV_FILE`), the
+  `browser` (Playwright) gate, the gateway-mirror check
+  (`GATEWAY_MIRROR_MISSING`). Open an infra work only for a shared thing
+  several works need (for example a new compose service), reviewed like
+  code. Infra works stay available when the owner wants that boundary;
+- acceptance tests assert what a user or client sees — status codes, text,
+  roles, links, API payloads — and never hashed CSS Module class names
+  (`module__<hash>`) or the framework's RSC payload (`__next_f`): those
+  change with every build and make the test fail on correct code;
+- browser gates standardise on Playwright Test with its bundled headless
+  Chromium (`ui: {type: "browser"}`); agent-browser is an exploration tool
+  for agents, not a gate runner. Mobile gates (Maestro) are a contract in
+  this version (`<pkg>/docs/ui-gates.md`);
+- **pre-warm tools during setup** so gates run offline and fast: install the
+  pinned Playwright browser (`pnpm exec playwright install chromium`), pull
+  or build the compose images (`docker compose pull`/`build`), fill the
+  dependency store (`smoke`); report sizes and times in the setup report;
+- in the project's compose files: publish ports from `attemptEnv` variables
+  (or `127.0.0.1::<port>`), give every service a real healthcheck, and guard
+  a RabbitMQ `rabbitmq-diagnostics` healthcheck on the Erlang cookie file
+  (`test -s /var/lib/rabbitmq/.erlang.cookie && rabbitmq-diagnostics -q
+ping`) — parallel attempt stacks race without it (`doctor` notes
+  `compose-rabbitmq-cookie`); teardown is `docker compose down -v
+--remove-orphans`.
+
 ## Setup is configuration
 
 Setup is configuration only: the stack profile, `harness init`, policy edits
@@ -35,7 +102,8 @@ setting their parameters for the project is configuration too. You do not
 write new executable code during setup:
 
 - a bridge, gate wrapper, validator, crash-cleanup test or any other script
-  that does not exist yet becomes an **infra task** of the first plan
+  that does not exist yet becomes a task of the first plan — an ordinary
+  product task in light mode, an **infra task** in strict mode
   (`"kind": "infra"`, `<pkg>/docs/infra-works.md`): a writer builds it
   through the normal loop with review-code, attempts and the forecast;
 - inherited setup debts (a known bridge defect, a missing acceptance test)
@@ -90,7 +158,8 @@ supports it).
 | Relay connection           | discovered from the repository and environment                                                                | a fact is missing: endpoint or binary/config, `projectId`, which tasks                                                                                |
 | Relay completion           | `review-only` (a human closes the task)                                                                       | the user wants `complete`                                                                                                                             |
 | Controller mode            | —                                                                                                             | the product AGENTS.md tells agents to manage worktrees, commits, merges or Relay history: the overlay then takes precedence over those rules (step 9) |
-| OS isolation               | on                                                                                                            | prepare or gates fail inside the sandbox (store, network, Docker socket)                                                                              |
+| Harness mode               | light (no `harnessMode` field)                                                                                | untrusted code or production secrets on the machine: strict is the owner's decision                                                                   |
+| Write guard / OS isolation | on (light: write guard; strict: OS sandbox)                                                                   | a tool writes to a cache outside the defaults (`writeGuard.add`), or, in strict mode, prepare or gates fail inside the sandbox                        |
 | Docker environment         | none                                                                                                          | gates need a database or other service                                                                                                                |
 | Project rule conflicts     | —                                                                                                             | a project rule forbids what setup creates (for example new `.md` files: `.harness/README.md`)                                                         |
 | Commit, Relay writes, runs | —                                                                                                             | always confirm: committing the setup, `run --source` / `source-deliver` / `source-reconcile`, any live `run` or `review-plan`                         |
@@ -546,12 +615,11 @@ first graph.
   then verifies the connection and warns; add tasks before the snapshot.
 
 The connector puts the full task context (FI/SI, their features and
-scenarios, application, product passport, documents) into the writer's pack
-when Relay declares `relay-task-context-v1`. When `source-check` returns a
-`warnings` line about Relay below the recommended version, tell the user
-that one line: the writer will not get the feature and scenario description
-until Relay is updated; continuing is their choice. In the product's
-AGENTS.md rule "read the task in Relay", the pack replaces the read.
+scenarios, application, product passport, documents) into the writer's pack.
+Any unmodified Relay 0.13.x is enough: the connector builds the context from
+the ordinary Relay routes (a server that declares `relay-task-context-v1` is
+read with one call); no Relay build with harness changes is needed. In the
+product's AGENTS.md rule "read the task in Relay", the pack replaces the read.
 
 Checks that do not write to Relay:
 

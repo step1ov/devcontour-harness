@@ -23,6 +23,7 @@ import {
   sha256,
   type DependencyStorePolicy,
   type ExecutionPolicy,
+  strictSandbox,
 } from '../contracts/index.ts';
 import { OversizedFile, readBounded } from '../environment/bounded-read.ts';
 import { checkoutPath, type CheckoutRoot } from '../environment/checkout-root.ts';
@@ -252,7 +253,8 @@ const MANIFEST_LIMIT = 1024 * 1024;
 const LOCK_LIMIT = 64 * 1024 * 1024;
 
 export interface StoreContext {
-  policy: Pick<ExecutionPolicy, 'isolation'>;
+  policy: Pick<ExecutionPolicy, 'isolation'> &
+    Partial<Pick<ExecutionPolicy, 'harnessMode' | 'writeGuard'>>;
   /** Каталог seeds репозитория (`dependencyStoreRoot`). */
   root(repositoryId: string): string;
   repoPath(repo: Repo): string;
@@ -981,7 +983,14 @@ async function fetchInto(
   const { isolation } = s.ctx.policy;
   const domains = [...new Set([...isolation.domains, ...seedRegistryHosts(s.execution.env, lock)])];
   const result = await storeTree.run(
-    { config: { isolation: { ...isolation, domains } } },
+    {
+      config: {
+        // Режим политики: в строгом — песочница ОС, в облегчённом — граница записи.
+        ...(s.ctx.policy.harnessMode ? { harnessMode: s.ctx.policy.harnessMode } : {}),
+        ...(s.ctx.policy.writeGuard ? { writeGuard: s.ctx.policy.writeGuard } : {}),
+        isolation: { ...isolation, domains },
+      },
+    },
     {
       argv: s.manager.fetch(store),
       cwd: project,
@@ -1369,8 +1378,9 @@ export async function materializeStore(
     Object.assign(input.execution.env, env);
   };
   try {
-    if (ctx.policy.isolation.mode !== 'os')
-      summary.reason = 'isolation.mode: none: граница seed не действует, установка обычная';
+    if (!strictSandbox(ctx.policy))
+      summary.reason =
+        'без песочницы ОС (облегчённый режим или isolation.mode: none): граница seed не действует, установка обычная';
     // Занятый путь — и ссылка, которую кандидат мог положить, чтобы увести
     // запись controller из дерева: туда ничего не пишется.
     else if (await lstat(dest).catch(() => undefined))

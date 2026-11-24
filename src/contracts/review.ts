@@ -284,15 +284,24 @@ export const reviewRecordSchema = z.strictObject({
    */
   planDigest: digestSchema.optional(),
   /**
-   * Тратит ли раунд предел раундов предмета (0.1.0-alpha.68). `false` —
-   * повторное ревью неизменённого плана после одобренного раунда: те же
-   * поручения, политика, reviewer и автор, другой только контекст (ответ на
-   * вопрос, документы) или ревизия источника. Нет поля — раунд засчитан.
+   * Состав плана раунда (`planOrderDigests`, 0.1.0-alpha.69): ID поручения →
+   * digest его значимого для плана содержания. По нему следующий раунд
+   * отличает настоящее изменение плана от доработки, указаний и контекста.
+   */
+  planOrders: z.record(idSchema, digestSchema).optional(),
+  /**
+   * Тратит ли раунд предел раундов предмета (0.1.0-alpha.68; с 0.1.0-alpha.69
+   * — только настоящее изменение плана). `false` — состав плана тот же, что у
+   * прежнего одобренного раунда, или изменились только доработки принятых
+   * работ; контекст (документы, ответы владельца), ревизия источника,
+   * указания ведущего, политика и reviewer предел не тратят. Нет поля — раунд
+   * засчитан.
    */
   counted: z.boolean().optional(),
   /** Что изменилось против прежнего раунда предмета: почему понадобился этот раунд. */
   changes: z
     .strictObject({
+      /** Настоящее изменение плана: оно и только оно тратит предел (с 0.1.0-alpha.69). */
       plan: z.boolean(),
       policy: z.boolean(),
       reviewer: z.boolean(),
@@ -301,6 +310,18 @@ export const reviewRecordSchema = z.strictObject({
         removed: z.array(z.string().max(200)).max(30),
         changed: z.array(z.string().max(200)).max(30),
       }),
+      /**
+       * Изменённые поручения против прежнего одобренного раунда
+       * (0.1.0-alpha.69): `changed` — настоящие изменения плана, `rework` —
+       * доработки принятых работ (предел не тратят). Нет поля — поручения
+       * не менялись.
+       */
+      orders: z
+        .strictObject({
+          changed: z.array(idSchema).max(30),
+          rework: z.array(idSchema).max(30),
+        })
+        .optional(),
     })
     .optional(),
   /** Все находки предмета на момент раунда: новые и прежние с их статусами. */
@@ -338,6 +359,55 @@ export function roundBudget(
   };
 }
 export type RoundBudget = ReturnType<typeof roundBudget>;
+
+/**
+ * Бесплатные раунды подряд после последнего одобренного раунда предмета
+ * (0.1.0-alpha.69) — защита от круга: план не меняется, а reviewer снова и
+ * снова не одобряет. Одобренный раунд счёт обнуляет: повторное ревью
+ * одобренного плана после доработки, ответа или документа — работа, а не
+ * круг. Засчитанные раунды в этот счёт не входят.
+ */
+/**
+ * Защита от круга в облегчённом режиме (alpha.69, ревью): предела раундов
+ * нет, но `LIGHT_REVIEW_LOOP_ROUNDS` неодобренных раундов подряд при
+ * неизменённом плане останавливают ревью до хода ведущего (изменить план или
+ * принять ограничение), а вдвое больше неодобренных раундов подряд — решение
+ * владельца. Действует и для ревью контракта; без бюджетов тоже.
+ */
+export const LIGHT_REVIEW_LOOP_ROUNDS = 6;
+/** Неодобренных раундов подряд после последнего одобренного. */
+export function unapprovedSinceApproved(
+  records: readonly Pick<ReviewRecord, 'round' | 'approved'>[],
+) {
+  const sorted = [...records].sort((a, b) => a.round - b.round);
+  return sorted.length - (sorted.findLastIndex((r) => r.approved) + 1);
+}
+
+/**
+ * Неодобренных раундов подряд при неизменённом плане (с конца истории):
+ * одобренный раунд или настоящее изменение плана (засчитанный раунд)
+ * обнуляют серию (решение владельца 2026-11-24).
+ */
+export function unchangedUnapprovedStreak(
+  records: readonly Pick<ReviewRecord, 'round' | 'approved' | 'counted'>[],
+) {
+  const sorted = [...records].sort((a, b) => a.round - b.round);
+  let n = 0;
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const r = sorted[i]!;
+    if (r.approved || r.counted !== false) break;
+    n++;
+  }
+  return n;
+}
+
+export function freeRoundsSinceApproved(
+  records: readonly Pick<ReviewRecord, 'round' | 'approved' | 'counted'>[],
+) {
+  const sorted = [...records].sort((a, b) => a.round - b.round);
+  const from = sorted.findLastIndex((r) => r.approved);
+  return sorted.slice(from + 1).filter((r) => r.counted === false).length;
+}
 
 /**
  * Сводка истории ревью предмета (плана или контракта) для `status`, `explain`

@@ -535,11 +535,14 @@ test('smoke: отмена после последнего шага — CANCELLED
   const step = data.steps.find((s) => s.stage === 'dependency-store')!;
   assert.equal(step.status, 'passed');
   assert.equal(step.unused, true, 'промах — хранилище не использовано');
-  assert.match(step.detail ?? '', /^miss: isolation\.mode: none/);
+  assert.match(
+    step.detail ?? '',
+    /^miss: без песочницы ОС \(облегчённый режим или isolation\.mode: none\)/,
+  );
   const table = smokeText(data);
   assert.match(
     table,
-    /\ndependency-store\/dependency-store\s+miss\s+-\s+\d+ с\s+не используется: isolation\.mode: none/,
+    /\ndependency-store\/dependency-store\s+miss\s+-\s+\d+ с\s+не используется: без песочницы ОС/,
   );
   assert.doesNotMatch(table, /dependency-store\/dependency-store\s+passed/);
 });

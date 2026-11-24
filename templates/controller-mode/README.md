@@ -14,7 +14,8 @@ not a file committed to the target repository. Some projects forbid new
 1. Next to the graph, create the context source directory
    `context/controller-mode/` and copy the current overlay
    `AGENTS.controller.v2.md` into it unchanged as `AGENTS.controller.md`.
-   v2 adds «implement first, then ask» for steps the writer sandbox blocks;
+   v2 adds «implement first, then ask» for steps the environment blocks
+   (in light mode only writes outside the attempt worktree are blocked);
    `AGENTS.controller.md` (v1) stays for existing pins.
 2. Put copies of the product AGENTS.md files under
    `context/controller-mode/references/`. Keep their repository paths, for

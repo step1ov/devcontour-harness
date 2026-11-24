@@ -89,6 +89,8 @@ export interface ViewSettings {
     maxNeutralFailures: number;
     reviewRoundCap: number;
     reviewEscalationRounds: number;
+    /** Ревизия 9: облегчённый режим — раунды ревью плана без предела (`reviewRoundCap` — предел строгого). */
+    reviewRoundsUnlimited?: boolean;
   };
   budgets: { scope: 'work' | 'group' | 'total'; usd?: number; timeMs?: number }[];
   budgetOnUnknown?: 'stop' | 'continue';
@@ -102,6 +104,11 @@ export interface ViewSettings {
   defaulted: string[];
   /** Ревизия 6: настройки решений с объяснением и итог одной фразой. */
   decisions?: { items: DecisionSetting[]; summary: Bilingual; warning?: Bilingual };
+  /**
+   * Ревизия 9: режим harness (alpha.69) — `light` по умолчанию или `strict`;
+   * `default` — поля в политике нет; `writeGuard` — граница записи действует.
+   */
+  harnessMode?: { mode: 'light' | 'strict'; default: boolean; writeGuard: boolean };
 }
 
 export interface FindingView {
@@ -118,7 +125,8 @@ export interface FindingView {
 }
 
 export interface ReviewSubjectView {
-  kind: 'plan' | 'contract' | 'code';
+  /** `release` — приёмка выпуска (ревизия 9, `harness review-release`). */
+  kind: 'plan' | 'contract' | 'code' | 'release';
   subject: string;
   workId?: string;
   approved: boolean;
@@ -281,6 +289,8 @@ export interface ForecastView {
       doneAt?: string;
       summary?: string;
       line: string;
+      /** Ревизия 9: приёмка выпуска (`harness review-release`, alpha.69). */
+      review?: ReleaseReviewView;
     };
   };
   time: {
@@ -1065,7 +1075,7 @@ export interface OperatorQuestionInput {
 
 /** Предмет ревью: план и контракт (`reviewSubjectSummary`) и код (`review-code`). */
 export interface OperatorReviewInput {
-  kind: 'plan' | 'contract' | 'code';
+  kind: 'plan' | 'contract' | 'code' | 'release';
   subject: string;
   workId?: string;
   at: string;
@@ -1368,7 +1378,8 @@ export interface OperatorViewInput {
     | 'runTimeoutMs'
     | 'leaseMs'
     | 'gateTimeoutFloorMs'
-  >;
+  > &
+    Partial<Pick<ExecutionPolicy, 'harnessMode' | 'writeGuard' | 'isolation'>>;
   policyDigest: string;
   /** Действующие значения без умолчаний в политике: вопросы, обход зависших, предел раундов. */
   effective: {
@@ -1456,10 +1467,62 @@ export interface OperatorViewInput {
   lead?: OperatorLeadInput;
   /** План выпуска ведущего (alpha.68, `harness lead outline`); нет — не записан. */
   outline?: OperatorOutlineInput;
+  /** Приёмка выпуска (ревизия 9, `releaseReviewState`); нет — поля нет. */
+  releaseReview?: Omit<ReleaseReviewView, 'line'>;
   /** Что задействовано (ревизия 6, P4-8); нет — поля нет. */
   resources?: ResourcesInput;
   /** Живые превью результата (receipt `harness preview-start`); нет — поля нет. */
   previews?: readonly PreviewView[];
+}
+
+/** Приёмка выпуска в представлении (ревизия 9): требование, состояние, строка. */
+export interface ReleaseReviewView {
+  required: boolean;
+  status: 'not-run' | 'stale' | 'findings' | 'approved';
+  round?: number;
+  open?: number;
+  blocking?: number;
+  /** База выпуска и откуда она: регистрация графа, план выпуска или ранняя попытка. */
+  base?: string;
+  baseSource?: 'register' | 'outline' | 'attempt';
+  head?: string;
+  target?: string;
+  at?: string;
+  line: string;
+}
+
+/** Строка приёмки выпуска: что с ней и держит ли она `release done`. */
+export function releaseReviewView(
+  r: Omit<ReleaseReviewView, 'line'>,
+  en = false,
+): ReleaseReviewView {
+  const round = r.round !== undefined ? (en ? ` (round ${r.round})` : ` (раунд ${r.round})`) : '';
+  const state = en
+    ? r.status === 'approved'
+      ? `release review approved${round}`
+      : r.status === 'findings'
+        ? `release review found ${r.blocking ?? 0} blocking of ${r.open ?? 0} open${round}: fix them with works`
+        : r.status === 'stale'
+          ? `release review is on an older target${round}: run harness review-release again`
+          : 'no release review: harness review-release before release done'
+    : r.status === 'approved'
+      ? `приёмка выпуска одобрена${round}`
+      : r.status === 'findings'
+        ? `приёмка выпуска: блокирующих ${r.blocking ?? 0} из открытых ${r.open ?? 0}${round} — исправить работами`
+        : r.status === 'stale'
+          ? `приёмка выпуска на прежней цели${round}: повторить harness review-release`
+          : 'приёмки выпуска нет: harness review-release до release done';
+  const tail =
+    r.status === 'approved'
+      ? ''
+      : r.required
+        ? en
+          ? ' (required: release done waits)'
+          : ' (обязательна: release done ждёт)'
+        : en
+          ? ' (advisory)'
+          : ' (совет)';
+  return { ...r, line: (state + tail).slice(0, 300) };
 }
 
 /** Журнал ведущего из состояния (локальная запись `lead`): сессия, записи, итог выпуска. */
@@ -1812,6 +1875,7 @@ function settingsOf(i: OperatorViewInput, truncated: Record<string, number>): Vi
       maxNeutralFailures: MAX_NEUTRAL_FAILURES,
       reviewRoundCap: i.effective.reviewRoundCap,
       reviewEscalationRounds: REVIEW_ESCALATION_ROUNDS,
+      ...((p.harnessMode ?? 'light') === 'light' ? { reviewRoundsUnlimited: true } : {}),
     },
     budgets,
     ...(p.budgets ? { budgetOnUnknown: p.budgets.onUnknown } : {}),
@@ -1830,6 +1894,14 @@ function settingsOf(i: OperatorViewInput, truncated: Record<string, number>): Vi
             : 'off',
     },
     defaulted: [...new Set(i.defaulted)].sort(),
+    harnessMode: {
+      mode: p.harnessMode ?? 'light',
+      default: p.harnessMode === undefined,
+      writeGuard:
+        (p.harnessMode ?? 'light') === 'light' &&
+        p.isolation?.mode !== 'none' &&
+        !p.writeGuard?.off,
+    },
     decisions: decisionSettingsView(
       p,
       i.defaulted.flatMap((d) =>
@@ -3344,6 +3416,7 @@ function forecastOf(
           ? { summary: text(c, release.summary, T.releaseSummary)! }
           : {}),
         line: releaseLine.slice(0, T.line),
+        ...(i.releaseReview ? { review: releaseReviewView(i.releaseReview, en) } : {}),
       },
     },
     time: {

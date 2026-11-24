@@ -171,6 +171,17 @@ export function failureSummary(input: {
 /** Непустые строки вывода. */
 const meaningful = (output: string) => output.split('\n').filter((l) => l.trim()).length;
 
+/**
+ * Gate скрыл причину провала (P7-3, 0.1.0-alpha.69): обёртка сказала, что
+ * подробности скрыты, или команда не напечатала ничего. Короткий вывод с
+ * текстом («boom», строка менеджера пакетов) — причина, названная командой:
+ * провал судится как прежде. Применяется к выжимке с `withheld`.
+ */
+export const causeWithheld = (stdout: string, stderr: string) => {
+  const output = stdout + '\n' + stderr;
+  return withheldPhrase.test(output) || meaningful(output) === 0;
+};
+
 /** Флаги, значение которых — путь отчёта JUnit (`--flag=path.xml` или `--flag path.xml`). */
 const reportFlag =
   /^--?(?:test-reporter-destination|reporter-options|outputFile(?:\.junit)?|output-file|junit[\w-]*|report[\w-]*|xml[\w-]*)$/i;

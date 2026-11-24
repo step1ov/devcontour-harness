@@ -55,7 +55,8 @@ test('Канонический JSON и digests примера равны зак�
     '03c03e691a045303bd67c36feea3a01cf177f0331ebb39cf3e8d5468a190157f',
   );
   assert.equal(
-    policyDigest(executionPolicySchema.parse(example('policy'))),
+    // Файл примера как есть: фикстура добавляет тестам harnessMode: strict (alpha.69).
+    policyDigest(executionPolicySchema.parse({ ...example('policy'), harnessMode: undefined })),
     'fe2c6fe7a4c099a27c1b32d2f2fd295a887abcb83ea6f8c41dd408b561e00279',
   );
   const reordered = Object.fromEntries(Object.entries(example('graph')).reverse());

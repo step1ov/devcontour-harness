@@ -449,7 +449,7 @@ async function gate(
   let failure: TaskFailure | undefined;
   try {
     await runGate({
-      policy: { isolation: { mode, domains: [] } },
+      policy: { harnessMode: 'strict', isolation: { mode, domains: [] } },
       record: (e) => {
         recorded.push(e);
         return { ...e, id: 'e', runId: 'r', createdAt: new Date().toISOString() };

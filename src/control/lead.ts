@@ -18,6 +18,7 @@ import type { Engine } from '../engine/engine.ts';
 import { ruCount } from '../contracts/plural.ts';
 import { maskSecrets } from '../projections/mask.ts';
 import { parseDurationFlag } from './duration.ts';
+import { releaseReviewProblem, releaseReviewState } from './release-review-state.ts';
 
 const iso = (ms: number) => new Date(ms).toISOString();
 
@@ -183,8 +184,26 @@ function unfinished(view: ExecutionView) {
  * `release done --summary`: итоговый отчёт ведущего. Только когда весь код
  * принят (ни одной открытой работы или доработки): до него представление
  * говорит «код принят, ведущий ещё работает», и готовность меньше 100 %.
+ *
+ * Ревью выпуска (alpha.69, P7-6): при требовании `required` нужен одобренный
+ * раунд `harness review-release` на текущей принятой цели каждого репозитория
+ * с принятыми работами, без открытых блокирующих находок; иначе `NOT_READY`.
+ * `advisory` — выпуск закрывается, ответ несёт предупреждение. `heads` —
+ * SHA target ref по репозиторию (из git); нет записи — цель по состоянию.
  */
-export function releaseDone(engine: Engine, options: { summary: string }): LeadData {
+export function releaseDone(
+  engine: Engine,
+  options: {
+    summary: string;
+    heads?: Readonly<Record<string, string | undefined>>;
+    /**
+     * Digest нынешнего договора выпуска по репозиторию (`Harness.releaseCheck`,
+     * alpha.69): с ним цель берётся только из `heads` и раунд по прежнему
+     * договору выпуск не принимает.
+     */
+    contracts?: Readonly<Record<string, string | undefined>>;
+  },
+): LeadData {
   const summary = cleanLeadText(options.summary, LEAD_LIMITS.summary, 'release done --summary');
   return engine.recordLead((log, now, view) => {
     const open = unfinished(view);
@@ -195,6 +214,35 @@ export function releaseDone(engine: Engine, options: { summary: string }): LeadD
       );
     const accepted = view.works().filter((w) => w.status === 'done').length;
     if (!accepted) throw new HarnessError('NOT_READY', 'Выпуск не готов: принятых работ нет');
+    const review = releaseReviewState(
+      view,
+      engine.policy,
+      options.heads,
+      options.contracts ? { strict: true, contracts: options.contracts } : {},
+    );
+    const problem = releaseReviewProblem(review);
+    if (problem && review.required)
+      throw new HarnessError(
+        'NOT_READY',
+        `Выпуск не готов: ${problem}. Ревью выпуска обязательно: запустите harness review-release; находки исправляют обычные работы, новая принятая цель — новый раунд. Открытых находок: ${review.open ?? 0}`,
+      );
+    const notes = review.repositories.flatMap((r) => r.notes ?? []).slice(0, 50);
+    const releaseReview = {
+      required: review.required,
+      status: review.status,
+      ...(review.head ? { head: review.head } : {}),
+      ...(review.target ? { target: review.target } : {}),
+      ...(review.round ? { round: review.round } : {}),
+      ...(review.open !== undefined ? { open: review.open } : {}),
+      ...(review.blocking !== undefined ? { blocking: review.blocking } : {}),
+      ...(notes.length ? { notes } : {}),
+    };
+    const warning = problem
+      ? `Ревью выпуска не пройдено (рекомендуется): ${problem}; запустите harness review-release`.slice(
+          0,
+          1000,
+        )
+      : undefined;
     const release = { doneAt: iso(now), summary, works: accepted };
     const short = summary.length > 150 ? summary.slice(0, 149) + '…' : summary;
     const entry: LeadEntry = {
@@ -211,7 +259,16 @@ export function releaseDone(engine: Engine, options: { summary: string }): LeadD
         lead: leadState(next, now),
         entry,
         release,
-        line: `Выпуск готов: принято работ ${accepted}; итоговый отчёт записан.`,
+        line: (
+          `Выпуск готов: принято работ ${accepted}; итоговый отчёт записан.` +
+          (problem
+            ? ' Ревью выпуска не пройдено — см. warning.'
+            : notes.length
+              ? ` Ревью выпуска одобрено; неблокирующих замечаний ${notes.length}.`
+              : ' Ревью выпуска одобрено.')
+        ).slice(0, 300),
+        releaseReview,
+        ...(warning ? { warning } : {}),
       },
     };
   });

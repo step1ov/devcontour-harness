@@ -152,7 +152,8 @@ planning, and the draft approves nothing.
 **Declare the release outline first.** Before the first graph, record the
 whole release, not only the next graph: stages (infra per service, product,
 deploy, …) × components with a rough size and who does them (writers,
-environment, owner) — `$H lead outline` (see `$H lead outline --help`).
+environment, owner) — `$H lead outline` (see `$H lead outline --help`; before
+the first `run`, with `--policy <policy>`).
 Without it `status` and `harness view` say «плана выпуска нет — прогноз по одному
 графу» and the forecast reads one graph as the whole release. Update the
 outline with a reason when the plan grows.
@@ -207,7 +208,30 @@ outline with a reason when the plan grows.
    validate, review and run it (steps 5–7). The review record of the plan
    carries the same digest as `data.graphDigest`.
 
-**Infra works.** Harness-owned infrastructure code — environment bridges,
+**Light mode (the default since 0.1.0-alpha.69).** A policy without
+`harnessMode` is light (`<pkg>/docs/light-mode.md`): writers and gates run
+on the host with Docker, browsers, network and their own ports and compose
+project (`attemptEnv`, `COMPOSE_PROJECT_NAME`); the only guard is writes
+outside the attempt worktree, its temp dir and tool caches (against
+accidents, not a security boundary: Docker and caches bypass it). Acceptance tests,
+fixtures and compose test services live with the product code inside
+product works and are reviewed as code; infra works, a separate infra phase
+and `gateChanges` below are not required. Don't split test infrastructure
+into a separate stage: use the harness helpers — per-attempt services and
+`attempt-env.json` (`HARNESS_ATTEMPT_ENV_FILE`), the `browser` (Playwright)
+gate, the gateway-mirror check. Open an infra work only for a shared thing
+several works need (for example a new compose service), reviewed like code.
+In acceptance criteria and tests ask for what a user or client sees (status,
+text, roles, links, payloads), never hashed CSS Module classes or the RSC
+payload.
+Strict mode (`harnessMode: strict`) is frozen; switching modes is the
+owner's decision — never change it yourself. When the product is served
+through a gateway in production, gates should go through the project's
+gateway (`repositories[].gateway`) and the routing files belong in
+`release.topology`.
+
+**Infra works (strict mode, or when the owner wants that boundary).**
+Harness-owned infrastructure code — environment bridges,
 gate wrappers, validators, acceptance tests under `.harness/` — is planned
 as tasks with `"kind": "infra"`, not written by you during setup or between
 runs (`<pkg>/docs/infra-works.md`). The setup report lists such code and the
@@ -277,6 +301,16 @@ needs a fresh `review-plan` — `reapprove` and `approve` refuse it
 (`APPROVAL_REQUIRED`). In operator mode `approve` of an already approved graph
 after a policy edit also points to `reapprove`.
 Never call library internals (`Engine.approve`, store writes) to approve.
+
+**Which rounds count.** Only a real plan change spends a round: an order
+added, removed, or changed in text, criteria, dependencies, write scope,
+kind, repository or required context. Reworks of accepted works, your
+diagnoses and addenda, owner answers and other context, source revisions,
+policy and reviewer changes are free, for plan and contract reviews alike.
+In light mode there is no round limit (plan or contract)
+at all — the budget is release time and cost (`budgets.group` /
+`budgets.total`; `doctor` warns `light-no-budget` without one), and raising
+it stays the owner's decision.
 
 **Review rounds that go in circles.** Each plan or contract review round is a
 paid call; `status` / `explain` `data.reviews[].line` shows the verdict, rounds
@@ -790,7 +824,9 @@ connector — is invisible unless you say it:
 - **Declare the whole release first** — before the first graph, record the
   release outline: stages × components with a rough size and who does them,
   not only the next graph:
-  `$H lead outline --state <state> --file outline.json` with
+  `$H lead outline --state <state> --file outline.json` (before the first
+  `run` the state directory is not bound yet: add `--policy <policy>` once —
+  it binds and creates the state like `run` does) with
   `{"stages":[{"id":"infra","title":"Инфраструктура","kind":"infra","components":[{"id":"api-infra","title":"API: сборка и gates","size":"S","actor":"writers"}]},{"id":"product","title":"Продукт","kind":"product","components":[{"id":"site","title":"Сайт","size":"M","actor":"writers","works":["site-form"]}]},{"id":"deploy","title":"Выкладка","kind":"deploy","components":[{"id":"staging","title":"Стенд","size":"S","actor":"owner"}]}]}`
   (`kind`: infra | product | deploy | other; `size`: S = 1, M = 2, L = 4 tasks,
   or `tasks: N`; `actor`: writers | environment | owner; optional `works`
@@ -803,6 +839,19 @@ connector — is invisible unless you say it:
 - At each step outside harness, one short line in plain words, the way you
   would tell a non-developer: `$H lead note "Обновляю документ DOC-2 в источнике задач"
 --state <state>` (up to 200 characters; no secrets, no paths, no logs).
+- When all code is accepted, run the **release acceptance review**
+  (`<pkg>/docs/release-review.md`):
+  `$H review-release --state <state>`. The release base is recorded at the
+  first graph registration of the release or at `lead outline` (see
+  `status` → `releaseReview.base`); pass `--base` only to override it. An independent
+  reviewer checks the accepted target against the brief, acceptance criteria,
+  owner answers and the deploy topology (`release.topology`: gateway/proxy
+  configs, production env files). Blocking findings are fixed by works (plan
+  them like any task), then run `review-release` again on the new target.
+  `release done` refuses in both modes until the latest round on the current
+  target is approved without blocking findings (only an explicit
+  `release.review: advisory` makes it a warning); open non-blocking notes do
+  not hold the release — mention them in the report.
 - When all code is accepted, delivered and checked, write the final report:
   `$H release done --state <state> --summary "<what was done, what is left>"`.
   Until then the view says «код принят, ведущий ещё работает: <your last

@@ -166,6 +166,11 @@ export function generatePolicy(input: {
    * `leadTechnicalAnswers`).
    */
   recovery?: { mode: 'lead' | 'user'; diagnoseAfter?: number; leadResets?: number };
+  /**
+   * Режим harness (`init --harness-mode`, alpha.69): `strict` записывается
+   * полем `harnessMode`; облегчённый — умолчание, поля нет.
+   */
+  harnessMode?: 'light' | 'strict';
   /** Закреплённый node (`policy.toolchain`): предложение init. */
   toolchainPin?: { node: string };
 }): GeneratedPolicy {
@@ -245,6 +250,7 @@ export function generatePolicy(input: {
     ...(input.leadTechnicalAnswers
       ? { inputPolicy: { threshold: 7, criticalPaths: [], leadAnswers: { technical: true } } }
       : {}),
+    ...(input.harnessMode === 'strict' ? { harnessMode: 'strict' as const } : {}),
     ...(input.recovery
       ? {
           recovery: {

@@ -78,6 +78,8 @@ export const viewSettingsSchema = z.strictObject({
     maxNeutralFailures: count,
     reviewRoundCap: count,
     reviewEscalationRounds: count,
+    /** Ревизия 9: облегчённый режим — раунды ревью плана без предела. */
+    reviewRoundsUnlimited: z.boolean().optional(),
   }),
   budgets: z
     .array(
@@ -108,6 +110,14 @@ export const viewSettingsSchema = z.strictObject({
    * у doctor и status (docs/principles.md «Кто принимает решения»).
    */
   decisions: decisionSettingsSchema.optional(),
+  /** Ревизия 9: режим harness (alpha.69) и действует ли граница записи. */
+  harnessMode: z
+    .strictObject({
+      mode: z.enum(['light', 'strict']),
+      default: z.boolean(),
+      writeGuard: z.boolean(),
+    })
+    .optional(),
 });
 
 const findingSchema = z.strictObject({
@@ -126,7 +136,8 @@ const findingSchema = z.strictObject({
 });
 
 export const reviewSubjectViewSchema = z.strictObject({
-  kind: z.enum(['plan', 'contract', 'code']),
+  /** Ревизия 9: `release` — приёмка выпуска (`harness review-release`). */
+  kind: z.enum(['plan', 'contract', 'code', 'release']),
   subject: id,
   workId: id.optional(),
   approved: z.boolean(),
@@ -823,6 +834,26 @@ const forecastSchema = z.strictObject({
         doneAt: isoTimeSchema.optional(),
         summary: freeText(T.releaseSummary).optional(),
         line: z.string().min(1).max(T.line),
+        /**
+         * Ревизия 9: приёмка выпуска (`harness review-release`, alpha.69):
+         * требование, состояние по худшему репозиторию, раунд, открытые и
+         * блокирующие находки, проверенная и текущая цель.
+         */
+        review: z
+          .strictObject({
+            required: z.boolean(),
+            status: z.enum(['not-run', 'stale', 'findings', 'approved']),
+            round: count.optional(),
+            open: count.optional(),
+            blocking: count.optional(),
+            base: z.string().max(100).optional(),
+            baseSource: z.enum(['register', 'outline', 'attempt']).optional(),
+            head: z.string().max(100).optional(),
+            target: z.string().max(100).optional(),
+            at: isoTimeSchema.optional(),
+            line: z.string().min(1).max(300),
+          })
+          .optional(),
       })
       .optional(),
   }),

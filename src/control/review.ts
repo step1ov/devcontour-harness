@@ -11,6 +11,13 @@ import {
   contextDigest,
   contextDigestMatches,
   roundBudget,
+  freeRoundsSinceApproved,
+  planStatementDigest,
+  LIGHT_REVIEW_LOOP_ROUNDS,
+  unchangedUnapprovedStreak,
+  unapprovedSinceApproved,
+  harnessModeOf,
+  planOrderChanges,
   digestOf,
   findingId,
   mcpEnvironment,
@@ -105,6 +112,15 @@ export interface TechnicalReviewInput {
    * одобренного раунда — повторное ревью без траты предела (0.1.0-alpha.68).
    */
   planDigest?: string;
+  /**
+   * Состав плана (`planOrderDigests`, 0.1.0-alpha.69): по нему раунд отличает
+   * настоящее изменение плана (поручения добавлены, убраны или изменено их
+   * значимое содержание, кроме доработок принятых работ) от остального. Нет
+   * поля — сравнение по `planDigest` (или digest предмета), как в alpha.68.
+   */
+  planOrders?: Record<string, string>;
+  /** Цель и критерии каждого поручения (`planStatementDigests`, alpha.69). */
+  planStatements?: Record<string, string>;
   /**
    * Начало эпохи раундов: последняя доработка принятой работы графа со своим
    * пределом попыток. Раунды до неё предел не тратят (0.1.0-alpha.68).
@@ -211,9 +227,11 @@ export async function technicalReview(
   // оплаченный раунд: вызова нет, пока решения нет.
   const waiting = escalatedFindings(decided, before);
   if (waiting.length) throw escalationError(kind, subject, waiting, before);
-  // Почему нужен новый раунд и тратит ли он предел (0.1.0-alpha.68): тот же
-  // план, политика, reviewer и автор после одобренного раунда — повторное
-  // ревью (ответ на вопрос, документы, ревизия источника), без траты предела.
+  // Почему нужен новый раунд и тратит ли он предел (0.1.0-alpha.69): предел
+  // тратит только настоящее изменение плана (`planChangeOf`). Доработка
+  // принятой работы, указания ведущего, контекст (ответы, документы),
+  // ревизия источника, политика и reviewer — повторное ревью без траты.
+  const plan = planChangeOf(engine, input, rounds);
   const changes = last
     ? (() => {
         const lastSnapshot = last.contextDigest
@@ -221,10 +239,7 @@ export async function technicalReview(
           : undefined;
         const ctx = contextChanges(lastSnapshot, context);
         return {
-          plan:
-            last.planDigest && input.planDigest
-              ? last.planDigest !== input.planDigest
-              : last.digest !== digest,
+          plan: plan.real,
           policy: last.policyDigest !== executionDigest(policy),
           reviewer: last.reviewerBinding !== binding || last.authorRuntime !== input.author,
           context: {
@@ -232,25 +247,47 @@ export async function technicalReview(
             removed: ctx.removed.slice(0, 30),
             changed: ctx.changed.slice(0, 30),
           },
+          ...(plan.changed.length || plan.rework.length
+            ? { orders: { changed: plan.changed.slice(0, 30), rework: plan.rework.slice(0, 30) } }
+            : {}),
         };
       })()
     : undefined;
-  const budget = roundBudget(rounds, input.maxRounds ?? null, {
+  // Облегчённый режим (0.1.0-alpha.69): счёта раундов нет — ревью плана не
+  // отказывает по пределу раундов; бюджет — время и стоимость выпуска
+  // (`budgets.group`/`total`), исчерпание — `BUDGET_EXHAUSTED`, решает владелец.
+  const maxRounds = harnessModeOf(policy) === 'light' ? undefined : input.maxRounds;
+  const budget = roundBudget(rounds, maxRounds ?? null, {
     since: input.roundEpoch,
     history: prior?.rounds ?? 0,
   });
+  // Защита от круга: бесплатных раундов подряд без одобрения — не больше
+  // предела; дальше раунд неизменённого плана засчитан.
   const free =
     !!last &&
-    last.approved &&
-    !!changes &&
-    !changes.plan &&
-    !changes.policy &&
-    !changes.reviewer &&
-    (input.maxRounds === undefined || budget.free < input.maxRounds);
-  if (input.maxRounds !== undefined && !free && budget.used >= input.maxRounds)
+    !plan.real &&
+    (maxRounds === undefined || freeRoundsSinceApproved(rounds) < maxRounds);
+  if (harnessModeOf(policy) === 'light' && last) {
+    const unapproved = unapprovedSinceApproved(rounds);
+    if (unapproved >= 2 * LIGHT_REVIEW_LOOP_ROUNDS)
+      throw new HarnessError(
+        'ATTEMPTS_EXHAUSTED',
+        `Круг ревью ${kind} ${subject}: ${unapproved} неодобренных раундов подряд — решение владельца: одобрить ${kind === 'plan' ? 'план' : 'контракт'} самому (approvalMode operator, harness approve) или остановить работу`,
+      );
+    if (
+      !plan.real &&
+      !input.dispositions?.length &&
+      unchangedUnapprovedStreak(rounds) >= LIGHT_REVIEW_LOOP_ROUNDS
+    )
+      throw new HarnessError(
+        'NOT_READY',
+        `Круг ревью ${kind} ${subject}: ${LIGHT_REVIEW_LOOP_ROUNDS} неодобренных раундов подряд без изменения ${kind === 'plan' ? 'плана' : 'контракта'} — ход ведущего: изменить постановку по находкам или принять ограничение (--accept-limitation <id> --reason …); новый раунд того же — не идёт`,
+      );
+  }
+  if (maxRounds !== undefined && !free && budget.used >= maxRounds)
     throw new HarnessError(
       'ATTEMPTS_EXHAUSTED',
-      `Исчерпаны раунды ревью ${kind} ${subject}: ${budget.used} из ${input.maxRounds}` +
+      `Исчерпаны раунды ревью ${kind} ${subject}: ${budget.used} из ${maxRounds}` +
         (budget.since ? ` с доработки ${budget.since}` : '') +
         (changes ? `; новый раунд нужен: ${roundReason(changes)}` : ''),
     );
@@ -407,6 +444,7 @@ export async function technicalReview(
     policyDigest: executionDigest(policy),
     isolationDigest: isolationDigest(policy),
     ...(input.planDigest ? { planDigest: input.planDigest } : {}),
+    ...(input.planOrders ? { planOrders: input.planOrders } : {}),
     counted: !free,
     ...(changes ? { changes } : {}),
     findings,
@@ -751,6 +789,65 @@ export function mergeTechnicalRound(
   return { findings: merged, issues, notes };
 }
 
+/**
+ * Настоящее изменение плана (0.1.0-alpha.69) — единственное, что тратит
+ * предел раундов. Это другой набор поручений или другое значимое содержание
+ * поручения (`planOrderDigest`: текст, критерии, зависимости, область
+ * записи, вид, репозиторий, обязательный контекст и прочие поля постановки,
+ * кроме источника и его ревизии) против прежнего одобренного раунда — и
+ * против последнего раунда, если он не одобрен (тот же план после отказа не
+ * оплачивается второй раз). Изменение поручения, работа которого принята
+ * (`done`) или дорабатывается после приёмки, — доработка (`rework`), не
+ * изменение плана. Без состава плана у раунда или во входе — сравнение
+ * digest плана, как в alpha.68. Первый раунд предмета засчитан всегда.
+ */
+export function planChangeOf(
+  engine: Pick<Engine, 'read'>,
+  input: Pick<
+    TechnicalReviewInput,
+    'kind' | 'subject' | 'digest' | 'planDigest' | 'planOrders' | 'planStatements'
+  >,
+  rounds: readonly ReviewRecord[],
+): { real: boolean; changed: string[]; rework: string[] } {
+  const last = rounds.at(-1);
+  if (!last) return { real: true, changed: [], rework: [] };
+  const approved = rounds.findLast((r) => r.approved) ?? last;
+  const bases = approved === last ? [last] : [approved, last];
+  if (input.kind === 'plan' && input.planOrders && bases.every((b) => b.planOrders)) {
+    // Доработка принятой работы бесплатна, пока её цель и критерии те же,
+    // что у принятой постановки (ревью alpha.69): новые цель или критерии —
+    // настоящее изменение плана.
+    const accepted = new Set(
+      engine
+        .read((v) => v.works(input.subject))
+        .filter((w) => w.status === 'done' || (!!w.rework && w.status !== 'cancelled'))
+        .filter((w) => {
+          const statement = input.planStatements?.[w.id];
+          return (
+            statement === undefined ||
+            statement === planStatementDigest(w.rework?.acceptedOrder ?? w.order)
+          );
+        })
+        .map((w) => w.id),
+    );
+    const real = bases.map((b) =>
+      planOrderChanges(b.planOrders!, input.planOrders!).filter((id) => !accepted.has(id)),
+    );
+    const all = planOrderChanges(approved.planOrders!, input.planOrders);
+    const isReal = real.every((ids) => ids.length > 0);
+    return {
+      real: isReal,
+      changed: isReal ? real[0]! : [],
+      rework: all.filter((id) => accepted.has(id)),
+    };
+  }
+  const differs = (b: ReviewRecord) =>
+    b.planDigest && input.planDigest
+      ? b.planDigest !== input.planDigest
+      : b.digest !== input.digest;
+  return { real: bases.every(differs), changed: [], rework: [] };
+}
+
 /** Почему понадобился новый раунд: что изменилось против прежнего (текст отказа и ответа). */
 export function roundReason(changes: NonNullable<ReviewRecord['changes']>) {
   const parts = [
@@ -776,7 +873,9 @@ export const MAX_ROUND_EPOCHS = 3;
  * отказ от доработки эпоху не возвращает. Действующая — последняя из них,
  * чья доработка не оставлена (продолжение оставленной сохраняет её время,
  * `rework.roundEpochAt`). Состояние без записи (до alpha.68) — по текущим
- * доработкам работ.
+ * доработкам работ. С 0.1.0-alpha.69 раунд доработки предел не тратит
+ * (`planChangeOf`): эпоху расходует только засчитанное изменение плана после
+ * неё, а не сама доработка.
  */
 export function planRoundEpoch(
   view: {
@@ -845,6 +944,15 @@ export function planRoundEpoch(
   return [...consumed].reverse().find(open)?.at;
 }
 
-/** Предел раундов ревью плана и контракта по политике (`Harness.review`). */
-export const reviewRoundCap = (policy: Pick<ExecutionPolicy, 'maxAttempts'>) =>
+/**
+ * Предел раундов ревью плана и контракта по политике (`Harness.review`):
+ * строгий режим — `maxAttempts * 2`; облегчённый (0.1.0-alpha.69) — `null`,
+ * счёта раундов нет, бюджет — время и стоимость выпуска (`budgets`).
+ */
+export const reviewRoundCap = (
+  policy: Pick<ExecutionPolicy, 'maxAttempts' | 'harnessMode'>,
+): number | null => (harnessModeOf(policy) === 'light' ? null : strictReviewRoundCap(policy));
+
+/** Предел раундов строгого режима — порог настроек панели и снимков политики. */
+export const strictReviewRoundCap = (policy: Pick<ExecutionPolicy, 'maxAttempts'>) =>
   policy.maxAttempts * 2;

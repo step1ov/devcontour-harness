@@ -272,6 +272,9 @@
               "type": "integer",
               "minimum": 0,
               "maximum": 9007199254740991
+            },
+            "reviewRoundsUnlimited": {
+              "type": "boolean"
             }
           },
           "required": [
@@ -523,6 +526,30 @@
           "required": [
             "items",
             "summary"
+          ],
+          "additionalProperties": false
+        },
+        "harnessMode": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "light",
+                "strict"
+              ]
+            },
+            "default": {
+              "type": "boolean"
+            },
+            "writeGuard": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "mode",
+            "default",
+            "writeGuard"
           ],
           "additionalProperties": false
         }
@@ -1241,7 +1268,8 @@
             "enum": [
               "plan",
               "contract",
-              "code"
+              "code",
+              "release"
             ]
           },
           "subject": {
@@ -3275,6 +3303,74 @@
                   "type": "string",
                   "minLength": 1,
                   "maxLength": 200
+                },
+                "review": {
+                  "type": "object",
+                  "properties": {
+                    "required": {
+                      "type": "boolean"
+                    },
+                    "status": {
+                      "type": "string",
+                      "enum": [
+                        "not-run",
+                        "stale",
+                        "findings",
+                        "approved"
+                      ]
+                    },
+                    "round": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "open": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "blocking": {
+                      "type": "integer",
+                      "minimum": 0,
+                      "maximum": 9007199254740991
+                    },
+                    "base": {
+                      "type": "string",
+                      "maxLength": 100
+                    },
+                    "baseSource": {
+                      "type": "string",
+                      "enum": [
+                        "register",
+                        "outline",
+                        "attempt"
+                      ]
+                    },
+                    "head": {
+                      "type": "string",
+                      "maxLength": 100
+                    },
+                    "target": {
+                      "type": "string",
+                      "maxLength": 100
+                    },
+                    "at": {
+                      "type": "string",
+                      "format": "date-time",
+                      "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+                    },
+                    "line": {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 300
+                    }
+                  },
+                  "required": [
+                    "required",
+                    "status",
+                    "line"
+                  ],
+                  "additionalProperties": false
                 }
               },
               "required": [
@@ -4352,6 +4448,15 @@
                     "type": "string",
                     "minLength": 1,
                     "maxLength": 80
+                  },
+                  "cause": {
+                    "type": "string",
+                    "enum": [
+                      "sandbox-process-list",
+                      "sandbox-signal",
+                      "sandbox-browser",
+                      "gate-definition"
+                    ]
                   }
                 },
                 "required": [

@@ -231,9 +231,16 @@ test(
         }
       // Настройки решений (alpha.66) — аддитивное поле статуса.
       // План выпуска ведущего (alpha.68) — тоже аддитивное поле.
-      const { decisions: _d, outline: _o, ...nowRest } = nowStatus as Record<string, unknown>;
+      // Приёмка выпуска и база выпуска (alpha.69) — тоже.
+      const {
+        decisions: _d,
+        outline: _o,
+        releaseReview: _r,
+        ...nowRest
+      } = nowStatus as Record<string, unknown>;
       void _d;
       void _o;
+      void _r;
       const stripped = {
         ...nowRest,
         works: works.map(

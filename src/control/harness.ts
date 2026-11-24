@@ -16,6 +16,8 @@ import {
   digestOf,
   workGraphDigest,
   planContentDigest,
+  planOrderDigests,
+  planStatementDigests,
   type Author,
   type ContextSnapshot,
   type ContractDocument,
@@ -33,6 +35,7 @@ import {
   type AttemptState,
   INPUT_SOURCE_KIND,
   latestAnswer,
+  strictSandbox,
 } from '../contracts/index.ts';
 import { inputContextSource, withInput, type InputMessageRef } from '../engine/input-requests.ts';
 import { cliAdapter } from '../agents/cli-adapter.ts';
@@ -56,6 +59,13 @@ import {
 import { acceptedTargets } from './target.ts';
 import { planRoundEpoch, reviewRoundCap, technicalReview } from './review.ts';
 import { reviewCode, type CodeReviewInput } from './review-code.ts';
+import {
+  releaseBaseOf,
+  releaseContract,
+  reviewRelease,
+  type ReleaseReviewInput,
+} from './review-release.ts';
+import { releaseReviewState } from './release-review-state.ts';
 import { lifecyclePreflight } from './preflight.ts';
 import { policySourceChanged, type PolicySource } from './provenance.ts';
 import { JointRunner } from '../engine/joint-runner.ts';
@@ -396,12 +406,14 @@ export class Harness {
           ? { group: { id: subject, workIds: input.graph.orders.map((o) => o.id) } }
           : {}),
       },
-      maxRounds: reviewRoundCap(this.policy),
+      ...((cap) => (cap === null ? {} : { maxRounds: cap }))(reviewRoundCap(this.policy)),
       // Тот же план после одобренного раунда и доработка принятой работы —
       // не новые траты предела раундов (0.1.0-alpha.68).
       ...(input.kind === 'plan'
         ? ((since) => ({
             planDigest: planContentDigest(input.graph),
+            planOrders: planOrderDigests(input.graph),
+            planStatements: planStatementDigests(input.graph),
             ...(since ? { roundEpoch: since } : {}),
           }))(this.engine.read((v) => planRoundEpoch(v, subject)))
         : {}),
@@ -430,6 +442,97 @@ export class Harness {
       },
       input,
     );
+  }
+
+  /**
+   * Ревью выпуска (`harness review-release`, alpha.69): принятая цель против
+   * договора выпуска; запись `code-reviews` с `kind: release`.
+   */
+  reviewRelease(input: ReleaseReviewInput) {
+    this.engine.assertNotUpdating();
+    return reviewRelease(
+      {
+        engine: this.engine,
+        policy: this.policy,
+        adapters: this.adapters,
+        stateDir: this.options.stateDir,
+        repoPath: (path) => this.repoPath(path),
+        ...(this.options.checkoutRoot ? { checkoutRoot: this.options.checkoutRoot } : {}),
+        ...(this.options.environment ? { environment: this.options.environment } : {}),
+      },
+      input,
+    );
+  }
+
+  /** SHA target ref каждого репозитория политики; недоступный — без записи. */
+  async targetHeads(): Promise<Record<string, string>> {
+    const heads: Record<string, string> = {};
+    for (const repo of this.policy.repositories) {
+      const head = await git(
+        this.repoPath(repo.path),
+        'rev-parse',
+        '--verify',
+        '--end-of-options',
+        `${repo.targetRef}^{commit}`,
+      ).catch(() => undefined);
+      if (head) heads[repo.id] = head;
+    }
+    return heads;
+  }
+
+  /**
+   * Сверка `release done` (alpha.69, ревью): нынешние цели (git) и digest
+   * договора выпуска на них по каждому репозиторию с принятыми работами.
+   * Цель, которую не прочитать, — без записи: выпуск не закрывается.
+   */
+  async releaseCheck(): Promise<{
+    heads: Record<string, string>;
+    contracts: Record<string, string>;
+  }> {
+    const heads = await this.targetHeads();
+    const repositories = this.engine.read(
+      (v) =>
+        new Set(
+          v
+            .works()
+            .filter((w) => w.status === 'done')
+            .map((w) => w.order.repositoryId),
+        ),
+    );
+    const contracts: Record<string, string> = {};
+    for (const repo of this.policy.repositories) {
+      const head = heads[repo.id];
+      if (!head || !repositories.has(repo.id)) continue;
+      contracts[repo.id] = (
+        await releaseContract(
+          { engine: this.engine, policy: this.policy },
+          repo.id,
+          this.repoPath(repo.path),
+          head,
+        )
+      ).digest;
+    }
+    return { heads, contracts };
+  }
+
+  /** Записать базу выпуска репозиториев (`release-base`) по текущим target ref. */
+  async recordReleaseBases(repositories: ReadonlySet<string>, source: 'register' | 'outline') {
+    const heads = await this.targetHeads();
+    const wanted = Object.fromEntries(Object.entries(heads).filter(([id]) => repositories.has(id)));
+    // Выпуск, уже идущий без записи (начат до alpha.69): база — его самая
+    // ранняя попытка после итога прежнего выпуска, а не нынешняя цель.
+    const earlier = this.engine.read((v) =>
+      Object.fromEntries(Object.keys(wanted).map((id) => [id, releaseBaseOf(v, id)])),
+    );
+    return Object.keys(wanted).length
+      ? this.engine.recordReleaseBases(wanted, source, earlier)
+      : [];
+  }
+
+  /** Состояние ревью выпуска против текущих target ref (для status и view). */
+  async releaseReview() {
+    const heads = await this.targetHeads();
+    return this.engine.read((v) => releaseReviewState(v, this.policy, heads));
   }
 
   /**
@@ -959,7 +1062,7 @@ export class Harness {
     // Удержание gate отказом `ps` снимается, когда список процессов в
     // песочнице стал доступен: проба (одна на процесс) — до выдачи.
     if (
-      this.policy.isolation.mode === 'os' &&
+      strictSandbox(this.policy) &&
       this.engine.read((v) => this.engine.environmentGateHolds(v)).length
     )
       await processListBackend.probe().catch(() => undefined);
@@ -1015,6 +1118,12 @@ export class Harness {
       },
     });
     const graph = registered.graph;
+    // База выпуска (alpha.69): target ref репозиториев графа при первой
+    // регистрации выпуска; записанная не переписывается.
+    await this.recordReleaseBases(
+      new Set(input.graph.orders.map((o) => o.repositoryId)),
+      'register',
+    ).catch(() => undefined);
     if (input.context) {
       const issues = contextIssues(input.context);
       if (issues.length)

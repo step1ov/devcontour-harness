@@ -1,6 +1,6 @@
 import { execFileSync } from 'node:child_process';
+import { controllerTemp } from '../environment/controller-temp.ts';
 import { mkdir, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { z } from 'zod';
 import {
@@ -10,6 +10,7 @@ import {
   type ExecutionPolicy,
   type WorkState,
   gateTimeoutMs,
+  strictSandbox,
 } from '../contracts/index.ts';
 import { OversizedFile, readBounded } from '../environment/bounded-read.ts';
 import {
@@ -379,7 +380,7 @@ async function decide(
   const dir = await realpath(await mkdtemp(join(cases, 'case-')));
   await rm(dir, { recursive: true, force: true });
   await git(repoPath, 'worktree', 'add', '--detach', dir, source.sha);
-  const io = await realpath(await mkdtemp(join(tmpdir(), 'harness-case-')));
+  const io = await realpath(await mkdtemp(join(controllerTemp.dir(), 'harness-case-')));
   try {
     const execution = executionEnvironment(
       [ctx.policy.environment, repo.environment],
@@ -395,7 +396,7 @@ async function decide(
     const deadline = Date.now() + limitMs;
     const signal = AbortSignal.timeout(limitMs);
     const prepared = preparation.guard(
-      ctx.policy.isolation.mode === 'os',
+      strictSandbox(ctx.policy),
       dir,
       preparesTree(repo.lifecycle ?? ctx.policy.lifecycle, repo.prepare, repo.dependencyStore),
     );

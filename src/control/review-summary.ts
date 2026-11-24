@@ -78,6 +78,13 @@ export function reviewSummaryRows(
   return { reviews, reviewsTruncated: Math.max(0, last.size - REVIEW_SUMMARY_ROWS) };
 }
 
+/**
+ * Раунды ревью без предела — облегчённый режим (0.1.0-alpha.69): счёта нет,
+ * бюджет выпуска — время и стоимость (`budgets.group`/`total`).
+ */
+export const LIGHT_ROUNDS_RU = 'без предела (облегчённый режим; бюджет — время/стоимость выпуска)';
+export const LIGHT_ROUNDS_EN = 'no limit (light mode; the budget is release time/cost)';
+
 /** Сводка одного предмета по его последнему раунду. */
 export function reviewSubjectSummary(
   r: ReviewRecord,
@@ -108,15 +115,19 @@ export function reviewSubjectSummary(
   const line = [
     `${r.kind === 'plan' ? 'план' : 'контракт'} ${r.subject}: ${reviewVerdictText(r.approved, counts, 'ru')}`,
     budget
-      ? `раундов ${budget.used}${max === null ? '' : '/' + max}` +
-        (budget.remaining !== null
-          ? budget.remaining === 0
-            ? ', осталось 0: раунд изменённого плана — после решения о пределе'
-            : `, осталось ${budget.remaining}`
-          : '') +
-        (budget.free ? `, без траты предела ${budget.free}` : '') +
-        (budget.since ? ' (с доработки)' : '')
-      : `раундов ${r.round}${max === null ? '' : '/' + max}`,
+      ? max === null
+        ? `раундов ${r.round}, ${LIGHT_ROUNDS_RU}`
+        : `раундов ${budget.used}/${max}` +
+          (budget.remaining !== null
+            ? budget.remaining === 0
+              ? ', осталось 0: раунд изменённого плана — после решения о пределе'
+              : `, осталось ${budget.remaining}`
+            : '') +
+          (budget.free ? `, без траты предела ${budget.free}` : '') +
+          (budget.since ? ' (с доработки)' : '')
+      : max === null
+        ? `раундов ${r.round}, ${LIGHT_ROUNDS_RU}`
+        : `раундов ${r.round}/${max}`,
     `ревью ${spendText(spend, 'ru')}`,
     ...(escalation
       ? [

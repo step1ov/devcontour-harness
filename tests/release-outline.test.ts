@@ -14,7 +14,8 @@ import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
@@ -32,7 +33,7 @@ import { leadBegin } from '../src/control/lead.ts';
 import { operatorView, viewToken } from '../src/projections/operator-view.ts';
 import type { OperatorOutlineInput } from '../src/projections/operator-view.ts';
 import { NOW, at, attempt, baseInput, work } from './operator-view-input.ts';
-import { engineOf, graphOf, ready } from './engine-fixture.ts';
+import { engineOf, graphOf, policyOf, ready } from './engine-fixture.ts';
 
 const cli = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
 const harness = (...args: string[]) => {
@@ -188,7 +189,7 @@ test('alpha.68 CLI: lead outline --file и синоним; status — RELEASE_OU
   // Договор CLI называет команду и её флаги.
   assert.deepEqual(
     cliCommands['lead-outline'].args.map((a) => a.name),
-    ['--state', '--file', '--reason'],
+    ['--state', '--file', '--reason', '--policy'],
   );
   assert.equal(cliCommands['lead-outline'].writes, true);
   const file = join(env.dir, 'outline.json');
@@ -213,6 +214,36 @@ test('alpha.68 CLI: lead outline --file и синоним; status — RELEASE_OU
   const status = cliDataSchemas.status.parse(st.json.data);
   assert.equal(status.outline?.state, 'recorded');
   assert.equal(status.outline?.revision, 1);
+  assert.equal(status.outline?.units, 7);
+});
+
+test('alpha.69 CLI: lead outline до первого run — с --policy каталог привязан и план записан; без него — отказ с подсказкой', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'harness-outline-'));
+  const state = join(dir, 'state');
+  const policyFile = join(dir, 'policy.json');
+  writeFileSync(policyFile, JSON.stringify(policyOf()));
+  const file = join(dir, 'outline.json');
+  writeFileSync(file, JSON.stringify(outlineFile));
+  // Каталога состояния ещё нет: без политики — понятный отказ, а не молчаливое создание.
+  const refused = harness('lead', 'outline', '--state', state, '--file', file);
+  assert.equal(refused.json.error?.code, 'NOT_FOUND');
+  assert.match(JSON.stringify(refused.json.error), /--policy/);
+  assert.equal(existsSync(state), false, 'отказ ничего не создал');
+  const r = harness('lead', 'outline', '--state', state, '--policy', policyFile, '--file', file);
+  assert.equal(r.status, 0, r.stderr);
+  const data = cliDataSchemas['lead-outline'].parse(r.json.data);
+  assert.equal(data.changed, true);
+  assert.equal(data.outline.revision, 1);
+  assert.ok(existsSync(join(state, 'binding.json')), 'каталог привязан к политике');
+  // Дальше — как у привязанного каталога: без --policy, та же редакция.
+  const again = harness('lead', 'outline', '--state', state, '--file', file);
+  assert.equal(again.status, 0, again.stderr);
+  assert.equal(cliDataSchemas['lead-outline'].parse(again.json.data).changed, false);
+  // Первый граф застаёт записанный план: status называет его записанным.
+  const st = harness('status', '--state', state);
+  assert.equal(st.status, 0, st.stderr);
+  const status = cliDataSchemas.status.parse(st.json.data);
+  assert.equal(status.outline?.state, 'recorded');
   assert.equal(status.outline?.units, 7);
 });
 

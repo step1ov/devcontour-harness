@@ -1,3 +1,4 @@
+import { readFileSync, readdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { mkdir, rm, rmdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -8,10 +9,17 @@ import {
   type EvidenceRecord,
   type ExecutionPolicy,
   type RunEventPayload,
+  strictSandbox,
+  harnessModeOf,
 } from '../contracts/index.ts';
 import { livenessPayload, superviseStalls } from '../engine/stall-sweep.ts';
 import { TaskFailure } from '../engine/failure.ts';
 import { git } from '../environment/process.ts';
+import {
+  allocateAttemptPorts,
+  attemptVariables,
+  type AttemptPorts,
+} from '../environment/attempt-ports.ts';
 import {
   executionEnvironment,
   preparation,
@@ -22,7 +30,7 @@ import {
 } from '../environment/lifecycle.ts';
 import { defaultResourceDatabase, withResources } from '../environment/resources.ts';
 import { removeSnapshots, snapshotDependencies, type DependencySnapshot } from './dependencies.ts';
-import { reapedFailure, runGate, type Boundary } from './gates.ts';
+import { GATE_SILENT_FAILURE, reapedFailure, runGate, type Boundary } from './gates.ts';
 import { checkoutPath, chooseCheckoutRoot } from '../environment/checkout-root.ts';
 import {
   dependencyStoreRoot,
@@ -280,6 +288,7 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
   };
   let snapshots: DependencySnapshot[] = [];
   let added = false;
+  let ports: AttemptPorts | undefined;
   const boundaryOf = ctx.boundary();
   const store: StoreContext = {
     policy: ctx.policy,
@@ -334,6 +343,20 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
           );
         await staged('worktree', () => git(path, 'worktree', 'add', '--detach', cwd, input.sha));
         added = true;
+        // Облегчённый режим (alpha.69): свои порты, имя проекта compose и
+        // шлюз — как у попытки, чтобы прогон не столкнулся с идущими.
+        const light = harnessModeOf(ctx.policy) === 'light';
+        if (light && ctx.policy.attemptEnv?.ports?.length)
+          ports = await allocateAttemptPorts(
+            ctx.policy.attemptEnv,
+            ctx.resourceDatabase ?? defaultResourceDatabase(),
+            `${ctx.stateDir}:${id}`,
+            {
+              exclude: ctx.policy.resources
+                .filter((r) => r.kind === 'port')
+                .map((r) => Number(r.value)),
+            },
+          );
         const execution = executionEnvironment(
           [ctx.policy.environment, repo.environment],
           {
@@ -346,6 +369,7 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
               ...Object.fromEntries(snapshots.map((d) => [d.repositoryId, d.path])),
               [repo.id]: cwd,
             }),
+            ...(light ? attemptVariables(id, ports?.ports ?? {}, repo.gateway, repo.id) : {}),
           },
           source,
           ctx.policy.toolchain,
@@ -353,7 +377,7 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
         if (input.onStep) execution.onStep = (step) => input.onStep!(step);
         const boundary = ctx.boundary();
         const prepared = preparation.guard(
-          ctx.policy.isolation.mode === 'os',
+          strictSandbox(ctx.policy),
           cwd,
           preparesTree(repo.lifecycle ?? ctx.policy.lifecycle, repo.prepare, repo.dependencyStore),
         );
@@ -515,6 +539,11 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
     if (!reason) throw error;
     if (!interrupted) throw new HarnessError('CANCELLED', 'Проверка gates прервана: ' + reason);
   } finally {
+    try {
+      ports?.release();
+    } catch {
+      /* аренда умершего процесса снимется при следующем выделении */
+    }
     if (added) await git(path, 'worktree', 'remove', '--force', cwd).catch(() => undefined);
     await removeSnapshots(
       {
@@ -541,4 +570,71 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
     ...(interrupted ? { interrupted } : {}),
     ...(warnings.length ? { warnings } : {}),
   };
+}
+
+/**
+ * Молчал ли тот же gate на этом коммите в прогоне `harness gates --sha`
+ * (alpha.69, ревью): берётся только самый поздний итог этого gate на этом
+ * коммите, и только при том же определении gate (`definition`); его
+ * провал с меткой молчаливого провала — основание удержания
+ * `gate-definition`. Поздний успешный прогон снимает основание.
+ */
+export function silentGateOnSha(
+  stateDir: string,
+  repositoryId: string,
+  sha: string,
+  gateId: string,
+  definition: string,
+): boolean {
+  const root = join(stateDir, 'gates-at');
+  let names: string[];
+  try {
+    names = readdirSync(root);
+  } catch {
+    return false;
+  }
+  let newest:
+    | {
+        at: number;
+        gate: { status?: string; summary?: string; message?: string; definition?: string };
+      }
+    | undefined;
+  for (const name of names) {
+    try {
+      const raw = JSON.parse(readFileSync(join(root, name, 'result.json'), 'utf8')) as {
+        at?: string;
+        data?: {
+          repositoryId?: string;
+          sha?: string;
+          gates?: {
+            gate?: string;
+            status?: string;
+            summary?: string;
+            message?: string;
+            definition?: string;
+          }[];
+        };
+      };
+      const d = raw.data;
+      const at = Date.parse(raw.at ?? '');
+      if (d?.repositoryId !== repositoryId || d.sha !== sha || Number.isNaN(at)) continue;
+      const gate = d.gates?.find(
+        (g) => g.gate === gateId && (g.status === 'passed' || g.status === 'failed'),
+      );
+      if (gate && (!newest || at > newest.at)) newest = { at, gate };
+    } catch {
+      /* чужой или неполный итог */
+    }
+  }
+  const g = newest?.gate;
+  return (
+    !!g &&
+    g.status === 'failed' &&
+    g.definition === definition &&
+    [g.summary, g.message].some(
+      (t) =>
+        typeof t === 'string' &&
+        (t.includes(GATE_SILENT_FAILURE) || t.includes('GATE_DEFINITION_NO_CAUSE')),
+    )
+  );
 }

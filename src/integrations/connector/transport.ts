@@ -129,8 +129,14 @@ export interface TaskContextRead {
 }
 
 /** Итог чтения контекста: прочитан целиком или не помещается в пределы (без усечения). */
+/**
+ * `inconsistent` (alpha.69): контекст менялся во время чтения при всех
+ * повторах транспорта — раунд снимка не согласован и перечитывается.
+ */
 export type TaskContextOutcome =
-  { status: 'ok'; context: TaskContextRead } | { status: 'too-large'; reason: string };
+  | { status: 'ok'; context: TaskContextRead }
+  | { status: 'too-large'; reason: string }
+  | { status: 'inconsistent'; reason: string };
 
 /**
  * Открытый вопрос владельцу, записанный в backend документом по соглашению

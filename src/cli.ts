@@ -531,6 +531,7 @@ const options = {
   evidence: { type: 'string', multiple: true },
   diagnosis: { type: 'string' },
   recovery: { type: 'string' },
+  'harness-mode': { type: 'string' },
   'diagnose-after': { type: 'string' },
   'lead-resets': { type: 'string' },
   file: { type: 'string' },
@@ -590,6 +591,7 @@ const flagOwners = {
   evidence: ['diagnose'],
   diagnosis: ['retry'],
   recovery: ['init'],
+  'harness-mode': ['init'],
   'diagnose-after': ['init'],
   'lead-resets': ['init'],
   'accept-limitation': ['review-plan', 'review-contract', 'review-accept'],
@@ -607,9 +609,9 @@ const flagOwners = {
   'apply-loopback': ['smoke'],
   watch: ['status'],
   interval: ['status'],
-  base: ['review-code'],
-  head: ['review-code'],
-  role: ['review-code'],
+  base: ['review-code', 'review-release'],
+  head: ['review-code', 'review-release'],
+  role: ['review-code', 'review-release'],
   check: ['update'],
   apply: ['update'],
   rollback: ['update'],
@@ -1097,6 +1099,15 @@ async function runUpdate(
   return { data: r.data, code: r.code };
 }
 
+/** `init --harness-mode light|strict` (alpha.69): режим новой политики. */
+function harnessModeFlag(value: string | undefined): { harnessMode?: 'light' | 'strict' } {
+  if (value === undefined) return {};
+  if (value !== 'light' && value !== 'strict')
+    throw new HarnessError('INVALID_INPUT', '--harness-mode: ожидается light или strict', [
+      { path: ['--harness-mode'], message: value },
+    ]);
+  return { harnessMode: value };
+}
 /** `init --recovery lead|user --diagnose-after N --lead-resets N` → `policy.recovery`. */
 function recoveryFlags(v: {
   recovery?: string | undefined;
@@ -1577,7 +1588,10 @@ async function run(
                     h.engine,
                     optional('text', typeof v.text === 'string' ? v.text : undefined),
                   )
-                : releaseDone(h.engine, { summary: need('summary') });
+                : releaseDone(h.engine, {
+                    summary: need('summary'),
+                    ...(await h.releaseCheck()),
+                  });
         if (command === 'lead-end') {
           // Готовые работы, а никто не запущен (alpha.68, P6-33): сессия
           // закончена, выход прежний — только предупреждение. Сбой проверки
@@ -1593,6 +1607,8 @@ async function run(
             return { command, data: { ...data, readyNotRunning: warning } };
           }
         }
+        // Рекомендательное ревью выпуска не пройдено (alpha.69): выпуск закрыт, предупреждение.
+        if (data.warning) process.stderr.write(`harness: RELEASE_REVIEW: ${data.warning}\n`);
         return { command, data };
       } finally {
         h.close();
@@ -1601,16 +1617,35 @@ async function run(
     case 'lead-outline': {
       // План выпуска ведущего (0.1.0-alpha.68): локальная запись состояния.
       const input = readJson(resolve(need('file')), 'outline');
-      const h = open(need('state'), binding(need('state')), false);
+      // До первого run каталог состояния ещё не привязан к политике: с
+      // --policy команда привязывает и создаёт его (как run), и план выпуска
+      // записывается до первого графа; первый run его застаёт (0.1.0-alpha.69).
+      const state = need('state');
+      if (!v.policy && !existsSync(bindingFile(state)))
+        throw new HarnessError(
+          'NOT_FOUND',
+          'Каталог состояния ещё не привязан к политике (до первого run): ' +
+            state +
+            '. Передайте политику: harness lead outline --state D --policy P --file F',
+          [{ path: ['--policy'], message: 'required before the first run' }],
+        );
+      const h = open(
+        state,
+        v.policy ? binding(state, String(v.policy), true) : binding(state),
+        false,
+      );
       try {
-        return {
-          command,
-          data: leadOutline(
-            h.engine,
-            input,
-            optional('reason', typeof v.reason === 'string' ? v.reason : undefined),
-          ),
-        };
+        const data = leadOutline(
+          h.engine,
+          input,
+          optional('reason', typeof v.reason === 'string' ? v.reason : undefined),
+        );
+        // База выпуска (alpha.69): план выпуска — его начало, если граф ещё
+        // не регистрировался; записанная база не переписывается.
+        await h
+          .recordReleaseBases(new Set(h.policy.repositories.map((r) => r.id)), 'outline')
+          .catch(() => undefined);
+        return { command, data };
       } finally {
         h.close();
       }
@@ -1776,6 +1811,7 @@ async function run(
         ...(v.lean ? { lean: true } : {}),
         ...(v['lead-technical-answers'] ? { leadTechnicalAnswers: true } : {}),
         ...((r) => (r ? { recovery: r } : {}))(recoveryFlags(v)),
+        ...harnessModeFlag(v['harness-mode']),
       });
       // Ведущий внутри песочницы (Codex seatbelt): предупреждение с флагами запуска.
       const sandboxed = leadSandboxCheck({
@@ -2045,6 +2081,34 @@ async function run(
         const record = await h.reviewCode({
           base: need('base'),
           head: need('head'),
+          ...optional('role', v.role),
+          ...optional('author', author),
+          ...optional('repositoryId', v.repository),
+          signal: AbortSignal.any([
+            abort.signal,
+            AbortSignal.timeout(b.policy.runTimeoutMs + 5000),
+          ]),
+        });
+        return { command, data: record, code: record.approved ? 0 : exitCodes.refused };
+      } finally {
+        process.off('SIGINT', stop);
+        process.off('SIGTERM', stop);
+        h.close();
+      }
+    }
+    case 'review-release': {
+      const state = need('state');
+      const author = v.author ? parseWith(authorSchema, v.author, 'author') : undefined;
+      const b = v.policy ? binding(state, v.policy, true) : binding(state);
+      const h = open(state, b, false);
+      const abort = new AbortController();
+      const stop = () => abort.abort(new Error('Ревью выпуска прервано сигналом'));
+      process.once('SIGINT', stop);
+      process.once('SIGTERM', stop);
+      try {
+        const record = await h.reviewRelease({
+          ...optional('base', v.base),
+          ...optional('head', v.head),
           ...optional('role', v.role),
           ...optional('author', author),
           ...optional('repositoryId', v.repository),

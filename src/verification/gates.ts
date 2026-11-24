@@ -9,7 +9,7 @@ import {
   lstat,
   chmod,
 } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { controllerTemp } from '../environment/controller-temp.ts';
 import { hostLoad, loadText, type HostLoad } from '../environment/host-load.ts';
 import { join, resolve, sep, delimiter, relative, dirname } from 'node:path';
 import { accessSync, constants, existsSync, readdirSync } from 'node:fs';
@@ -25,7 +25,11 @@ import {
   type ToolchainFacts,
   gateTimeoutMs,
   gateTimeoutText,
+  strictSandbox,
+  writeGuardActive,
+  NO_RETRY_GATE_CODES,
 } from '../contracts/index.ts';
+import { WriteGuardUnavailable, guardEntries, guardedArgv } from '../environment/write-guard.ts';
 import { ReapFailure, command, git, gitOutput, gitRawOutput } from '../environment/process.ts';
 import {
   isolation,
@@ -59,6 +63,7 @@ import {
   type CheckManifest,
 } from './property.ts';
 import { keepGateArtifacts } from './gate-artifacts.ts';
+import { uiFailureArtifacts, uiGateEnvironment } from './ui-gates.ts';
 import { ReapedGate } from './reaped.ts';
 import {
   processListCall,
@@ -83,10 +88,14 @@ import {
 } from './sandbox-signatures.ts';
 import {
   WITHHELD_NOTE,
+  causeWithheld,
   commandReports,
   failureSummary as summarizeFailure,
 } from './failure-summary.ts';
 import { sameNode, toolchainFacts, toolchainText, usesPnpm } from '../environment/toolchain-pin.ts';
+
+/** Метка молчаливого провала gate в тексте провала и итоге `harness gates` (alpha.69). */
+export const GATE_SILENT_FAILURE = 'GATE_SILENT_FAILURE';
 
 /** Длинное имя testcase заменяется хешем, а не обрезается: обрезка дала бы ложные совпадения. */
 export const TEST_ID_LIMIT = 1000;
@@ -487,7 +496,11 @@ export async function prepareReportPath(root: string, path: string, escape: stri
  */
 export async function runCheck(
   // Нужна только политика изоляции: проверки ревьюера исполняются вне сервера.
-  h: { config: Pick<ExecutionPolicy, 'isolation'> },
+  // Режим и граница записи (alpha.69): нет режима — облегчённый.
+  h: {
+    config: Pick<ExecutionPolicy, 'isolation'> &
+      Partial<Pick<ExecutionPolicy, 'harnessMode' | 'writeGuard'>>;
+  },
   options: {
     argv: string[];
     cwd: string;
@@ -541,10 +554,10 @@ export async function runCheck(
     // Токен старта в stderr текущей попытки.
     printed = false;
   const token = randomUUID().replace(/-/g, '');
-  const scratch = await realpath(await mkdtemp(join(tmpdir(), 'dc-gate-')));
+  const scratch = await realpath(await mkdtemp(join(controllerTemp.dir(), 'dc-gate-')));
   // Метка старта — вне TMPDIR команды: проверка, чистящая свой временный
   // каталог, не должна стирать признак того, что она уже начиналась.
-  const marks = await realpath(await mkdtemp(join(tmpdir(), 'dc-start-')));
+  const marks = await realpath(await mkdtemp(join(controllerTemp.dir(), 'dc-start-')));
   // Свой короткий временный каталог srt (`srtTempDir`), если его пришлось создать.
   let srtTemp: string | undefined;
   /** Отказ тела проверки: уборка его не заменяет. */
@@ -552,7 +565,15 @@ export async function runCheck(
   /** Первый запуск, чьи потомки не остановлены или не пересчитаны. */
   let reaped: ReapFailure | undefined;
   try {
-    if (h.config.isolation.mode === 'os') {
+    if (writeGuardActive(h.config)) {
+      // Облегчённый режим: одна граница — запись только в свои каталоги
+      // проверки и кеши инструментов; Docker, сеть, браузер, порты и
+      // процессы открыты. Временный каталог — свой (scratch).
+      assertExecutable(argv[0]!, env.PATH, options.cwd);
+      // Нет механизма — отказ среды, как недоступная изоляция строгого режима.
+      argv = guardedArgv(argv, guardEntries(h.config, [...options.write, scratch, marks]));
+      env = { ...env, ...toolStateEnv(env, scratch), TMPDIR: scratch };
+    } else if (strictSandbox(h.config)) {
       const support = isolationBackend.check();
       if (!support.ok)
         throw new Error(
@@ -734,6 +755,29 @@ export async function runCheck(
     }
   }
 }
+/**
+ * Своё состояние инструментов проверки под границей записи (alpha.69): у
+ * каждой проверки свой каталог сокетов agent-browser и, у мобильного UI gate,
+ * свой домашний каталог Java (Maestro пишет в `~/.maestro` и игнорирует
+ * HOME — только `-Duser.home`). Заданное проектом не переопределяется.
+ */
+export function toolStateEnv(env: NodeJS.ProcessEnv, scratch: string): Record<string, string> {
+  return {
+    ...(env.AGENT_BROWSER_SOCKET_DIR
+      ? {}
+      : { AGENT_BROWSER_SOCKET_DIR: join(scratch, 'agent-browser') }),
+    ...(env.HARNESS_UI === 'mobile'
+      ? {
+          JAVA_OPTS: [
+            `-Duser.home=${join(scratch, 'home')}`,
+            `-Djava.io.tmpdir=${scratch}`,
+            '-Djava.net.preferIPv4Stack=true',
+            ...(env.JAVA_OPTS ? [env.JAVA_OPTS] : []),
+          ].join(' '),
+        }
+      : {}),
+  };
+}
 const checkResult = Symbol('runCheck.result');
 const leftoverText = (reason: string) => `временные каталоги проверки не убраны: ${reason}`;
 /** Исход проверки, завершившейся до исключения (например, отказа уборки), если он есть. */
@@ -763,10 +807,11 @@ export async function probeProcessList(
   const ps = ['/bin/ps', '/usr/bin/ps'].find((p) => existsSync(p));
   if (!ps) return { status: 'unknown', detail: 'ps не найден в /bin и /usr/bin' };
   const argv = [ps, '-o', 'pid=', '-p', '1'];
-  const dir = await realpath(await mkdtemp(join(tmpdir(), 'dc-ps-probe-')));
+  const dir = await realpath(await mkdtemp(join(controllerTemp.dir(), 'dc-ps-probe-')));
   try {
     const result = await runCheck(
-      { config: { isolation: { mode: 'os', domains: [] } } },
+      // Проба строгой песочницы ОС проверок — явно строгий режим.
+      { config: { harnessMode: 'strict', isolation: { mode: 'os', domains: [] } } },
       {
         argv,
         cwd: dir,
@@ -920,10 +965,11 @@ async function probeInGateSandbox(
 ): Promise<SandboxLimitCapability> {
   const support = isolationBackend.check();
   if (!support.ok) return { status: 'unknown', detail: support.detail };
-  const dir = await realpath(await mkdtemp(join(tmpdir(), 'dc-limit-probe-')));
+  const dir = await realpath(await mkdtemp(join(controllerTemp.dir(), 'dc-limit-probe-')));
   try {
     const result = await runCheck(
-      { config: { isolation: { mode: 'os', domains: [] } } },
+      // Проба строгой песочницы ОС проверок — явно строгий режим.
+      { config: { harnessMode: 'strict', isolation: { mode: 'os', domains: [] } } },
       {
         argv: argv.map((a) => a.replaceAll('{dir}', dir)),
         cwd: dir,
@@ -1202,7 +1248,8 @@ export class GateTimeout extends TaskFailure {
 
 /** Что нужно для запуска gate попытки. */
 export interface GateRun {
-  policy: Pick<ExecutionPolicy, 'isolation' | 'gateTimeoutFloorMs'>;
+  policy: Pick<ExecutionPolicy, 'isolation' | 'gateTimeoutFloorMs'> &
+    Partial<Pick<ExecutionPolicy, 'harnessMode' | 'writeGuard'>>;
   /** Запись evidence под fencing попытки. */
   record: (evidence: Omit<EvidenceRecord, 'id' | 'runId' | 'createdAt'>) => EvidenceRecord;
   cwd: string;
@@ -1236,6 +1283,12 @@ export interface GateRun {
    * менеджера в дереве сверяются с этой базой. Нет — классификации нет.
    */
   trustedBase?: string;
+  /**
+   * Тот же gate молча падал и на базе (`harness gates --sha <база>`,
+   * alpha.69, ревью): только тогда молчаливый провал — определение gate
+   * (удержание для ведущего), а не провал кода исполнителя.
+   */
+  silentOnBase?: (gateId: string) => boolean;
   /**
    * Генеративный gate (`gate.property`): попытка, от которой seed, и
    * ожидаемая проверка поручения. Без `expected` — прежний уровень (отчёт
@@ -1288,7 +1341,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       ? 'Проверка свойств и эталонных наборов'
       : 'Генеративная проверка';
   const propertyDir = property
-    ? await realpath(await mkdtemp(join(tmpdir(), 'harness-property-')))
+    ? await realpath(await mkdtemp(join(controllerTemp.dir(), 'harness-property-')))
     : undefined;
   const propertyPath = propertyDir ? join(propertyDir, 'report.json') : undefined;
   const seed = property ? propertySeed(property.runId, phase, gate.id) : 0;
@@ -1297,7 +1350,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
   // закреплённых байтов в каталоге controller вне worktree, только для чтения.
   const corpus = expected?.corpus && property?.corpus ? property.corpus : undefined;
   const corpusDir = corpus
-    ? await realpath(await mkdtemp(join(tmpdir(), 'harness-corpus-')))
+    ? await realpath(await mkdtemp(join(controllerTemp.dir(), 'harness-corpus-')))
     : undefined;
   const corpusPath = corpusDir ? join(corpusDir, 'corpus.json') : undefined;
   if (corpusPath) {
@@ -1364,7 +1417,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
   try {
     // Снимок защищённых путей до проверки: запреты песочницы видят только
     // путь операции, перенос готового каталога ими не закрыт.
-    const before = run.policy.isolation.mode === 'os' ? protectedSnapshot(root) : undefined;
+    const before = strictSandbox(run.policy) ? protectedSnapshot(root) : undefined;
     // Нагрузка до запуска: gate, который сам перегрузил процессор (пул
     // потоков без предела), не должен заработать повтор своей нагрузкой.
     loadBefore = hostLoad.read();
@@ -1388,6 +1441,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
           ...Object.fromEntries(
             Object.entries(propertyEnv).map(([k, v]) => [k.replace(/^DEVCONTOUR_/, 'HARNESS_'), v]),
           ),
+          ...('ui' in gate && gate.ui ? uiGateEnvironment(gate.ui) : {}),
         },
         redact,
         timeoutMs: gateTimeoutMs(gate, run.policy),
@@ -1475,10 +1529,9 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
         manifest = counts;
         await keepReport(counts.xml);
       }
-      const blocked =
-        run.policy.isolation.mode === 'os'
-          ? sandboxBlockedHosts(result.stdout + '\n' + result.stderr, run.policy.isolation.domains)
-          : [];
+      const blocked = strictSandbox(run.policy)
+        ? sandboxBlockedHosts(result.stdout + '\n' + result.stderr, run.policy.isolation.domains)
+        : [];
       if (blocked.length) {
         kind = 'environment';
         cause = 'sandbox-network';
@@ -1527,10 +1580,9 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
             ),
           }
         : undefined;
-      const listing =
-        run.policy.isolation.mode === 'os'
-          ? processListFailure(result.stdout + '\n' + result.stderr, failureTexts)
-          : undefined;
+      const listing = strictSandbox(run.policy)
+        ? processListFailure(result.stdout + '\n' + result.stderr, failureTexts)
+        : undefined;
       if (listing && (await processListBackend.probe()).status === 'unavailable') {
         const tail = `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`;
         // Вызов ps добавил исполнитель: добавленные строки изменения
@@ -1555,7 +1607,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       // собственная проба harness в той же песочнице подтвердила
       // ограничение. Проба не подтвердила — засчитанный провал с пометкой о
       // предполагаемой причине. Часть упавших со следом — пометка к провалу.
-      if (run.policy.isolation.mode === 'os') {
+      if (strictSandbox(run.policy)) {
         const output = result.stdout + '\n' + result.stderr;
         const causes = ['sandbox-signal', 'sandbox-browser'] as SandboxSignatureCause[];
         const noted = new Set<SandboxSignatureCause>();
@@ -1636,6 +1688,38 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
         stderr: result.stderr,
         redact,
       });
+      // Gate не назвал причину провала (ни упавших тестов, ни строки ошибки,
+      // 0.1.0-alpha.69): это правка определения gate, а не кода задачи —
+      // попытка исполнителю не засчитана, gate удержан до хода ведущего
+      // (`gate-definition`, как отказ окружения без повтора). У проверки
+      // свойств причину называет её отчёт — она судится им.
+      // Неостановленные потомки (`process-reap`) — своя причина среды: она важнее.
+      // Решение ведущего (ревью alpha.69): молчаливый провал засчитан
+      // исполнителю (сигнал — всегда), кроме случая, когда тот же gate так же
+      // молча падает и на базе — тогда это определение gate, удержание.
+      if (
+        failureSummary.withheld &&
+        causeWithheld(result.stdout, result.stderr) &&
+        !property &&
+        !reaped
+      ) {
+        const crashed = result.diagnostics?.signal;
+        if (!crashed && run.silentOnBase?.(gate.id)) {
+          kind = 'environment';
+          cause = 'gate-definition';
+          throw new Error(
+            `${NO_RETRY_GATE_CODES['gate-definition']}: ${WITHHELD_NOTE}; так же молча падает и на базе. ` +
+              `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}` +
+              partialNotes.map((n) => '; ' + n).join(''),
+          );
+        }
+        throw new Error(
+          `${GATE_SILENT_FAILURE}: ${crashed ? `проверка прервана сигналом ${crashed}` : 'проверка упала, ничего не напечатав'} — провал засчитан исполнителю. ` +
+            `Если так же падает и база, ведущий проверяет gate: harness gates --sha <база> --gate ${gate.id}. ` +
+            `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}` +
+            partialNotes.map((n) => '; ' + n).join(''),
+        );
+      }
       // Имена не из отчёта gate (вывод, отчёт команды): отчёт gate мог
       // назвать только общий провал обёртки.
       const named =
@@ -1699,6 +1783,12 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       cause = 'sandbox-policy';
     }
     if (error instanceof UntrustedCheckoutError) kind = 'scope-violation';
+    // Нет механизма границы записи (alpha.69): проверка не стартовала —
+    // отказ среды, исполнителю не засчитывается.
+    if (error instanceof WriteGuardUnavailable) {
+      kind = 'environment';
+      cause = 'sandbox-launch';
+    }
     // Процессы проверки не удалось остановить или пересчитать: о коде это
     // ничего не говорит — отказ среды. Проверка при этом не пройдена, и
     // повтора на том же дереве нет (повтор интеграции — только у `gate`):
@@ -1816,10 +1906,15 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
   // Artifacts gate (снимки экрана, отчёты) сохраняются при любом исходе:
   // провал — тот случай, когда они нужнее всего. Пропуски и отказы копирования
   // названы в evidence и на исход gate не влияют.
-  const artifactFiles = gate.artifacts?.length
+  // UI gate (alpha.69): отчёты и трассы раннера — при провале.
+  const artifactPaths = [
+    ...(gate.artifacts ?? []),
+    ...(!passed && 'ui' in gate && gate.ui ? uiFailureArtifacts(gate.ui) : []),
+  ];
+  const artifactFiles = artifactPaths.length
     ? await keepGateArtifacts({
         root,
-        paths: gate.artifacts,
+        paths: [...new Set(artifactPaths)],
         // Точки в ID нет: имя не совпадёт с каталогом другого gate или фазы.
         dest: join(artifactDir, `${gate.id}.artifacts`),
         redact,
@@ -1939,7 +2034,8 @@ const MANIFESTS = [
 
 /** Что нужно для установки зависимостей в дереве исполнителя до его работы. */
 export interface WriterDependenciesRun {
-  policy: Pick<ExecutionPolicy, 'isolation' | 'gateTimeoutFloorMs'>;
+  policy: Pick<ExecutionPolicy, 'isolation' | 'gateTimeoutFloorMs'> &
+    Partial<Pick<ExecutionPolicy, 'harnessMode' | 'writeGuard'>>;
   /** Рабочее дерево исполнителя: база попытки, возможно с наложенным черновиком. */
   cwd: string;
   /** SHA базы попытки (HEAD дерева). */
@@ -2088,7 +2184,7 @@ export async function prepareWriterDependencies(
   const { signal } = run;
   const redact = run.execution.redact;
   const root = await realpath(run.cwd);
-  const os = run.policy.isolation.mode === 'os';
+  const os = strictSandbox(run.policy);
   const manifests: string[] = [];
   for (const gate of run.gates) {
     const dir = gate.cwd ? relative(root, resolve(root, gate.cwd)) : '';

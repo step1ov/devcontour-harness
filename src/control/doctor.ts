@@ -5,6 +5,7 @@ import {
   API_VERSION,
   codeReview,
   HarnessError,
+  harnessModeOf,
   STATE_VERSION,
   inputPolicyOf,
   leadAnswersRule,
@@ -18,7 +19,10 @@ import {
   type RuntimeAdapter,
   type RuntimeBinding,
   type RuntimeName,
+  strictSandbox,
+  writeGuardActive,
 } from '../contracts/index.ts';
+import { guardCaches, writeGuardSupport } from '../environment/write-guard.ts';
 import { credentialPaths, isolationSupport } from '../environment/isolation.ts';
 import { chooseCheckoutRoot } from '../environment/checkout-root.ts';
 import { inspectPort, PORT_ADVICE } from '../environment/port-probe.ts';
@@ -140,7 +144,7 @@ export async function doctor(
     });
   }
   const sandbox = isolationSupport();
-  if (!sandbox.ok && policy?.isolation.mode === 'os') problems.push(sandbox.detail);
+  if (!sandbox.ok && (policy ? strictSandbox(policy) : false)) problems.push(sandbox.detail);
   // Список процессов в песочнице проверок: недоступен — не проблема среды
   // (gate может его не вызывать), а строка с советом до первой попытки.
   const processList = !options.processList
@@ -311,10 +315,9 @@ export async function doctor(
     const browser = (r.writerProbe ?? []).filter(isBrowserRunner).map((s) => s.id);
     // Под песочницей ОС проверок браузер не стартует и в gate (0.1.0-alpha.68):
     // такой провал — отказ среды `sandbox-browser`, ход ведущего.
-    const gate =
-      policy?.isolation.mode === 'os'
-        ? ` В gate под песочницей ОС браузер не стартует: когда след песочницы у каждого упавшего теста и проба harness это подтвердила, такой провал — отказ среды sandbox-browser (${NO_RETRY_GATE_CODES['sandbox-browser']}), попытка не засчитана, gate удержан до хода ведущего; без подтверждения пробы провал засчитан.`
-        : '';
+    const gate = (policy ? strictSandbox(policy) : false)
+      ? ` В gate под песочницей ОС браузер не стартует: когда след песочницы у каждого упавшего теста и проба harness это подтвердила, такой провал — отказ среды sandbox-browser (${NO_RETRY_GATE_CODES['sandbox-browser']}), попытка не засчитана, gate удержан до хода ведущего; без подтверждения пробы провал засчитан.`
+      : '';
     return browser.length
       ? [`browser-checks ${r.id} (${browser.join(', ')}): ${BROWSER_ADVICE}${gate}`]
       : [];
@@ -340,7 +343,50 @@ export async function doctor(
   // Кто решает после отказов и на технические вопросы: те же тексты, что у
   // панели; необычное сочетание — предупреждение, шлюз не до исчерпания — заметка.
   const decisions = policy ? decisionSettingsView(policy) : undefined;
+  // Режим harness (alpha.69): одна строка — какой режим и как выбрать другой.
+  const mode = policy ? modeReport(policy) : undefined;
+  if (mode) {
+    notes.unshift(mode.line);
+    const login = policy ? claudeLoginWarning(policy) : undefined;
+    if (login) warnings.push(login);
+    const copy = policy ? loginCopyNote(policy) : undefined;
+    if (copy) notes.push(copy);
+    // Облегчённый режим без границы записи — предупреждение, не заметка.
+    if (mode.mode === 'light' && !mode.writeGuard?.active)
+      warnings.push(
+        'LIGHT_NO_WRITE_BOUNDARY: облегчённый режим с isolation.mode: none или writeGuard.off — границы записи нет: исполнитель и gates пишут куда угодно',
+      );
+    if (mode.writeGuard?.active && mode.writeGuard.reason) problems.push(mode.writeGuard.reason);
+    if (
+      mode.mode === 'strict' &&
+      (policy?.attemptEnv || policy?.repositories.some((r) => r.gateway))
+    )
+      notes.push(
+        'attemptEnv и gateway действуют только в облегчённом режиме: строгий режим заморожен и новых возможностей не получает',
+      );
+    // Зеркало шлюза (alpha.69, P7-6): топология production объявлена, а
+    // gates ни одного репозитория не ходят через шлюз — маршрут production
+    // тестами не проверяется.
+    if (
+      mode.mode === 'light' &&
+      policy?.release?.topology?.length &&
+      !policy.repositories.some((r) => r.gateway)
+    )
+      warnings.push(
+        'GATEWAY_MIRROR_MISSING: release.topology объявляет маршрутизацию production, а gates не ходят через шлюз (repositories[].gateway): поднимите в compose проекта шлюз с конфигурацией production и направьте gates и публичные адреса приложения на него',
+      );
+    for (const repo of policy?.repositories ?? [])
+      for (const g of repo.gates)
+        if (g.ui?.type === 'mobile')
+          notes.push(
+            `UI gate ${repo.id}/${g.id} (mobile, Maestro): в этой версии harness передаёт gate переменные платформы, устройства и приложения; выбор устройства из пула, сборку и установку приложения делают команда gate и lifecycle проекта (docs/ui-gates.md)`,
+          );
+  }
   if (decisions?.warning) warnings.push(decisions.warning.ru);
+  const noBudget = policy ? lightBudgetWarning(policy) : undefined;
+  const contractBudget = policy ? lightContractBudgetNote(policy) : undefined;
+  if (contractBudget) notes.push(contractBudget);
+  if (noBudget) warnings.push(noBudget);
   if (policy) {
     const r = recoveryPolicyOf(policy);
     if (r.enabled && r.diagnoseAfter >= policy.maxAttempts)
@@ -375,6 +421,7 @@ export async function doctor(
     ...(notes.length ? { notes } : {}),
     ...(policy ? { questions: questionRule(policy) } : {}),
     ...(decisions ? { decisions } : {}),
+    ...(mode ? { mode } : {}),
     // Модель и effort каждого назначения: кто пишет и кто ревьюит, чем.
     ...(policy ? { models } : {}),
     // Предупреждения не делают среду негодной: порт только на wildcard, ревью
@@ -447,6 +494,20 @@ function questionRule(policy: ExecutionPolicy) {
 }
 
 /** Назначение политики: кто (writer роли, reviewer вида ревью), каким runtime, моделью и effort. */
+/**
+ * Облегчённый режим без бюджета выпуска (0.1.0-alpha.69): раунды ревью плана
+ * в нём не считают, и единственный предел выпуска — время и стоимость
+ * (`budgets.group` — группа хоста или граф, `budgets.total`). Нет ни одного —
+ * одна строка с советом; умолчания harness не подставляет.
+ */
+export function lightBudgetWarning(
+  policy: Pick<ExecutionPolicy, 'harnessMode' | 'budgets'>,
+): string | undefined {
+  if (harnessModeOf(policy) !== 'light' || policy.budgets?.group || policy.budgets?.total)
+    return undefined;
+  return 'light-no-budget: облегчённый режим без бюджета выпуска — раунды ревью плана не ограничены, время и стоимость тоже; задайте budgets.group (timeMs и/или usd): исчерпание остановит работу решением владельца (BUDGET_EXHAUSTED)';
+}
+
 export interface PolicyModel {
   /** `writer <роль>`, `code-review <роль>`, `plan-review`, `contract-review`; репозиторий — в скобках. */
   use: string;
@@ -608,4 +669,117 @@ export interface DoctorToolchainPin {
   version: string;
   pathNode?: { version: string; path: string };
   matches: boolean;
+}
+
+/** Режим harness для doctor (alpha.69): строка, граница записи и её кеши. */
+export function modeReport(policy: ExecutionPolicy) {
+  const mode = harnessModeOf(policy);
+  const byDefault = policy.harnessMode === undefined;
+  const line =
+    mode === 'light'
+      ? `режим: облегчённый${byDefault ? ' (по умолчанию)' : ''}; строгий — \`harnessMode: strict\` (решение владельца: чужой код или секреты production). ` +
+        (writeGuardActive(policy)
+          ? 'Защита записи — от случайных ошибок, не граница безопасности; Docker и выбранные кеши её обходят'
+          : 'Границы записи нет (isolation.mode: none или writeGuard.off): исполнитель и gates пишут куда угодно')
+      : 'режим: строгий (harnessMode: strict, заморожен — может быть убран после следующих пилотов); облегчённый — убрать поле harnessMode';
+  const lineEn =
+    mode === 'light'
+      ? `mode: light${byDefault ? ' (default)' : ''}; strict — \`harnessMode: strict\` (owner's decision: untrusted code or production secrets). ` +
+        (writeGuardActive(policy)
+          ? 'The write guard protects against accidents, it is not a security boundary; Docker and the chosen caches bypass it'
+          : 'There is no write boundary (isolation.mode: none or writeGuard.off): the writer and gates can write anywhere')
+      : 'mode: strict (harnessMode: strict, frozen — may be removed after the next pilots); light — remove the harnessMode field';
+  if (mode === 'strict') return { mode, default: byDefault, line, lineEn };
+  const active = writeGuardActive(policy);
+  const support = writeGuardSupport();
+  return {
+    mode,
+    default: byDefault,
+    line,
+    lineEn,
+    writeGuard: {
+      active,
+      ...(support.ok ? { mechanism: support.mechanism } : {}),
+      ...(active && !support.ok
+        ? {
+            reason: `Граница записи облегчённого режима недоступна: ${support.detail}. Установите механизм (на Linux — bubblewrap) или снимите границу writeGuard.off: true (решение владельца)`,
+          }
+        : {}),
+      caches: active ? guardCaches(policy.writeGuard).map((c) => c.path) : [],
+    },
+  };
+}
+
+/**
+ * Исполнитель claude в облегчённом режиме на macOS (alpha.69, ревью): свой
+ * каталог настроек вызова не видит вход по подписке из Keychain — нужен
+ * `CLAUDE_CODE_OAUTH_TOKEN` или `ANTHROPIC_API_KEY` в окружении исполнителя.
+ */
+export function claudeLoginWarning(
+  policy: ExecutionPolicy,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  if (harnessModeOf(policy) !== 'light' || platform !== 'darwin') return undefined;
+  const bindings = [
+    ...Object.values(policy.roles),
+    ...policy.repositories.flatMap((r) => Object.values(r.roles ?? {})),
+  ].map((b) => b.writer);
+  const claude = bindings.filter((w) => w.runtime === 'claude');
+  if (!claude.length) return undefined;
+  const names = new Set(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
+  const has = (env?: {
+    inherit: string[];
+    values: Record<string, string>;
+    secrets: Record<string, string>;
+  }) =>
+    !!env &&
+    [...env.inherit, ...Object.keys(env.values), ...Object.keys(env.secrets)].some((k) =>
+      names.has(k),
+    );
+  const covered = claude.every(
+    (w) =>
+      has(policy.environment) ||
+      policy.repositories.some((r) => has(r.environment)) ||
+      (w.toolProfile ? has(policy.toolProfiles[w.toolProfile]?.environment) : false),
+  );
+  return covered
+    ? undefined
+    : 'LIGHT_CLAUDE_LOGIN: исполнитель claude в облегчённом режиме получает свой каталог настроек, а вход по подписке на macOS хранится в Keychain и туда не переносится: выполните claude setup-token и передайте CLAUDE_CODE_OAUTH_TOKEN исполнителю (environment.inherit) или задайте ANTHROPIC_API_KEY';
+}
+
+/**
+ * Ревью контрактов в облегчённом режиме (alpha.69): их вызовы не относятся к
+ * группе (графу), поэтому `budgets.group` их не ограничивает — только защита
+ * от круга ревью и `budgets.total`. С одним бюджетом группы — заметка.
+ */
+export function lightContractBudgetNote(
+  policy: Pick<ExecutionPolicy, 'harnessMode' | 'budgets'>,
+): string | undefined {
+  if (harnessModeOf(policy) !== 'light' || !policy.budgets?.group || policy.budgets.total)
+    return undefined;
+  return 'light-contract-budget: ревью контрактов бюджет группы (budgets.group) не ограничивает — их держат защита от круга ревью (6 раундов — ведущий, 12 — владелец) и budgets.total; задайте budgets.total, чтобы ограничить и их';
+}
+
+/**
+ * Облегчённый режим со входом из файла (решение владельца 2026-11-24):
+ * исполнитель получает копию входа, обратно ничего не переносится.
+ * Заметка, если исполнителям не передан ключ API.
+ */
+export function loginCopyNote(policy: ExecutionPolicy): string | undefined {
+  if (harnessModeOf(policy) !== 'light') return undefined;
+  const keys = new Set([
+    'OPENAI_API_KEY',
+    'CODEX_API_KEY',
+    'ANTHROPIC_API_KEY',
+    'CLAUDE_CODE_OAUTH_TOKEN',
+  ]);
+  const envs = [policy.environment, ...policy.repositories.map((r) => r.environment)];
+  const keyed = envs.some(
+    (e) =>
+      !!e &&
+      [...e.inherit, ...Object.keys(e.values), ...Object.keys(e.secrets)].some((k) => keys.has(k)),
+  );
+  return keyed
+    ? undefined
+    : 'light-login-copy: исполнители получают копию входа; если исполнитель обновит токен, Codex может однажды попросить `codex login` — с API-ключом для исполнителей (OPENAI_API_KEY / ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN в environment.inherit) этого не бывает';
 }

@@ -202,7 +202,8 @@ for (const required of [
 // `contracts/attempt-line.js` — строка попыток с неотрезаемым хвостом без
 // импортов (0.1.0-alpha.58). `contracts/decision-rules.js` — кто принимает
 // решения: правила, тексты настроек и виды шагов пути работы, только типы
-// (0.1.0-alpha.66).
+// (0.1.0-alpha.66). `contracts/outline-weights.js` — веса и виды стадий плана
+// выпуска без импортов (0.1.0-alpha.68).
 const libDir = join(unpacked, 'package', 'lib');
 const browserGraph = (entry) => {
   const files = new Set();
@@ -219,7 +220,8 @@ const browserGraph = (entry) => {
       rel !== 'contracts/operator-view-limits.js' &&
       rel !== 'contracts/plural.js' &&
       rel !== 'contracts/attempt-line.js' &&
-      rel !== 'contracts/decision-rules.js'
+      rel !== 'contracts/decision-rules.js' &&
+      rel !== 'contracts/outline-weights.js'
     )
       fail(`./${entry} достигает ` + rel);
     const text = readFileSync(file, 'utf8');

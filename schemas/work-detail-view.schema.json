@@ -895,7 +895,8 @@
             "enum": [
               "plan",
               "contract",
-              "code"
+              "code",
+              "release"
             ]
           },
           "subject": {

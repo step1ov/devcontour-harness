@@ -112,7 +112,20 @@ export const resourcesViewSchema = z.strictObject({
      * нет; `workId` — работа, чья попытка упала. Нет поля — удержаний нет.
      */
     held: z
-      .array(z.strictObject({ repositoryId: id, gate: id, workId: id }))
+      .array(
+        z.strictObject({
+          repositoryId: id,
+          gate: id,
+          workId: id,
+          /**
+           * Ревизия 9: причина удержания — `gate-definition` (gate упал, не
+           * назвав причины; alpha.69) или причина песочницы (`sandbox-*`).
+           */
+          cause: z
+            .enum(['sandbox-process-list', 'sandbox-signal', 'sandbox-browser', 'gate-definition'])
+            .optional(),
+        }),
+      )
       .max(L.repositories)
       .optional(),
     /** Строка об удержаниях (и первой строкой `lines`). */
