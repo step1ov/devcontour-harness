@@ -152,7 +152,8 @@ planning, and the draft approves nothing.
 **Declare the release outline first.** Before the first graph, record the
 whole release, not only the next graph: stages (infra per service, product,
 deploy, …) × components with a rough size and who does them (writers,
-environment, owner) — `$H lead outline` (see `$H lead outline --help`).
+environment, owner) — `$H lead outline` (see `$H lead outline --help`; before
+the first `run`, with `--policy <policy>`).
 Without it `status` and `harness view` say «плана выпуска нет — прогноз по одному
 графу» and the forecast reads one graph as the whole release. Update the
 outline with a reason when the plan grows.
@@ -790,7 +791,9 @@ connector — is invisible unless you say it:
 - **Declare the whole release first** — before the first graph, record the
   release outline: stages × components with a rough size and who does them,
   not only the next graph:
-  `$H lead outline --state <state> --file outline.json` with
+  `$H lead outline --state <state> --file outline.json` (before the first
+  `run` the state directory is not bound yet: add `--policy <policy>` once —
+  it binds and creates the state like `run` does) with
   `{"stages":[{"id":"infra","title":"Инфраструктура","kind":"infra","components":[{"id":"api-infra","title":"API: сборка и gates","size":"S","actor":"writers"}]},{"id":"product","title":"Продукт","kind":"product","components":[{"id":"site","title":"Сайт","size":"M","actor":"writers","works":["site-form"]}]},{"id":"deploy","title":"Выкладка","kind":"deploy","components":[{"id":"staging","title":"Стенд","size":"S","actor":"owner"}]}]}`
   (`kind`: infra | product | deploy | other; `size`: S = 1, M = 2, L = 4 tasks,
   or `tasks: N`; `actor`: writers | environment | owner; optional `works`
