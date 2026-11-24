@@ -86,8 +86,11 @@ import {
   harnessModeOf,
   strictSandbox,
   PROPOSAL_LIMITS,
+  RESEARCH_LIMIT,
   workProposalSchema,
+  workResearchSchema,
   type WorkProposal,
+  type RuntimeName,
 } from '../contracts/index.ts';
 import { HARNESS_VERSION } from '../package.ts';
 import {
@@ -2511,6 +2514,30 @@ export class Engine {
       if (fresh.length) tx.putWork({ ...w, proposals: [...existing, ...fresh] });
       return added.map((p) => p.id);
     });
+  }
+
+  /**
+   * Исследование задачи (alpha.70): последнее записанное исполнителем
+   * работы, под fencing попытки. Текст уже замаскирован вызывающим.
+   */
+  recordResearch(
+    id: string,
+    token: string,
+    input: { text: string; session?: { runtime: RuntimeName; id: string } },
+  ) {
+    this.withAttempt(id, token, 'run.research', (a, w, tx) =>
+      tx.putWork({
+        ...w,
+        research: workResearchSchema.parse({
+          runId: a.id,
+          attempt: a.attempt,
+          at: iso(this.now()),
+          text: input.text.slice(0, RESEARCH_LIMIT),
+          digest: sha256(input.text.slice(0, RESEARCH_LIMIT)),
+          ...(input.session ? { session: input.session } : {}),
+        }),
+      }),
+    );
   }
 
   /**

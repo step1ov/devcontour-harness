@@ -11,7 +11,12 @@ import {
 } from './primitives.ts';
 import { digestOf } from './digest.ts';
 import { INPUT_LIMITS, assumptionSchema, inputQuestionSchema } from './input.ts';
-import { PROPOSAL_LIMITS, followUpTaskSchema, writerTriageSchema } from './proposals.ts';
+import {
+  PROPOSAL_LIMITS,
+  followUpTaskSchema,
+  researchOutputSchema,
+  writerTriageSchema,
+} from './proposals.ts';
 
 /**
  * Ответы исполнителей. Runtime возвращает сырой текст/JSON (`RuntimeResponse.output`
@@ -53,6 +58,8 @@ export const implementationResultSchema = z
     followUpTasks: z.array(followUpTaskSchema).max(PROPOSAL_LIMITS.followUps).default([]).catch([]),
     /** Разбор в начале попытки (0.1.0-alpha.70): делаю / разделить / спросить. */
     triage: writerTriageSchema.nullable().optional().catch(null),
+    /** Исследование задачи (0.1.0-alpha.70): сохраняется для следующих попыток. */
+    research: researchOutputSchema.nullable().optional().catch(null),
   })
   .superRefine((r, ctx) => {
     if (r.completed && r.inputRequest)

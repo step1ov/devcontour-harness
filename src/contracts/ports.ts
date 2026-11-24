@@ -261,7 +261,16 @@ export interface RuntimeRequest {
    * Сессия всегда новая для reviewer и planner. `continue` разрешён только
    * writer той же попытки; reviewer не получает ID сессии writer.
    */
-  session: { kind: 'fresh' } | { kind: 'continue'; id: string };
+  session:
+    | { kind: 'fresh' }
+    | { kind: 'continue'; id: string }
+    /**
+     * Новая сессия writer, ответвлённая от сессии исследования работы
+     * (0.1.0-alpha.70, `claude --resume <id> --fork-session`): только writer
+     * и только у адаптера с `RuntimeCapabilities.sessionFork`. Reviewer —
+     * всегда `fresh`.
+     */
+    | { kind: 'fork'; id: string };
   sandbox: SandboxSpec;
   timeoutMs: number;
   env: Record<string, string>;
@@ -364,6 +373,12 @@ export interface RuntimeCapabilities {
    * по-прежнему отделена от содержательного отказа. Необязательное поле.
    */
   reviewProtocol?: 1;
+  /**
+   * Адаптер умеет ответвить новую сессию writer от сохранённой сессии
+   * исследования (`session.kind: fork`, 0.1.0-alpha.70). Нет поля — нет:
+   * исследование передаётся только текстом в стабильном префиксе запроса.
+   */
+  sessionFork?: boolean;
 }
 
 export interface RuntimeAdapter {

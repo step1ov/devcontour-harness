@@ -112,6 +112,31 @@ export const implementationOutputSchema = {
         required: ['title', 'goal', 'acceptance', 'reason', 'evidence'],
       },
     },
+    research: {
+      anyOf: [
+        { type: 'null' },
+        {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            summary: { type: 'string' },
+            files: {
+              type: 'array',
+              maxItems: 30,
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: { path: { type: 'string' }, why: { type: 'string' } },
+                required: ['path', 'why'],
+              },
+            },
+            approach: { type: ['string', 'null'] },
+            constraints: { type: ['string', 'null'] },
+          },
+          required: ['summary', 'files', 'approach', 'constraints'],
+        },
+      ],
+    },
     triage: {
       anyOf: [
         { type: 'null' },
@@ -153,6 +178,7 @@ export const implementationOutputSchema = {
     'assumptions',
     'followUpTasks',
     'triage',
+    'research',
   ],
 };
 

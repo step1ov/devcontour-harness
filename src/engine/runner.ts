@@ -67,7 +67,10 @@ import {
   reviewPassModeOf,
   type ReviewPassesRecord,
   REVIEW_FOLLOW_UPS_TEXT,
+  WRITER_RESEARCH_TEXT,
   WRITER_TRIAGE_TEXT,
+  researchText,
+  type RuntimeRequest,
 } from '../contracts/index.ts';
 import { changedFacts, resolvedHostFiles } from './infra-guard.ts';
 import { git, hostGitArgs } from '../environment/process.ts';
@@ -889,6 +892,8 @@ export class Runner {
       outputSchema?: Record<string, unknown>;
       /** Стадия учёта вызова вместо обычной (второй проход ревью — своя). */
       stage?: string;
+      /** Сессия writer: ответвление от сессии исследования (alpha.70); reviewer — всегда новая. */
+      session?: Extract<RuntimeRequest['session'], { kind: 'fork' }>;
     },
     signal: AbortSignal,
   ): Promise<RuntimeResponse & { redact: Redactor; unreadable?: string; callId: string }> {
@@ -951,7 +956,7 @@ export class Runner {
         prompt: input.prompt,
         outputSchema:
           input.outputSchema ?? (review ? reviewOutputSchema : implementationOutputSchema),
-        session: { kind: 'fresh' },
+        session: !review && input.session ? input.session : { kind: 'fresh' },
         sandbox: {
           mode: this.policy.isolation.mode,
           writable: review ? [] : [input.cwd, ...(scratch ? [scratch] : [])],
@@ -1993,8 +1998,12 @@ export class Runner {
                         ...(repo.generators?.length ? [generatorNote(repo.generators)!] : []),
                         ALREADY_SATISFIED_WRITER_NOTE,
                         WRITER_TRIAGE_TEXT,
+                        WRITER_RESEARCH_TEXT,
                         ...proposalNotes(work),
                       ],
+                      ...((research) => (research.length ? { research } : {}))(
+                        this.researchOf(work),
+                      ),
                       // Открытые находки ревью с выданными ID — из истории
                       // поручения; только когда reviewer ведёт протокол
                       // переходов (иначе их никто не закроет).
@@ -2029,6 +2038,7 @@ export class Runner {
                           2,
                         ),
                       );
+                    const fork = await this.forkOf(attempt, work);
                     const response = await this.call(
                       this.adapter(attempt.runtime),
                       {
@@ -2038,6 +2048,7 @@ export class Runner {
                         dir,
                         phase: 'candidate',
                         prompt: request,
+                        ...(fork ? { session: fork } : {}),
                       },
                       signal,
                     );
@@ -2159,6 +2170,15 @@ export class Runner {
                       true,
                       generators.flatMap((g) => g.outputs),
                     );
+                    // Исследование задачи (alpha.70) — для следующих попыток и
+                    // зависящих работ; уже замаскировано.
+                    if (result.data.research)
+                      this.engine.recordResearch(attempt.id, attempt.token, {
+                        text: researchText(redactDeep(result.data.research, response.redact)),
+                        ...(response.sessionId
+                          ? { session: { runtime: attempt.runtime, id: response.sessionId } }
+                          : {}),
+                      });
                     // Разбор в начале попытки (alpha.70): предложение разделить
                     // работу уходит ведущему — попытка не засчитана, код не
                     // принимается.
@@ -3590,6 +3610,35 @@ export class Runner {
       for (const log of logs) spent += (await recoverProbeLog(log)).spentMs;
     }
     return spent;
+  }
+
+  /**
+   * Исследование для запроса writer (alpha.70): этой работы и её
+   * зависимостей, в порядке зависимостей, затем своё.
+   */
+  private researchOf(work: WorkState): { from: string; text: string }[] {
+    return this.engine.read((v) => [
+      ...work.order.dependsOn.flatMap((id) => {
+        const r = v.work(id)?.research;
+        return r ? [{ from: `dependency ${id} (attempt ${r.attempt})`, text: r.text }] : [];
+      }),
+      ...((r) => (r ? [{ from: `this work (attempt ${r.attempt})`, text: r.text }] : []))(
+        v.work(work.id)?.research,
+      ),
+    ]);
+  }
+
+  /**
+   * Ответвление сессии исследования (alpha.70): только когда исследование
+   * этой работы шло в том же runtime и адаптер объявил `sessionFork`.
+   */
+  private async forkOf(attempt: AttemptState, work: WorkState) {
+    const session = this.engine.read((v) => v.work(work.id)?.research?.session);
+    if (!session || session.runtime !== attempt.runtime) return undefined;
+    const caps = await this.adapter(attempt.runtime)
+      .capabilities()
+      .catch(() => undefined);
+    return caps?.sessionFork ? { kind: 'fork' as const, id: session.id } : undefined;
   }
 
   /**

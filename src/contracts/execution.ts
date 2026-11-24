@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { reviewPassesRecordSchema } from './review-passes.ts';
-import { PROPOSAL_LIMITS, workProposalSchema } from './proposals.ts';
+import { PROPOSAL_LIMITS, workProposalSchema, workResearchSchema } from './proposals.ts';
 import { STATE_VERSION } from './version.ts';
 import {
   digestSchema,
@@ -1045,6 +1045,12 @@ export const workStateSchema = z.strictObject({
    * Принимает или отклоняет только ведущий (или оператор).
    */
   proposals: z.array(workProposalSchema).max(PROPOSAL_LIMITS.perWork).optional(),
+  /**
+   * Исследование задачи (0.1.0-alpha.70, `workResearchSchema`): последнее
+   * записанное исполнителем; следующие попытки и зависящие работы начинают с
+   * него. Reviewer его не получает.
+   */
+  research: workResearchSchema.optional(),
   /**
    * Удержание gate по отказу окружения без повтора (0.1.0-alpha.66):
    * попытка этой работы упала `sandbox-process-list` на вызове `ps`, который

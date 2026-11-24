@@ -164,6 +164,12 @@ export function prompt(input: {
   inputPolicy?: InputPolicy;
   /** Текст провала gates отклонённого кандидата, который продолжает writer. */
   feedback?: string;
+  /**
+   * Исследование задачи (alpha.70): этой работы и работ, от которых она
+   * зависит. Только writer; стабильный раздел сразу после постановки — общий
+   * префикс запросов попыток (кеш подсказки).
+   */
+  research?: { from: string; text: string }[];
 }) {
   const { work, attempt, review } = input;
   const order = work.order;
@@ -184,6 +190,10 @@ export function prompt(input: {
       null,
       2,
     ),
+    !review && input.research?.length
+      ? 'Saved research (from earlier work on this task; verify before relying on it, do not repeat the exploration):\n' +
+        input.research.map((r) => `## ${r.from}\n${r.text}`).join('\n\n')
+      : '',
     'Write scope: ' + JSON.stringify(order.writeScope),
     order.kind === 'infra'
       ? review

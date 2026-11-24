@@ -95,3 +95,53 @@ export const WRITER_TRIAGE_TEXT =
 /** Указание reviewer: задачи-продолжения не закрывают критерии работы. */
 export const REVIEW_FOLLOW_UPS_TEXT =
   'The writer proposed follow-up tasks for leftovers (listed below). They are proposals to the lead, not part of this work: reject the commit if any acceptance criterion of this work order is deferred to a follow-up instead of being met here.';
+
+/**
+ * Исследование задачи (0.1.0-alpha.70): что исполнитель узнал о коде до и
+ * во время работы — где лежит нужное, подход, ограничения. Сохраняется у
+ * работы артефактом; следующие попытки этой работы и работы, зависящие от
+ * неё, начинают с него (стабильный префикс запроса — кеш подсказки; где
+ * runtime умеет — продолжение сессии исследования, `session.kind: fork`).
+ * Reviewer его не получает: ревью всегда начинается заново.
+ */
+export const RESEARCH_LIMIT = 8000;
+export const researchOutputSchema = z.object({
+  summary: text(10, 4000),
+  files: z
+    .array(z.object({ path: text(1, 500), why: text(3, 500) }))
+    .max(30)
+    .default([]),
+  approach: z.string().trim().max(2000).nullable().optional(),
+  constraints: z.string().trim().max(2000).nullable().optional(),
+});
+export type ResearchOutput = z.infer<typeof researchOutputSchema>;
+
+/** Записанное исследование работы (`WorkState.research`). */
+export const workResearchSchema = z.strictObject({
+  runId: z.string().min(1).max(200),
+  attempt: z.number().int().positive(),
+  at: isoTimeSchema,
+  /** Текст исследования (до `RESEARCH_LIMIT` знаков), уже замаскированный. */
+  text: z.string().max(RESEARCH_LIMIT),
+  digest: z.string().regex(/^[0-9a-f]{64}$/),
+  /** Сессия runtime, в которой шло исследование (если runtime её сообщил). */
+  session: z
+    .strictObject({ runtime: z.enum(['codex', 'claude']), id: z.string().min(1).max(200) })
+    .optional(),
+});
+export type WorkResearch = z.infer<typeof workResearchSchema>;
+
+/** Текст исследования для запроса: стабильная форма, байт в байт для кеша подсказки. */
+export function researchText(r: ResearchOutput): string {
+  return [
+    r.summary,
+    ...(r.files.length ? ['Files:', ...r.files.map((f) => `- ${f.path}: ${f.why}`)] : []),
+    ...(r.approach ? ['Approach: ' + r.approach] : []),
+    ...(r.constraints ? ['Constraints: ' + r.constraints] : []),
+  ]
+    .join('\n')
+    .slice(0, RESEARCH_LIMIT);
+}
+
+export const WRITER_RESEARCH_TEXT =
+  'Research: return what you learned about the code base for this work in `research` (summary, the files that matter and why, approach, constraints). It is saved for later attempts of this work and for works that depend on it, so they do not repeat the exploration. Facts only, no secrets.';

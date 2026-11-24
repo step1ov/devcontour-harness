@@ -687,6 +687,7 @@ export const transactionKinds = [
   'run.partial',
   'proposal.recorded',
   'proposal.decided',
+  'run.research',
   'run.continuation',
   'run.model',
   'run.timing.started',
