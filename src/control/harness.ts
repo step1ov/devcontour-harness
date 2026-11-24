@@ -1,3 +1,4 @@
+import { unsourcedCriteriaNote } from '../planning/sources.ts';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
@@ -387,6 +388,7 @@ export class Harness {
         input.kind === 'plan' && input.graph.orders.some((o) => o.kind === 'infra')
           ? 'Orders with kind "infra" write harness-owned infrastructure (bridges, gate wrappers, acceptance tests). Product orders of the same repository must depend on them. An infra order that lists gateChanges replaces the definition of an existing gate: approve it only if the order states what the new check proves and that it is not weaker than the old one.'
           : '',
+        input.kind === 'plan' ? unsourcedCriteriaNote(input.graph) : '',
         input.kind === 'contract' ? this.spikeNote(input.contract) : '',
         input.kind === 'contract' ? referenceNote(input.contract.checks) : '',
       ],
