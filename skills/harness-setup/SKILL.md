@@ -26,6 +26,37 @@ Modes: **install** (first setup), **upgrade** (change the installed version),
 request; when the repository already has `.harness/` and a pinned or
 installed `$H`, it is upgrade or check, not install.
 
+## Mode: light by default, strict is the owner's decision
+
+Since 0.1.0-alpha.69 a policy without `harnessMode` runs in **light mode**
+(`<pkg>/docs/light-mode.md`): writers and gates run on the host like a
+normal developer — Docker, network, browsers, ports and `ps` work — with
+one guard: writes only into the attempt worktree, its temp dir and tool
+caches (`writeGuard`). Attempts are separated by their worktree, their
+`COMPOSE_PROJECT_NAME` and their own ports (`attemptEnv.ports`).
+
+**Strict mode** (`harness init --harness-mode strict`, `"harnessMode":
+"strict"`) is the old OS sandbox. It is frozen and may be removed after the
+next pilots. Choosing it is the **owner's** decision: ask only when the
+project runs untrusted code (a foreign fork, unreviewed generated
+dependencies) or the machine holds production secrets the writer must not
+read. Never switch the mode yourself; `doctor` prints the current mode as
+its first note.
+
+In light mode:
+
+- declare the ports the project's services need in `attemptEnv.ports` and
+  make the compose file and gates read them (`"${API_PORT}:3000"`);
+- when production routes through a gateway (Caddy, nginx), run gates
+  through the project's gateway service (`repositories[].gateway`) and
+  declare the production routing files in `release.topology`
+  (`<pkg>/docs/release-review.md`);
+- browser checks run as ordinary gates (`ui: {type: "browser"}`,
+  `<pkg>/docs/ui-gates.md`); no external browser controller is needed;
+- infra tasks, `infra.paths` and `gateChanges` (below) are **not
+  required**: acceptance tests live with the code and are reviewed like
+  code. They stay available when the owner wants that boundary.
+
 ## Setup is configuration
 
 Setup is configuration only: the stack profile, `harness init`, policy edits
@@ -35,7 +66,8 @@ setting their parameters for the project is configuration too. You do not
 write new executable code during setup:
 
 - a bridge, gate wrapper, validator, crash-cleanup test or any other script
-  that does not exist yet becomes an **infra task** of the first plan
+  that does not exist yet becomes a task of the first plan — an ordinary
+  product task in light mode, an **infra task** in strict mode
   (`"kind": "infra"`, `<pkg>/docs/infra-works.md`): a writer builds it
   through the normal loop with review-code, attempts and the forecast;
 - inherited setup debts (a known bridge defect, a missing acceptance test)
@@ -90,7 +122,8 @@ supports it).
 | Relay connection           | discovered from the repository and environment                                                                | a fact is missing: endpoint or binary/config, `projectId`, which tasks                                                                                |
 | Relay completion           | `review-only` (a human closes the task)                                                                       | the user wants `complete`                                                                                                                             |
 | Controller mode            | —                                                                                                             | the product AGENTS.md tells agents to manage worktrees, commits, merges or Relay history: the overlay then takes precedence over those rules (step 9) |
-| OS isolation               | on                                                                                                            | prepare or gates fail inside the sandbox (store, network, Docker socket)                                                                              |
+| Harness mode               | light (no `harnessMode` field)                                                                                | untrusted code or production secrets on the machine: strict is the owner's decision                                                                   |
+| Write guard / OS isolation | on (light: write guard; strict: OS sandbox)                                                                   | a tool writes to a cache outside the defaults (`writeGuard.add`), or, in strict mode, prepare or gates fail inside the sandbox                         |
 | Docker environment         | none                                                                                                          | gates need a database or other service                                                                                                                |
 | Project rule conflicts     | —                                                                                                             | a project rule forbids what setup creates (for example new `.md` files: `.harness/README.md`)                                                         |
 | Commit, Relay writes, runs | —                                                                                                             | always confirm: committing the setup, `run --source` / `source-deliver` / `source-reconcile`, any live `run` or `review-plan`                         |
