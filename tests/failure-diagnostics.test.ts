@@ -170,9 +170,13 @@ test('gate со скрытым выводом: имена из JUnit, котор
   assert.doesNotMatch(JSON.stringify(named.evidence), new RegExp(SECRET), 'секрет замаскирован');
   const r2 = repo();
   const hidden = await gate(r2, hidingGate(false));
-  assert.equal(hidden.failure?.kind, 'gate', 'скрытый вывод — по-прежнему засчитанный провал');
+  // С 0.1.0-alpha.69 скрытый вывод — причина в определении gate: не
+  // засчитанный провал исполнителя, а отказ без повтора `gate-definition`.
+  assert.equal(hidden.failure?.kind, 'environment', 'скрытый вывод — не провал кода задачи');
+  assert.equal(hidden.failure?.diagnosis, 'gate-definition');
   assert.equal(hidden.evidence.failureSummary?.withheld, true);
   assert.ok(hidden.evidence.summary.includes(WITHHELD_NOTE), hidden.evidence.summary);
+  assert.match(hidden.evidence.summary, /^GATE_DEFINITION_NO_CAUSE: /);
   // `harness gates --human`: строка причины под gate.
   const text = gatesText({
     id: 'g',

@@ -27,6 +27,7 @@ import {
   gateTimeoutText,
   strictSandbox,
   writeGuardActive,
+  NO_RETRY_GATE_CODES,
 } from '../contracts/index.ts';
 import { guardEntries, guardedArgv } from '../environment/write-guard.ts';
 import { ReapFailure, command, git, gitOutput, gitRawOutput } from '../environment/process.ts';
@@ -1651,6 +1652,20 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
         stderr: result.stderr,
         redact,
       });
+      // Gate не назвал причину провала (ни упавших тестов, ни строки ошибки,
+      // 0.1.0-alpha.69): это правка определения gate, а не кода задачи —
+      // попытка исполнителю не засчитана, gate удержан до хода ведущего
+      // (`gate-definition`, как отказ окружения без повтора). У проверки
+      // свойств причину называет её отчёт — она судится им.
+      if (failureSummary.withheld && !property) {
+        kind = 'environment';
+        cause = 'gate-definition';
+        throw new Error(
+          `${NO_RETRY_GATE_CODES['gate-definition']}: ${WITHHELD_NOTE}. ` +
+            `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}` +
+            partialNotes.map((n) => '; ' + n).join(''),
+        );
+      }
       // Имена не из отчёта gate (вывод, отчёт команды): отчёт gate мог
       // назвать только общий провал обёртки.
       const named =

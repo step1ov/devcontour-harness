@@ -9,6 +9,14 @@ import { attemptSummaries, attemptsByWork, type attemptSummaryView } from '../co
 import { verificationOf, type WorkVerification } from '../report/verification.ts';
 import { currentRevisionAttempts } from '../report/compute.ts';
 import { explainStop, type StopDiagnosis, type StopInput } from '../projections/stop.ts';
+import {
+  failureSignature,
+  repeatedGateFailure,
+  type RepeatedFailureAttempt,
+} from '../projections/repeated-failure.ts';
+import { changedPaths } from '../verification/applicability.ts';
+import { repositoryPath } from '../control/gates-check.ts';
+import type { ExecutionView } from '../contracts/ports.ts';
 import { stopInputsOf } from './state.ts';
 
 export interface DiagnoseOptions {
@@ -44,12 +52,14 @@ export async function diagnoseState(options: DiagnoseOptions): Promise<ExplainDa
   let reviews: ReviewSubjectSummary[];
   let reviewsTruncated: number;
   let queue: ExplainData['queue'];
+  let repeated: ReturnType<typeof repeatedFailureInputs> = [];
   try {
     stateInputs = stopInputsOf(h, {
       maxAttempts: policy.maxAttempts,
       repairBudget: policy.repairBudget,
       ...(options.workId !== undefined ? { workId: options.workId } : {}),
     });
+    repeated = h.engine.read((v) => repeatedFailureInputs(v, stateInputs));
     // Сводка попыток каждого поручения выбора — та же, что `status`; строк
     // не больше `EXPLAIN_ATTEMPT_ROWS`, остальные — числом.
     ({ attempts, attemptsTruncated, verification } = h.engine.read((v) => {
@@ -100,6 +110,7 @@ export async function diagnoseState(options: DiagnoseOptions): Promise<ExplainDa
     // Не назначенный политикой runtime не нужен: его отсутствие не останавливает работу.
     .filter((r) => !r.available && !('reason' in r))
     .map((r) => ({ kind: 'runtime', runtime: { runtime: r.runtime, available: false } }));
+  stateInputs = await withRepeatedFailures(stateInputs, repeated, options);
   return {
     diagnoses: [...runtimes, ...stateInputs].map(explainStop),
     ...(queue ? { queue } : {}),
@@ -178,4 +189,82 @@ export function verificationText(rows: readonly { workId: string; line: string }
 export function attemptsText(rows: readonly { workId: string; line: string }[]): string {
   if (!rows.length) return '';
   return ['Попытки:', ...rows.map((r) => `  ${r.workId}: ${r.line}`)].join('\n').concat('\n');
+}
+
+/** Попытки работы с повторным провалом gate и прогоны на их базах — из одного чтения. */
+function repeatedFailureInputs(v: ExecutionView, inputs: readonly StopInput[]) {
+  const out: {
+    workId: string;
+    repositoryId: string;
+    attempts: RepeatedFailureAttempt[];
+    base: Map<string, RepeatedFailureAttempt['evidence']>;
+  }[] = [];
+  for (const input of inputs) {
+    if (input.kind !== 'work' || input.work.status === 'done' || input.work.status === 'cancelled')
+      continue;
+    const attempts = v.attempts(input.work.id);
+    // Дешёвый отбор до git: две и больше засчитанных провала gate с подписью.
+    const signed = attempts.filter(
+      (a) =>
+        a.status === 'failed' &&
+        a.failureKind === 'gate' &&
+        failureSignature(
+          a.evidence.findLast((e) => e.kind === 'test' && !e.passed && !e.consumer)?.failureSummary,
+        ),
+    );
+    if (signed.length < 2) continue;
+    const bases = new Set(signed.flatMap((a) => (a.baseSha ? [a.baseSha] : [])));
+    const base = new Map<string, RepeatedFailureAttempt['evidence']>();
+    for (const w of v.works())
+      for (const a of v.attempts(w.id))
+        for (const e of a.evidence)
+          if (bases.has(e.sha) && e.gate)
+            base.set(`${e.sha}\u0000${e.gate}`, [
+              ...(base.get(`${e.sha}\u0000${e.gate}`) ?? []),
+              e,
+            ]);
+    out.push({ workId: input.work.id, repositoryId: signed[0]!.repositoryId, attempts, base });
+  }
+  return out;
+}
+
+/**
+ * Подсказка о повторном провале gate (`repeatedGateFailure`): файлы изменения
+ * каждой попытки — `git diff база..кандидат` в checkout репозитория (деревья
+ * попыток делят его объекты). Git не ответил — подсказки нет.
+ */
+async function withRepeatedFailures(
+  inputs: StopInput[],
+  repeated: ReturnType<typeof repeatedFailureInputs>,
+  options: DiagnoseOptions,
+): Promise<StopInput[]> {
+  if (!repeated.length) return inputs;
+  const lines = new Map<string, string>();
+  for (const r of repeated) {
+    const repo = options.policy.repositories.find((x) => x.id === r.repositoryId);
+    if (!repo) continue;
+    const cwd = repositoryPath(options.baseDir)(repo);
+    const files = new Map<string, readonly string[]>();
+    for (const a of r.attempts) {
+      if (a.status !== 'failed' || a.failureKind !== 'gate' || !a.baseSha || !a.candidateSha)
+        continue;
+      const changed = await changedPaths(cwd, [{ from: a.baseSha, to: a.candidateSha }]).catch(
+        () => undefined,
+      );
+      if (changed?.complete) files.set(a.id, changed.files);
+    }
+    const found = repeatedGateFailure(r.attempts, {
+      changedFiles: (id) => files.get(id),
+      evidenceAt: (sha, gate) => r.base.get(`${sha}\u0000${gate}`) ?? [],
+      gatesArgs:
+        `--state ${resolve(options.stateDir)}` +
+        (options.policy.repositories.length > 1 ? ` --repository ${repo.id}` : ''),
+    });
+    if (found) lines.set(r.workId, found.line.ru);
+  }
+  return inputs.map((i) =>
+    i.kind === 'work' && lines.has(i.work.id)
+      ? { ...i, work: { ...i.work, repeatedFailure: { line: lines.get(i.work.id)! } } }
+      : i,
+  );
 }

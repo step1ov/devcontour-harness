@@ -2108,7 +2108,8 @@
                 "enum": [
                   "sandbox-process-list",
                   "sandbox-signal",
-                  "sandbox-browser"
+                  "sandbox-browser",
+                  "gate-definition"
                 ]
               }
             },
@@ -2300,7 +2301,8 @@
             "enum": [
               "sandbox-process-list",
               "sandbox-signal",
-              "sandbox-browser"
+              "sandbox-browser",
+              "gate-definition"
             ]
           },
           "failureFingerprint": {

@@ -1617,7 +1617,23 @@ async function run(
     case 'lead-outline': {
       // План выпуска ведущего (0.1.0-alpha.68): локальная запись состояния.
       const input = readJson(resolve(need('file')), 'outline');
-      const h = open(need('state'), binding(need('state')), false);
+      // До первого run каталог состояния ещё не привязан к политике: с
+      // --policy команда привязывает и создаёт его (как run), и план выпуска
+      // записывается до первого графа; первый run его застаёт (0.1.0-alpha.69).
+      const state = need('state');
+      if (!v.policy && !existsSync(bindingFile(state)))
+        throw new HarnessError(
+          'NOT_FOUND',
+          'Каталог состояния ещё не привязан к политике (до первого run): ' +
+            state +
+            '. Передайте политику: harness lead outline --state D --policy P --file F',
+          [{ path: ['--policy'], message: 'required before the first run' }],
+        );
+      const h = open(
+        state,
+        v.policy ? binding(state, String(v.policy), true) : binding(state),
+        false,
+      );
       try {
         return {
           command,

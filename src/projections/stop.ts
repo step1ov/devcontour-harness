@@ -164,6 +164,12 @@ export type StopInput =
         retryRoute?: RetryRoute;
         failure?: string;
         /**
+         * Один и тот же провал gate у засчитанных провалов с несвязанными
+         * изменениями (`repeatedGateFailure`, 0.1.0-alpha.69): подсказка
+         * ведущему проверить gate и тест базы, с командой прогона на базе.
+         */
+        repeatedFailure?: { line: string };
+        /**
          * Отказ до начала работы (причина `preflight`): последняя попытка не
          * засчитана и исполнитель не вызывался — фаза `preflight`, у
          * `needs-lead` — неполные входы работы, а не пустой результат.
@@ -1168,6 +1174,11 @@ export function explainStop(input: StopInput): StopDiagnosis {
         : undefined,
       input.work.leadRecovery?.line && input.work.status !== 'done'
         ? `Сейчас: ${input.work.leadRecovery.line}.`
+        : undefined,
+      input.work.repeatedFailure &&
+        input.work.status !== 'done' &&
+        input.work.status !== 'cancelled'
+        ? input.work.repeatedFailure.line
         : undefined,
       input.work.failure ? `Отказ: ${input.work.failure}` : undefined,
     ),

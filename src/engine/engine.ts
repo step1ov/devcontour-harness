@@ -5739,7 +5739,7 @@ export class Engine {
   /** Удержание выдачи правилом восстановления ведущим (`policy.recovery`). */
   /**
    * Удержание gate по отказу без повтора попытки (`sandbox-process-list`,
-   * `sandbox-signal`, `sandbox-browser`): упавший gate — последний
+   * `sandbox-signal`, `sandbox-browser`, `gate-definition`): упавший gate — последний
    * непройденный evidence попытки с кодом этой причины (не проверка
    * потребителя), его определение — в политике репозитория попытки.
    */
@@ -5758,7 +5758,8 @@ export class Engine {
       digest: gateDigest(gate),
       runId: a.id,
       at: iso(this.now()),
-      isolation: this.policy.isolation.mode,
+      // Gate без названной причины удержан своим определением, не песочницей.
+      ...(cause === 'gate-definition' ? {} : { isolation: this.policy.isolation.mode }),
       ...(cause === 'sandbox-process-list' ? {} : { cause }),
     };
   }

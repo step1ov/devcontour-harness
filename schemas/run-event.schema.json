@@ -1254,6 +1254,7 @@
                 "sandbox-process-list",
                 "sandbox-signal",
                 "sandbox-browser",
+                "gate-definition",
                 "dependency-network",
                 "provider-auth",
                 "provider-limit",

@@ -47,8 +47,8 @@ export const blockerCodeText: Record<BlockerCode, Text> = {
     actor: 'lead',
   },
   ENVIRONMENT_GATE_HELD: {
-    ru: 'gate удержан: песочница проверок закрыла то, что он вызывает (ps, сигнал процессу вне неё, браузер), — ведущий меняет gate или исправляет тест и повторяет работу (retry --by lead)',
-    en: 'a gate is held: the check sandbox closes what it calls (ps, a signal to an outside process, a browser) — the lead changes the gate, or fixes the test and retries the work (retry --by lead)',
+    ru: 'gate удержан: песочница проверок закрыла то, что он вызывает (ps, сигнал процессу вне неё, браузер), или он упал, не назвав причины, — ведущий меняет gate или исправляет тест и повторяет работу (retry --by lead)',
+    en: 'a gate is held: the check sandbox closes what it calls (ps, a signal to an outside process, a browser), or it failed without naming a cause — the lead changes the gate, or fixes the test and retries the work (retry --by lead)',
     actor: 'lead',
   },
   APPROVAL_STALE: {

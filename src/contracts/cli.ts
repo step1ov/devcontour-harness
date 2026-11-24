@@ -1773,7 +1773,7 @@ export const cliCommands = {
   },
   'lead-outline': {
     description:
-      'План выпуска ведущего до первого графа: этапы × компоненты с грубым размером (S/M/L или число задач) и тем, кто их делает (writers, environment, owner). Прогноз считает незарегистрированные части плана объёмом выпуска; без плана status и панель подсказывают RELEASE_OUTLINE_MISSING, run не блокируется (0.1.0-alpha.68). Синоним: harness lead outline --file F',
+      'План выпуска ведущего до первого графа (и до первого run — с --policy): этапы × компоненты с грубым размером (S/M/L или число задач) и тем, кто их делает (writers, environment, owner). Прогноз считает незарегистрированные части плана объёмом выпуска; без плана status и панель подсказывают RELEASE_OUTLINE_MISSING, run не блокируется (0.1.0-alpha.68). Синоним: harness lead outline --file F',
     writes: true,
     idempotency:
       'Тот же план — без изменений (changed: false); другой — новая редакция с причиной («план вырос: +…») и строкой журнала ведущего',
@@ -1792,6 +1792,13 @@ export const cliCommands = {
         required: false,
         description:
           'Почему план изменился (главнее reason файла); нет — «план вырос: +…» по разнице',
+      },
+      {
+        name: '--policy',
+        value: 'path',
+        required: false,
+        description:
+          'ExecutionPolicy JSON: до первого run привязывает к ней каталог состояния (как run) и создаёт его, чтобы план записывался до первого графа (0.1.0-alpha.69); без него каталог должен быть уже привязан',
       },
     ],
     refusals: ['NOT_FOUND'],
