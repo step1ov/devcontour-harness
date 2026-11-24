@@ -38,7 +38,10 @@ import {
 import { requirementProof } from '../src/verification/proof.ts';
 import { junit, nodeGate, repo, write } from './git-fixture.ts';
 
-const policy = { isolation: { mode: 'none' as const, domains: [] } };
+const policy = {
+  harnessMode: 'strict' as const,
+  isolation: { mode: 'none' as const, domains: [] },
+};
 
 async function gate(
   dir: string,
@@ -61,6 +64,7 @@ async function gate(
   try {
     await runGate({
       policy: {
+        harnessMode: 'strict',
         isolation: { ...policy.isolation, mode: isolationMode },
         ...(gateTimeoutFloorMs ? { gateTimeoutFloorMs } : {}),
       },
@@ -242,8 +246,22 @@ test('T06: test gate принимается только по свежему н�
   assert.equal(ok.evidence.passed, true);
   assert.deepEqual(ok.evidence.tests, [{ id: 'g.greets', status: 'passed' }]);
 
+  // Код выхода без упавших тестов и без вывода — gate не назвал причину
+  // (P7-3, alpha.69): удержание определения gate, не провал исполнителю.
+  const silent = await gate(r.dir, sha, {
+    command: nodeGate(`${junit('<testcase name="a"/>')};process.exit(3)`),
+  });
+  assert.equal(silent.failure?.kind, 'environment');
+  assert.equal(silent.failure?.diagnosis, 'gate-definition');
+  assert.equal(silent.evidence.passed, false);
   const variants: [string, string[], RegExp][] = [
-    ['exit != 0', nodeGate(`${junit('<testcase name="a"/>')};process.exit(3)`), /Код выхода 3/],
+    [
+      'exit != 0',
+      nodeGate(
+        `${junit('<testcase name="a"/>')};console.error('assertion failed');process.exit(3)`,
+      ),
+      /Код выхода 3/,
+    ],
     [
       'нет отчёта, слово PASS в stdout',
       nodeGate(`console.log('PASS: all tests passed')`),

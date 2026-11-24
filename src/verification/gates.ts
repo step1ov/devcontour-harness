@@ -88,6 +88,7 @@ import {
 } from './sandbox-signatures.ts';
 import {
   WITHHELD_NOTE,
+  causeWithheld,
   commandReports,
   failureSummary as summarizeFailure,
 } from './failure-summary.ts';
@@ -783,7 +784,8 @@ export async function probeProcessList(
   const dir = await realpath(await mkdtemp(join(tmpdir(), 'dc-ps-probe-')));
   try {
     const result = await runCheck(
-      { config: { isolation: { mode: 'os', domains: [] } } },
+      // Проба строгой песочницы ОС проверок — явно строгий режим.
+      { config: { harnessMode: 'strict', isolation: { mode: 'os', domains: [] } } },
       {
         argv,
         cwd: dir,
@@ -940,7 +942,8 @@ async function probeInGateSandbox(
   const dir = await realpath(await mkdtemp(join(tmpdir(), 'dc-limit-probe-')));
   try {
     const result = await runCheck(
-      { config: { isolation: { mode: 'os', domains: [] } } },
+      // Проба строгой песочницы ОС проверок — явно строгий режим.
+      { config: { harnessMode: 'strict', isolation: { mode: 'os', domains: [] } } },
       {
         argv: argv.map((a) => a.replaceAll('{dir}', dir)),
         cwd: dir,
@@ -1219,7 +1222,8 @@ export class GateTimeout extends TaskFailure {
 
 /** Что нужно для запуска gate попытки. */
 export interface GateRun {
-  policy: Pick<ExecutionPolicy, 'isolation' | 'gateTimeoutFloorMs'>;
+  policy: Pick<ExecutionPolicy, 'isolation' | 'gateTimeoutFloorMs'> &
+    Partial<Pick<ExecutionPolicy, 'harnessMode' | 'writeGuard'>>;
   /** Запись evidence под fencing попытки. */
   record: (evidence: Omit<EvidenceRecord, 'id' | 'runId' | 'createdAt'>) => EvidenceRecord;
   cwd: string;
@@ -1657,7 +1661,13 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       // попытка исполнителю не засчитана, gate удержан до хода ведущего
       // (`gate-definition`, как отказ окружения без повтора). У проверки
       // свойств причину называет её отчёт — она судится им.
-      if (failureSummary.withheld && !property) {
+      // Неостановленные потомки (`process-reap`) — своя причина среды: она важнее.
+      if (
+        failureSummary.withheld &&
+        causeWithheld(result.stdout, result.stderr) &&
+        !property &&
+        !reaped
+      ) {
         kind = 'environment';
         cause = 'gate-definition';
         throw new Error(
@@ -1974,7 +1984,8 @@ const MANIFESTS = [
 
 /** Что нужно для установки зависимостей в дереве исполнителя до его работы. */
 export interface WriterDependenciesRun {
-  policy: Pick<ExecutionPolicy, 'isolation' | 'gateTimeoutFloorMs'>;
+  policy: Pick<ExecutionPolicy, 'isolation' | 'gateTimeoutFloorMs'> &
+    Partial<Pick<ExecutionPolicy, 'harnessMode' | 'writeGuard'>>;
   /** Рабочее дерево исполнителя: база попытки, возможно с наложенным черновиком. */
   cwd: string;
   /** SHA базы попытки (HEAD дерева). */

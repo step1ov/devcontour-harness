@@ -144,7 +144,10 @@ test('Gate прошёл, но его временные каталоги не у
 });
 
 test('Gate упал и его временные каталоги не убраны: класс gate, провал назван, уборка дописана', async () => {
-  const { error, evidence } = await gateWithStuckScratch('process.exit(1)');
+  // Команда называет провал (gate без причины — удержание, P7-3).
+  const { error, evidence } = await gateWithStuckScratch(
+    'console.error("assertion failed: expected 1"); process.exit(1)',
+  );
   assert.equal(evidence.passed, false);
   assert.equal(evidence.exitCode, 1);
   assert.ok(error instanceof TaskFailure, String(error));

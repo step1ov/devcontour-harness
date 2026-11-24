@@ -142,7 +142,8 @@ test('when.paths: схема отклоняет абсолютные пути, .
 });
 
 test('when: политика без поля сохраняет digest; все test gates условными и генеративный gate условным не бывают', () => {
-  const raw = example('policy') as any;
+  // Файл примера как есть (фикстура добавляет harnessMode: strict).
+  const raw = { ...example('policy'), harnessMode: undefined } as any;
   const plain = executionPolicySchema.parse(raw);
   assert.ok(!('when' in plain.repositories[0]!.gates[0]!), 'нет поля — нет ключа');
   // Digests примера политики — те же, что у 0.1.0-alpha.44.

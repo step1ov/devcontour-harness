@@ -393,7 +393,8 @@ test('Взятый кандидат: генератор исполняется �
 });
 
 test('Политика без generators: digest прежний; поле generators меняет digest и не подставляется', () => {
-  const raw = example('policy');
+  // Файл примера как есть (фикстура добавляет harnessMode: strict).
+  const raw = { ...example('policy'), harnessMode: undefined };
   const parsed = executionPolicySchema.parse(raw);
   assert.equal('generators' in parsed.repositories[0]!, false, 'умолчание не подставляется');
   // Те же значения, что зафиксированы для alpha.5 (review-protocol.test.ts).

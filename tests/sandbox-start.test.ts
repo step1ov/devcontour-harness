@@ -58,7 +58,9 @@ import { repo } from './git-fixture.ts';
  */
 const support = isolationSupport();
 const noSandbox = support.ok ? false : 'песочница ОС недоступна: ' + support.detail;
-const os = { config: { isolation: { mode: 'os' as const, domains: [] } } };
+const os = {
+  config: { harnessMode: 'strict' as const, isolation: { mode: 'os' as const, domains: [] } },
+};
 const whichModule = createRequire(import.meta.url).resolve(
   '@anthropic-ai/sandbox-runtime/dist/utils/which.js',
 );
@@ -324,7 +326,12 @@ test(
     );
     assert.match(never.evidence.summary, /Shell 'bash' not found in PATH/, 'причина srt сохранена');
     // Обратная сверка: команда стартовала (после временного отказа) и упала — провал проверки.
-    const failed = await gate(loaded(1, noShell()).env, 3);
+    // Команда называет провал (молчаливый провал — удержание gate, P7-3).
+    const failed = await gate(
+      loaded(1, noShell()).env,
+      3,
+      'console.error("assertion failed"); process.exit(3)',
+    );
     assert.equal(failed.evidence.passed, false);
     assert.equal(failed.failure?.kind, 'gate');
     assert.equal(failed.failure?.diagnosis, undefined);

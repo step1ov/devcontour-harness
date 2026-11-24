@@ -758,6 +758,10 @@ test('alpha.67 infra: превью репозитория с областью и
       toolchain: undefined,
       repositories: p.repositories.map((r) => ({ ...r, previews: undefined })),
       recovery: undefined,
+      // alpha.69: режим и граница записи — надзор, не входят.
+      harnessMode: undefined,
+      writeGuard: undefined,
+      release: undefined,
     });
   // Без области — тот же digest, что прежняя формула, и превью в него не входят.
   const plain = policyWith(preview);

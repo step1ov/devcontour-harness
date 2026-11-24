@@ -253,7 +253,8 @@ const MANIFEST_LIMIT = 1024 * 1024;
 const LOCK_LIMIT = 64 * 1024 * 1024;
 
 export interface StoreContext {
-  policy: Pick<ExecutionPolicy, 'isolation'>;
+  policy: Pick<ExecutionPolicy, 'isolation'> &
+    Partial<Pick<ExecutionPolicy, 'harnessMode' | 'writeGuard'>>;
   /** Каталог seeds репозитория (`dependencyStoreRoot`). */
   root(repositoryId: string): string;
   repoPath(repo: Repo): string;
@@ -982,7 +983,14 @@ async function fetchInto(
   const { isolation } = s.ctx.policy;
   const domains = [...new Set([...isolation.domains, ...seedRegistryHosts(s.execution.env, lock)])];
   const result = await storeTree.run(
-    { config: { isolation: { ...isolation, domains } } },
+    {
+      config: {
+        // Режим политики: в строгом — песочница ОС, в облегчённом — граница записи.
+        ...(s.ctx.policy.harnessMode ? { harnessMode: s.ctx.policy.harnessMode } : {}),
+        ...(s.ctx.policy.writeGuard ? { writeGuard: s.ctx.policy.writeGuard } : {}),
+        isolation: { ...isolation, domains },
+      },
+    },
     {
       argv: s.manager.fetch(store),
       cwd: project,

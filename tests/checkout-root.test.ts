@@ -408,7 +408,7 @@ async function gate(
   const recorded: Omit<EvidenceRecord, 'id' | 'runId' | 'createdAt'>[] = [];
   try {
     await runGate({
-      policy: { isolation: { mode: 'os', domains: [] } },
+      policy: { harnessMode: 'strict', isolation: { mode: 'os', domains: [] } },
       record: (e) => {
         recorded.push(e);
         return { ...e, id: 'e', runId: 'r', createdAt: new Date().toISOString() };

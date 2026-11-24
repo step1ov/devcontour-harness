@@ -61,7 +61,8 @@ export interface GeneratorOutcome {
 }
 
 export interface GeneratorsRun {
-  policy: Pick<ExecutionPolicy, 'isolation' | 'gateTimeoutFloorMs'>;
+  policy: Pick<ExecutionPolicy, 'isolation' | 'gateTimeoutFloorMs'> &
+    Partial<Pick<ExecutionPolicy, 'harnessMode' | 'writeGuard'>>;
   /** Корень дерева фазы. */
   cwd: string;
   generators: readonly GeneratorPolicy[];

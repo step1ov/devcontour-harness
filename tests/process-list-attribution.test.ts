@@ -98,7 +98,7 @@ async function gate(r: ReturnType<typeof repo>, trustedBase: string) {
     Promise.resolve({ status: 'unavailable', detail: 'env: /bin/ps: Operation not permitted' });
   try {
     await runGate({
-      policy: { isolation: { mode: 'os', domains: [] } },
+      policy: { harnessMode: 'strict', isolation: { mode: 'os', domains: [] } },
       record: (e) => {
         recorded.push(e);
         return { ...e, id: 'e', runId: 'r', createdAt: new Date().toISOString() };
