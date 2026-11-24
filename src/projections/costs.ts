@@ -131,15 +131,11 @@ function workCostOf(
   limit: number,
   firstAt: ReadonlyMap<string, string>,
 ): WorkCost {
-  // По времени (номер попытки, затем начало, затем ID): «последние» — последние
-  // по времени, а не по порядку записей учёта (ревью alpha.70).
-  const order = (runId: string) =>
-    [attemptOf?.(runId) ?? Number.MAX_SAFE_INTEGER, firstAt.get(runId) ?? '', runId] as const;
-  const sorted = [...w.attempts].sort(([a], [b]) => {
-    const x = order(a);
-    const y = order(b);
-    return x[0] - y[0] || x[1].localeCompare(y[1]) || x[2].localeCompare(y[2]);
-  });
+  // По времени начала первого вызова, затем ID (ревью 2): номер попытки
+  // сбрасывается (сброс, доработка) и служит только для показа.
+  const sorted = [...w.attempts].sort(
+    ([a], [b]) => (firstAt.get(a) ?? '').localeCompare(firstAt.get(b) ?? '') || a.localeCompare(b),
+  );
   const attempts = sorted.map(([runId, a]) =>
     round({
       runId,

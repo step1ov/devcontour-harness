@@ -322,3 +322,24 @@ test('ревью 1: попытки в расходе — по времени, «
   assert.equal(view.costs?.byWork.length, 0);
   assert.equal(view.costs?.byWorkTruncated, 200);
 });
+
+test('ревью 2: после сброса номер попытки начинается заново — «последние» всё равно по времени', () => {
+  // Как в production: attemptOf — номер попытки из состояния; новая попытка
+  // после сброса — №1, но позже прежних №2 и №3.
+  const numbers: Record<string, number> = { old2: 2, old3: 3, new1: 1 };
+  const c = costBreakdown(
+    [
+      call({ id: 'a', workId: 'w', runId: 'old2', startedAt: '2026-11-24T09:00:00.000Z' }),
+      call({ id: 'b', workId: 'w', runId: 'old3', startedAt: '2026-11-24T10:00:00.000Z' }),
+      call({ id: 'c', workId: 'w', runId: 'new1', startedAt: '2026-11-24T12:00:00.000Z' }),
+    ],
+    { attemptOf: (r) => numbers[r], limits: { attempts: 2 } },
+  );
+  assert.deepEqual(
+    c.byWork[0]!.attempts.map((x) => [x.runId, x.attempt]),
+    [
+      ['old3', 3],
+      ['new1', 1],
+    ],
+  );
+});
