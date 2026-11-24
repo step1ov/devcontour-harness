@@ -555,6 +555,7 @@ test('H3-01: прежние команды и схемы их данных не 
         delete o.criteriaSources;
       }
       if ('code' in o && 'plan' in o && 'contract' in o) delete o.passes;
+      if ('line' in o && 'lineEn' in o && 'writeGuard' in o) delete o.securityTier;
       if (Object.keys(o).length !== before) v = o;
     }
     // alpha.68: кем исполнен повтор и откуда актёр (`retry`: `by`, `bySource`).
