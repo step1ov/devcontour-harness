@@ -10,8 +10,9 @@
 // убирает проекты `hx-*` попыток, которых нет среди идущих.
 
 import { execFile } from 'node:child_process';
-import { readFile, readdir, rename, writeFile } from 'node:fs/promises';
+import { readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
+import { composeProjectName } from './attempt-ports.ts';
 
 /** Запуск docker; тест подменяет. */
 export interface DockerRun {
@@ -190,19 +191,22 @@ export async function composeUp(options: ComposeOptions): Promise<ComposeUpResul
         ),
       );
     await mergeEnvFile(file, env).catch((e: unknown) => warn('файл окружения попытки', e));
+    const repositoryId = options.env.DEVCONTOUR_REPOSITORY_ID;
+    const record = composeServicesFile(repositoryId);
     await writeFile(
-      join(dirname(file), COMPOSE_SERVICES_FILE),
+      join(dirname(file), record),
       JSON.stringify(
         {
           owner: COMPOSE_OWNER,
           project,
           attemptId: options.env.HARNESS_ATTEMPT_ID ?? null,
+          repositoryId: repositoryId ?? null,
           services,
         },
         null,
         2,
       ),
-    ).catch((e: unknown) => warn(COMPOSE_SERVICES_FILE, e));
+    ).catch((e: unknown) => warn(record, e));
     if (result.readiness)
       await writeFile(
         join(dirname(file), COMPOSE_READINESS_FILE),
@@ -284,44 +288,47 @@ export async function composeDown(options: ComposeOptions) {
 export interface OwnedComposeProject {
   project: string;
   attemptId: string;
-  /** Файл записи `env-up` (`compose-services.json`) в каталоге состояния. */
+  repositoryId: string;
+  /** Файл записи `env-up` в каталоге артефактов попытки (controller). */
   file: string;
 }
 
+/** Имя записи `env-up` репозитория попытки (своя у каждого репозитория). */
+export const composeServicesFile = (repositoryId: string | undefined) =>
+  repositoryId
+    ? `compose-services.${repositoryId.replace(/[^A-Za-z0-9_-]/g, '_')}.json`
+    : COMPOSE_SERVICES_FILE;
+
 /**
- * Записи `env-up` этого каталога состояния: `compose-services.json` в
- * каталогах артефактов попыток (их пишет только controller-шаг, процессы
- * под границей туда не пишут). Глубина обхода ограничена.
+ * Записи `env-up` (ревью 2): только из каталогов артефактов ИЗВЕСТНЫХ
+ * попыток состояния (`artifactsOf(попытка)` — каталог controller, не
+ * рабочее дерево) и только записи, чей проект — тот, что harness выводит
+ * из попытки и репозитория (`composeProjectName`). Запись неизвестной
+ * попытки не читается вовсе; подложенная в дерево — тоже.
  */
-export async function ownedComposeProjects(stateDir: string): Promise<OwnedComposeProject[]> {
+export async function ownedComposeProjects(
+  attempts: readonly { id: string; dir: string }[],
+  repositories: readonly string[],
+): Promise<OwnedComposeProject[]> {
   const out: OwnedComposeProject[] = [];
-  const walk = async (dir: string, depth: number) => {
-    if (depth > 6) return;
-    let entries: import('node:fs').Dirent[];
-    try {
-      entries = await readdir(dir, { withFileTypes: true });
-    } catch {
-      return;
+  for (const a of attempts)
+    for (const repositoryId of repositories) {
+      const file = join(a.dir, composeServicesFile(repositoryId));
+      let data: Record<string, unknown>;
+      try {
+        data = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>;
+      } catch {
+        continue;
+      }
+      const project = composeProjectName(a.id, repositoryId);
+      if (
+        data.owner === COMPOSE_OWNER &&
+        data.attemptId === a.id &&
+        data.repositoryId === repositoryId &&
+        data.project === project
+      )
+        out.push({ project, attemptId: a.id, repositoryId, file });
     }
-    for (const e of entries) {
-      const path = join(dir, e.name);
-      if (e.isDirectory()) await walk(path, depth + 1);
-      else if (e.isFile() && e.name === COMPOSE_SERVICES_FILE)
-        try {
-          const data = JSON.parse(await readFile(path, 'utf8')) as Record<string, unknown>;
-          if (
-            typeof data.project === 'string' &&
-            /^hx-[a-z0-9_-]+$/.test(data.project) &&
-            typeof data.attemptId === 'string' &&
-            data.owner === COMPOSE_OWNER
-          )
-            out.push({ project: data.project, attemptId: data.attemptId, file: path });
-        } catch {
-          /* не запись env-up */
-        }
-    }
-  };
-  await walk(stateDir, 0);
   return out;
 }
 

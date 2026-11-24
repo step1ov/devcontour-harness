@@ -34,6 +34,7 @@ import {
   servicePortsFromFile,
   type DockerRun,
 } from '../src/environment/compose-env.ts';
+import { composeProjectName } from '../src/environment/attempt-ports.ts';
 
 const ps = JSON.stringify([
   {
@@ -170,26 +171,40 @@ test('env-up: остатки сняты, стек с --wait, порты в фа�
   await assert.rejects(composeUp({ env: {}, cwd: dir, docker: ok.docker }), /COMPOSE_PROJECT_NAME/);
 });
 
-test('env-sweep: только проекты env-up этого состояния у не идущих попыток; без confirm — список; живость — перед снятием', async () => {
+test('env-sweep: только записи env-up известных попыток в каталоге controller, проект — выведенный; живость — перед снятием', async () => {
   const state = realpathSync(mkdtempSync(join(tmpdir(), 'sweep-state-')));
-  const record = (attempt: string, project: string, owner = 'harness-env-up') => {
-    const dir = join(state, 'repos', 'app', 'artifacts', attempt);
+  const write = (dir: string, file: string, data: Record<string, unknown>) => {
     mkdirSync(dir, { recursive: true });
-    writeFileSync(
-      join(dir, 'compose-services.json'),
-      JSON.stringify({ owner, project, attemptId: attempt, services: {} }),
-    );
+    writeFileSync(join(dir, file), JSON.stringify(data));
   };
-  record('r-live', 'hx-app-live');
-  record('r-dead', 'hx-app-dead');
-  record('r-racy', 'hx-app-racy');
-  record('r-forged', 'hx-app-forged', 'someone-else');
-  const owned = await ownedComposeProjects(state);
-  assert.deepEqual(owned.map((o) => o.project).sort(), [
-    'hx-app-dead',
-    'hx-app-live',
-    'hx-app-racy',
-  ]);
+  const record = (attempt: string, repo = 'app', project = composeProjectName(attempt, repo)) =>
+    write(join(state, 'artifacts', attempt), `compose-services.${repo}.json`, {
+      owner: 'harness-env-up',
+      project,
+      attemptId: attempt,
+      repositoryId: repo,
+      services: {},
+    });
+  record('r-live');
+  record('r-dead');
+  record('r-racy');
+  // Подлог: имя проекта не выведено из попытки (чужой стек).
+  record('r-forged', 'app', 'hx-other-install-123');
+  // Подлог в рабочем дереве и запись неизвестной попытки — не читаются.
+  write(join(state, 'worktrees', 'r-dead', 'src'), 'compose-services.app.json', {
+    owner: 'harness-env-up',
+    project: 'hx-victim',
+    attemptId: 'r-dead',
+    repositoryId: 'app',
+  });
+  record('r-unknown');
+  const known = ['r-live', 'r-dead', 'r-racy', 'r-forged'].map((id) => ({
+    id,
+    dir: join(state, 'artifacts', id),
+  }));
+  const owned = await ownedComposeProjects(known, ['app']);
+  assert.deepEqual(owned.map((o) => o.attemptId).sort(), ['r-dead', 'r-live', 'r-racy']);
+  const name = (a: string) => composeProjectName(a, 'app');
   const calls: string[][] = [];
   const docker: DockerRun = (args) => {
     calls.push(args);
@@ -197,36 +212,44 @@ test('env-sweep: только проекты env-up этого состояни�
       return Promise.resolve({
         code: 0,
         stdout:
-          'hx-app-live\nhx-app-dead\nhx-app-racy\nhx-other-install\nhx-gates-abc\nhx-app-forged\n',
+          [
+            name('r-live'),
+            name('r-dead'),
+            name('r-racy'),
+            name('r-unknown'),
+            'hx-victim',
+            'hx-other-install-123',
+          ].join('\n') + '\n',
         stderr: '',
       });
     return Promise.resolve({ code: 0, stdout: '', stderr: '' });
   };
-  let racyStarted = false;
-  const alive = (a: string) => a === 'r-live' || (a === 'r-racy' && racyStarted);
+  const alive = (a: string) => a === 'r-live';
   const dry = await composeSweep({ env: {}, cwd: '/', owned, alive, docker });
   assert.equal(dry.dryRun, true);
-  assert.deepEqual(dry.stale, ['hx-app-dead', 'hx-app-racy']);
+  assert.deepEqual(dry.stale, [name('r-dead'), name('r-racy')].sort());
   assert.deepEqual(dry.removed, []);
-  assert.equal(dry.ignored, 3, 'чужие hx-* и проекты без записи не тронуты');
-  assert.equal(calls.filter((c) => c[0] === 'compose').length, 0);
-  // Попытка r-racy началась между списком и снятием: её стек остаётся.
+  assert.equal(dry.ignored, 3, 'неизвестная попытка, подлог в дереве и чужой стек не тронуты');
+  // Попытка r-racy началась между списком и снятием: второй запрос живости
+  // (перепроверка перед снятием) её видит — стек остаётся. Без перепроверки
+  // тест падает.
+  const asked = new Map<string, number>();
   const real = await composeSweep({
     env: {},
     cwd: '/',
     owned,
     alive: (a) => {
-      const r = alive(a);
-      if (a === 'r-dead') racyStarted = true;
-      return r;
+      const n = (asked.get(a) ?? 0) + 1;
+      asked.set(a, n);
+      return a === 'r-live' || (a === 'r-racy' && n > 1);
     },
     confirm: true,
     docker,
   });
-  assert.deepEqual(real.removed, ['hx-app-dead']);
+  assert.deepEqual(real.removed, [name('r-dead')]);
   assert.deepEqual(
     calls.filter((c) => c[0] === 'compose').map((c) => c[2]),
-    ['hx-app-dead'],
+    [name('r-dead')],
   );
 });
 

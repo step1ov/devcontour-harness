@@ -1716,7 +1716,14 @@ async function run(
       try {
         // Только проекты env-up попыток этого состояния; живость — свежим
         // чтением прямо перед каждым снятием. Без --yes — только список.
-        const owned = await ownedComposeProjects(state);
+        // Записи — только из каталогов артефактов известных попыток
+        // (каталог controller), проект — выведенный из попытки и репозитория.
+        const owned = await ownedComposeProjects(
+          h.engine.read((view) =>
+            view.attempts().map((a) => ({ id: a.id, dir: join(state, 'artifacts', a.id) })),
+          ),
+          h.policy.repositories.map((r) => r.id),
+        );
         return {
           command,
           data: await composeSweep({
