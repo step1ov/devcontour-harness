@@ -642,3 +642,25 @@ test('ревью 1: release.docs: required держит release done и при r
   assert.deepEqual(state.roots, ['w2']);
   assert.equal(state.status, 'pending');
 });
+
+test('ревью 2: второй проход приёмки выпуска, изменивший своё дерево, не принимается — действует первый', async () => {
+  const f = fixture();
+  ready(f.engine, graphOf({ w: [] }));
+  accept(f.engine, f.base, f.head);
+  f.scenario({
+    reviewer: verdict(false, { findings: [finding('Медиа не через Caddy')] }),
+    refuter: {
+      files: { 'deploy/Caddyfile': 'handle /media/* { reverse_proxy api:3000 }\n' },
+      result: {
+        summary: 'после правки маршрут есть',
+        verdicts: [{ index: 0, verdict: 'refuted', basis: 'Caddyfile проксирует /media/*' }],
+        missed: [],
+      },
+    },
+  });
+  const r = await f.review();
+  assert.equal(r.approved, false);
+  assert.equal(r.passes?.status, 'failed');
+  assert.match(r.passes?.reason ?? '', /изменил своё дерево/);
+  assert.equal(r.findings.length, 1);
+});

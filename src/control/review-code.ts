@@ -532,23 +532,37 @@ export async function reviewBranch(
               if (error instanceof TaskFailure && error.kind === 'budget')
                 throw new HarnessError('BUDGET_EXHAUSTED', error.message);
               return undefined;
-            })
-            .finally(async () => {
-              await git(path, 'worktree', 'remove', '--force', refuteCwd).catch(() => undefined);
-              // Дерево создано выше этим вызовом.
-              await rm(refuteCwd, { recursive: true, force: true }).catch(() => undefined);
             });
+          // Дерево второго прохода проверяется до уборки (ревью 2): изменённое
+          // reviewer — второй проход не состоялся, действует первый.
+          const refuteDirty =
+            !!refute &&
+            (!!(await git(
+              refuteCwd,
+              'status',
+              '--porcelain',
+              '--untracked-files=all',
+              '--ignored',
+            ).catch(() => 'unknown')) ||
+              (await git(refuteCwd, 'rev-parse', 'HEAD').catch(() => '')) !== head);
+          await git(path, 'worktree', 'remove', '--force', refuteCwd).catch(() => undefined);
+          // Дерево создано выше этим вызовом.
+          await rm(refuteCwd, { recursive: true, force: true }).catch(() => undefined);
           const parsed2 =
-            refute?.status === 'ok' ? refuteResultSchema.safeParse(refute.output) : undefined;
+            refute?.status === 'ok' && !refuteDirty
+              ? refuteResultSchema.safeParse(refute.output)
+              : undefined;
           if (!parsed2?.success)
             passes = {
               ...record0,
               status: 'failed',
-              reason: refute
-                ? refute.status !== 'ok'
-                  ? 'второй вызов: ' + refute.status
-                  : 'ответ второго прохода вне схемы'
-                : 'второй вызов не выполнен',
+              reason: refuteDirty
+                ? 'reviewer изменил своё дерево'
+                : refute
+                  ? refute.status !== 'ok'
+                    ? 'второй вызов: ' + refute.status
+                    : 'ответ второго прохода вне схемы'
+                  : 'второй вызов не выполнен',
             };
           else {
             const reopened = first.data.previous.some(

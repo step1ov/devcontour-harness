@@ -218,6 +218,7 @@ export function refutePromptText(
   return [
     'Second review pass (refute). A first, independent review pass of this exact commit raised the blocking findings listed below. Your job is to try to REFUTE each one against the code, the diff, the acceptance criteria and the gate evidence: a finding is refuted only when you can show concretely (file, line, behaviour, test) that it is wrong, already handled, or outside the approved acceptance criteria. Otherwise it is confirmed. Do not soften a real defect; a missing acceptance criterion or a weakened test is always confirmed.',
     'Return one entry in `verdicts` per finding with its exact `index`, `verdict` (confirmed | refuted) and a concrete `basis`. A finding without a verdict counts as confirmed.',
+    'Your working directory is a clean checkout of the same commit made for this pass: it has no installed dependencies, build output or running services, and any change you make there is discarded and fails this pass. Judge from the code, the diff, the acceptance criteria and the gate evidence of the first pass; do not rely on running the project commands here.',
     mode === 'always'
       ? 'This work requires two passes on every review: also check the commit yourself and list in `missed` any blocking defect the first pass did not report (concrete path, line and evidence). Leave `missed` empty when there is none.'
       : 'Return `missed` as an empty list.',
