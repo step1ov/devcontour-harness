@@ -14,7 +14,9 @@ export type EnvironmentGateHold = NonNullable<WorkState['environmentHold']> & { 
  * определение gate в политике то же (`currentDigest` — `gateDigest` gate
  * репозитория; gate убран — удержания нет) и среда та же, что сделала отказ
  * отказом среды: режим изоляции проверок прежний (`os`), а у отказа списка
- * процессов — проба `ps` этого процесса не ответила `available`.
+ * процессов — проба `ps` этого процесса не ответила `available`. Удержание
+ * `gate-definition` (gate не назвал причину провала) от среды не зависит:
+ * его снимают только новое определение gate и повтор ведущего.
  */
 export function environmentGateHolds(
   works: readonly Pick<WorkState, 'id' | 'status' | 'environmentHold'>[],
@@ -24,7 +26,9 @@ export function environmentGateHolds(
   return works.flatMap((w) => {
     const h = w.environmentHold;
     if (!h || w.status === 'done' || w.status === 'cancelled') return [];
-    if ((h.isolation ?? 'os') !== environment.isolation) return [];
+    // Gate без названной причины удержан своим определением, а не песочницей.
+    if (holdCause(h) !== 'gate-definition' && (h.isolation ?? 'os') !== environment.isolation)
+      return [];
     if (environment.processList === 'available' && holdCause(h) === 'sandbox-process-list')
       return [];
     return currentDigest(h.repositoryId, h.gate) === h.digest ? [{ ...h, workId: w.id }] : [];
@@ -48,7 +52,24 @@ const HELD_BECAUSE: Record<NoRetryEnvironmentCause, { ru: string; en: string }> 
     ru: 'запускает браузер, а в песочнице проверок он не стартует',
     en: 'it launches a browser, which does not start in the check sandbox',
   },
+  'gate-definition': {
+    ru: 'упал, не назвав причины (ни упавших тестов, ни строки ошибки), — это правка команды gate, а не кода задачи',
+    en: 'it failed without naming a cause (no failed tests, no error line) — the gate command needs fixing, not the task code',
+  },
 };
+
+/**
+ * Удержание определением gate (0.1.0-alpha.69): gate упал, не назвав причины.
+ * Представление отличает такие удержания от удержаний песочницей по этому
+ * признаку (`EnvironmentGateHold.cause === 'gate-definition'`).
+ */
+export const isGateDefinitionHold = (h: { cause?: NoRetryEnvironmentCause }) =>
+  holdCause(h) === 'gate-definition';
+
+/** Удержания определением gate среди действующих (`environmentGateHolds`). */
+export const gateDefinitionHolds = <T extends { cause?: NoRetryEnvironmentCause }>(
+  holds: readonly T[],
+): T[] => holds.filter(isGateDefinitionHold);
 
 /** Удержания, которые касаются работы: тот же репозиторий и gate из её обязательных. */
 export const gateHoldsFor = (
@@ -75,6 +96,11 @@ export function gateHoldLine(
     ru: `gate ${h.gate} удержан: ${because.ru}${own ? '' : ` (отказ работы ${h.workId})`}`,
     en: `gate ${h.gate} is held: ${because.en}${own ? '' : ` (failure of ${h.workId})`}`,
   };
+  if (!route?.limit && isGateDefinitionHold(h))
+    return {
+      ru: `${head.ru}; ход ведущего — поменять команду gate, чтобы при провале она печатала упавшие тесты и строку ошибки, и повторить ${h.workId} (${lift})`,
+      en: `${head.en}; the lead changes the gate command so a failure prints the failed tests and the error line, and retries ${h.workId} (${lift})`,
+    };
   if (!route?.limit)
     return {
       ru: `${head.ru}; ход ведущего — поменять gate или команду либо исправить тест и повторить ${h.workId} (${lift})`,

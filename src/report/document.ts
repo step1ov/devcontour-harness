@@ -65,6 +65,7 @@ const causeLabels: Record<string, string> = {
   'sandbox-process-list': 'gate needs the process list (ps), unavailable in the OS sandbox',
   'sandbox-signal': 'gate signals (kill) a process outside its OS sandbox',
   'sandbox-browser': 'gate launches a browser, which does not start in the OS sandbox',
+  'gate-definition': 'gate failed without naming a cause (no failed tests, no error line)',
   'dependency-network': 'dependency install network or registry',
   'provider-auth': 'provider login',
   'provider-limit': 'provider limit or balance',

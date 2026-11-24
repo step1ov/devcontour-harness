@@ -2284,7 +2284,7 @@
               "type": "object",
               "properties": {
                 "rows": {
-                  "maxItems": 22,
+                  "maxItems": 23,
                   "type": "array",
                   "items": {
                     "type": "object",
@@ -2299,6 +2299,7 @@
                           "sandbox-process-list",
                           "sandbox-signal",
                           "sandbox-browser",
+                          "gate-definition",
                           "dependency-network",
                           "provider-auth",
                           "provider-limit",

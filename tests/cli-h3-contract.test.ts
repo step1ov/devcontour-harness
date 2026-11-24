@@ -279,6 +279,8 @@ const ADDITIVE_ENUM_VALUES = new Set([
   // Причины отказа среды: сигнал процессу вне песочницы и браузер в ней (0.1.0-alpha.68).
   'sandbox-signal',
   'sandbox-browser',
+  // Причина отказа без повтора: gate упал, не назвав причины (0.1.0-alpha.69).
+  'gate-definition',
 ]);
 /** Текст cancel в H2: alpha.66 добавила отказ от открытой доработки принятого поручения. */
 const H2_CANCEL_DESCRIPTION =
