@@ -91,6 +91,9 @@ export async function allocateAttemptPorts(
   };
 }
 
+/** Файл окружения попытки в её каталоге артефактов (`HARNESS_ATTEMPT_ENV_FILE`). */
+export const ATTEMPT_ENV_FILE = 'attempt-env.json';
+
 /** Ключ аренды порта попытки (для тестов и уборки). */
 export const attemptPortKey = (port: number) => resourceKey(leaseOf(port));
 

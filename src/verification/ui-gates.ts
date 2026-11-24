@@ -32,6 +32,10 @@ export function uiGateEnvironment(ui: UiGatePolicy): Record<string, string> {
     HARNESS_UI_FLOWS: ui.flows.join('\n'),
     ...(ui.device.name ? { HARNESS_MOBILE_DEVICE: ui.device.name } : {}),
     ...(ui.device.os ? { HARNESS_MOBILE_OS: ui.device.os } : {}),
+    ...(ui.device.locale ? { HARNESS_MOBILE_LOCALE: ui.device.locale } : {}),
+    // Maestro: без аналитики; драйвер под нагрузкой стартует дольше.
+    MAESTRO_CLI_NO_ANALYTICS: '1',
+    MAESTRO_DRIVER_STARTUP_TIMEOUT: String(ui.driverStartupTimeoutMs ?? 60_000),
   };
 }
 

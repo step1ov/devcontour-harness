@@ -174,6 +174,7 @@ import { CleanupFailure, cleanupEnvironment } from '../environment/lifecycle.ts'
 import { defaultResourceDatabase, withResources } from '../environment/resources.ts';
 import { guardEntries } from '../environment/write-guard.ts';
 import {
+  ATTEMPT_ENV_FILE,
   allocateAttemptPorts,
   attemptVariables,
   type AttemptPorts,
@@ -832,7 +833,19 @@ export class Runner {
         // Облегчённый режим (alpha.69): своё имя проекта compose, свои порты
         // и шлюз gates — исполнителю и gates одинаково.
         ...(harnessModeOf(this.policy) === 'light'
-          ? attemptVariables(attempt.id, this.attemptPorts.get(attempt.id) ?? {}, repo.gateway)
+          ? {
+              ...attemptVariables(
+                attempt.id,
+                this.attemptPorts.get(attempt.id) ?? {},
+                repo.gateway,
+              ),
+              HARNESS_ATTEMPT_ENV_FILE: join(
+                this.dirOf(attempt.repositoryId),
+                'artifacts',
+                attempt.id,
+                ATTEMPT_ENV_FILE,
+              ),
+            }
           : {}),
       },
       this.options.environment ?? process.env,
@@ -1677,6 +1690,17 @@ export class Runner {
           throw new BlockedError(error instanceof Error ? error.message : String(error));
         }
         this.attemptPorts.set(attempt.id, ports.ports);
+      }
+      // Окружение попытки файлом (alpha.69, P6-11): имя проекта compose,
+      // порты и шлюз — для lifecycle, gates и инструментов, которые читают
+      // файл, а не переменные. Секретов в нём нет.
+      if (harnessModeOf(this.policy) === 'light') {
+        await mkdir(artifacts, { recursive: true });
+        await writeFile(
+          join(artifacts, ATTEMPT_ENV_FILE),
+          JSON.stringify(attemptVariables(attempt.id, ports?.ports ?? {}, repo.gateway), null, 2) +
+            '\n',
+        );
       }
       // Ресурсы поручения, gates его репозитория и выбранных проверок
       // потребителей — одним резервированием на всю попытку.

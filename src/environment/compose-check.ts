@@ -379,6 +379,18 @@ export function composeChecks(
     const check = checkComposeFile(path, shown);
     if (check.unknown)
       notes.push(`compose-check ${shown}: ${check.unknown} — проверка внутренних сетей пропущена`);
+    // Параллельные стеки (alpha.69): healthcheck RabbitMQ через
+    // rabbitmq-diagnostics без ожидания файла cookie Erlang гоняется со
+    // стартом брокера — совет, а не отказ: compose — файл проекта.
+    try {
+      const text = readFileSync(path, 'utf8');
+      if (/rabbitmq-diagnostics/.test(text) && !/erlang\.cookie/.test(text))
+        notes.push(
+          `compose-rabbitmq-cookie ${shown}: healthcheck вызывает rabbitmq-diagnostics без проверки файла .erlang.cookie — под параллельными стеками попыток он падает раньше старта брокера; добавьте в проверку условие на cookie (например test -s /var/lib/rabbitmq/.erlang.cookie && rabbitmq-diagnostics -q ping)`,
+        );
+    } catch {
+      /* файл уже разобран выше; отказ чтения назван там */
+    }
     for (const name of check.internalOnly)
       problems.push(
         `compose-internal-ports ${shown}: Сервис ${name} публикует порты, но подключён только к внутренним сетям (internal: true): Docker не публикует такие порты — они будут недоступны на 127.0.0.1. Подключите сервис и к обычной сети или публикуйте порт через шлюз в обычной сети`,

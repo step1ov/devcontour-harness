@@ -508,6 +508,10 @@
                                 "perAttempt": {
                                   "default": false,
                                   "type": "boolean"
+                                },
+                                "locale": {
+                                  "type": "string",
+                                  "pattern": "^[a-z]{2,3}(_[A-Z]{2})?$"
                                 }
                               },
                               "additionalProperties": false
@@ -562,6 +566,11 @@
                               "type": "integer",
                               "exclusiveMinimum": 0,
                               "maximum": 3600000
+                            },
+                            "driverStartupTimeoutMs": {
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "maximum": 600000
                             }
                           },
                           "required": [
@@ -799,6 +808,10 @@
                                 "perAttempt": {
                                   "default": false,
                                   "type": "boolean"
+                                },
+                                "locale": {
+                                  "type": "string",
+                                  "pattern": "^[a-z]{2,3}(_[A-Z]{2})?$"
                                 }
                               },
                               "additionalProperties": false
@@ -853,6 +866,11 @@
                               "type": "integer",
                               "exclusiveMinimum": 0,
                               "maximum": 3600000
+                            },
+                            "driverStartupTimeoutMs": {
+                              "type": "integer",
+                              "exclusiveMinimum": 0,
+                              "maximum": 600000
                             }
                           },
                           "required": [

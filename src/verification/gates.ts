@@ -569,7 +569,7 @@ export async function runCheck(
       assertExecutable(argv[0]!, env.PATH, options.cwd);
       // Нет механизма — отказ среды, как недоступная изоляция строгого режима.
       argv = guardedArgv(argv, guardEntries(h.config, [...options.write, scratch, marks]));
-      env = { ...env, TMPDIR: scratch };
+      env = { ...env, ...toolStateEnv(env, scratch), TMPDIR: scratch };
     } else if (strictSandbox(h.config)) {
       const support = isolationBackend.check();
       if (!support.ok)
@@ -751,6 +751,29 @@ export async function runCheck(
         : error;
     }
   }
+}
+/**
+ * Своё состояние инструментов проверки под границей записи (alpha.69): у
+ * каждой проверки свой каталог сокетов agent-browser и, у мобильного UI gate,
+ * свой домашний каталог Java (Maestro пишет в `~/.maestro` и игнорирует
+ * HOME — только `-Duser.home`). Заданное проектом не переопределяется.
+ */
+export function toolStateEnv(env: NodeJS.ProcessEnv, scratch: string): Record<string, string> {
+  return {
+    ...(env.AGENT_BROWSER_SOCKET_DIR
+      ? {}
+      : { AGENT_BROWSER_SOCKET_DIR: join(scratch, 'agent-browser') }),
+    ...(env.HARNESS_UI === 'mobile'
+      ? {
+          JAVA_OPTS: [
+            `-Duser.home=${join(scratch, 'home')}`,
+            `-Djava.io.tmpdir=${scratch}`,
+            '-Djava.net.preferIPv4Stack=true',
+            ...(env.JAVA_OPTS ? [env.JAVA_OPTS] : []),
+          ].join(' '),
+        }
+      : {}),
+  };
 }
 const checkResult = Symbol('runCheck.result');
 const leftoverText = (reason: string) => `временные каталоги проверки не убраны: ${reason}`;

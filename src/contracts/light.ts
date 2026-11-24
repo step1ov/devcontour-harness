@@ -196,6 +196,11 @@ export const mobileUiSchema = z.strictObject({
       name: z.string().min(1).max(100).optional(),
       os: z.string().min(1).max(40).optional(),
       perAttempt: z.boolean().default(false),
+      /** Локаль устройства попытки (`ru_RU`, `en_US`): селекторы потоков не зависят от языка системы. */
+      locale: z
+        .string()
+        .regex(/^[a-z]{2,3}(_[A-Z]{2})?$/)
+        .optional(),
     })
     .refine((d) => d.pool || d.name, 'device: pool или name'),
   app: z.strictObject({
@@ -207,6 +212,8 @@ export const mobileUiSchema = z.strictObject({
   }),
   artifacts: uiArtifacts,
   flowTimeoutMs: z.number().int().positive().max(3_600_000).optional(),
+  /** Предел старта драйвера Maestro под нагрузкой (`MAESTRO_DRIVER_STARTUP_TIMEOUT`). */
+  driverStartupTimeoutMs: z.number().int().positive().max(600_000).optional(),
 });
 export const uiGateSchema = z.discriminatedUnion('type', [browserUiSchema, mobileUiSchema]);
 export type UiGatePolicy = z.infer<typeof uiGateSchema>;

@@ -355,6 +355,17 @@ export async function doctor(
       notes.push(
         'attemptEnv и gateway действуют только в облегчённом режиме: строгий режим заморожен и новых возможностей не получает',
       );
+    // Зеркало шлюза (alpha.69, P7-6): топология production объявлена, а
+    // gates ни одного репозитория не ходят через шлюз — маршрут production
+    // тестами не проверяется.
+    if (
+      mode.mode === 'light' &&
+      policy?.release?.topology?.length &&
+      !policy.repositories.some((r) => r.gateway)
+    )
+      warnings.push(
+        'GATEWAY_MIRROR_MISSING: release.topology объявляет маршрутизацию production, а gates не ходят через шлюз (repositories[].gateway): поднимите в compose проекта шлюз с конфигурацией production и направьте gates и публичные адреса приложения на него',
+      );
     for (const repo of policy?.repositories ?? [])
       for (const g of repo.gates)
         if (g.ui?.type === 'mobile')

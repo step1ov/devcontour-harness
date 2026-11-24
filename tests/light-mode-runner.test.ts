@@ -4,7 +4,7 @@
 import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -68,6 +68,7 @@ test('переменные попытки: имя проекта compose, пор
 test('политика: шлюз ссылается только на порты попытки, пул устройств — ресурсы device', async () => {
   const { policyIssues } = await import('../src/contracts/policy.ts');
   const raw = example('policy') as Record<string, any>;
+  delete raw.harnessMode;
   raw.repositories[0].gateway = { url: 'http://127.0.0.1:${GW}', env: {} };
   raw.repositories[0].gates.push({
     id: 'mobile',
@@ -117,6 +118,11 @@ if (!/^hx-/.test(e.COMPOSE_PROJECT_NAME || '')) problems.push('compose ' + e.COM
 if (!/^\\d+$/.test(e.API_PORT || '')) problems.push('port ' + e.API_PORT);
 if (e.IMAGE_PUBLIC_BASE_URL !== 'http://127.0.0.1:' + e.GATEWAY_PORT + '/media') problems.push('gateway ' + e.IMAGE_PUBLIC_BASE_URL);
 if (e.HARNESS_ATTEMPT_ID !== e.DEVCONTOUR_RUN_ID) problems.push('attempt ' + e.HARNESS_ATTEMPT_ID);
+try {
+  const file = JSON.parse(fs.readFileSync(e.HARNESS_ATTEMPT_ENV_FILE, 'utf8'));
+  if (file.API_PORT !== e.API_PORT || file.COMPOSE_PROJECT_NAME !== e.COMPOSE_PROJECT_NAME) problems.push('env-file values');
+} catch (x) { problems.push('env-file ' + x.message); }
+if (!/agent-browser$/.test(e.AGENT_BROWSER_SOCKET_DIR || '')) problems.push('agent-browser ' + e.AGENT_BROWSER_SOCKET_DIR);
 let leaked = false;
 try { fs.writeFileSync(${JSON.stringify(outside)}, 'x'); leaked = true; } catch {}
 if (leaked) problems.push('leak');
@@ -152,3 +158,61 @@ fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,
     pool.close();
   },
 );
+
+test('UI gate в строгом режиме — отказ политики; состояние инструментов проверки — своё', async () => {
+  const { policyIssues } = await import('../src/contracts/policy.ts');
+  const { toolStateEnv } = await import('../src/verification/gates.ts');
+  const raw = example('policy') as Record<string, any>;
+  raw.repositories[0].gates.push({
+    id: 'e2e',
+    kind: 'check',
+    command: ['pnpm', 'exec', 'playwright', 'test'],
+    ui: { type: 'browser' },
+  });
+  const strict = policyIssues(executionPolicySchema.parse(raw)).map((i) => i.message);
+  assert.ok(strict.some((m) => /UI gate e2e \(browser\) в строгом режиме не исполняется/.test(m)));
+  assert.deepEqual(policyIssues(executionPolicySchema.parse({ ...raw, harnessMode: 'light' })), []);
+  const browser = toolStateEnv({}, '/s');
+  assert.deepEqual(browser, { AGENT_BROWSER_SOCKET_DIR: '/s/agent-browser' });
+  const mobile = toolStateEnv({ HARNESS_UI: 'mobile', JAVA_OPTS: '-Xmx1g' }, '/s');
+  assert.equal(
+    mobile.JAVA_OPTS,
+    '-Duser.home=/s/home -Djava.io.tmpdir=/s -Djava.net.preferIPv4Stack=true -Xmx1g',
+  );
+  assert.deepEqual(toolStateEnv({ AGENT_BROWSER_SOCKET_DIR: '/own' }, '/s'), {});
+});
+
+test('doctor: зеркало шлюза при объявленной топологии; совет о cookie RabbitMQ в compose', async () => {
+  const { doctor } = await import('../src/control/doctor.ts');
+  const { composeChecks } = await import('../src/environment/compose-check.ts');
+  const raw = example('policy') as Record<string, any>;
+  delete raw.harnessMode;
+  raw.release = { topology: ['deploy/Caddyfile'] };
+  const report = await doctor(
+    executionPolicySchema.parse(raw),
+    {},
+    undefined,
+    undefined,
+    undefined,
+    {
+      resourceDatabase: false,
+    },
+  );
+  assert.ok(report.warnings?.some((w) => w.startsWith('GATEWAY_MIRROR_MISSING')));
+  assert.match(report.notes?.[0] ?? '', /^режим: облегчённый \(по умолчанию\)/);
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'compose-')));
+  writeFileSync(
+    join(dir, 'compose.yml'),
+    'services:\n  mq:\n    image: rabbitmq\n    healthcheck:\n      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]\n',
+  );
+  raw.lifecycle = {
+    setup: [{ id: 'up', command: ['docker', 'compose', 'up', '-d'] }],
+    teardown: [{ id: 'down', command: ['docker', 'compose', 'down'] }],
+  };
+  raw.repositories[0].path = dir;
+  const checks = composeChecks(executionPolicySchema.parse(raw), dir);
+  assert.ok(
+    checks.notes.some((n) => n.startsWith('compose-rabbitmq-cookie')),
+    checks.notes.join('\n'),
+  );
+});

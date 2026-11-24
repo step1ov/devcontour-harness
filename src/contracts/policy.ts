@@ -1196,6 +1196,17 @@ export function policyIssues(policy: ExecutionPolicy): Issue[] {
             ['repositories', r, 'gateway', 'url'],
             `Шлюз ссылается на \${${name}}, а такого порта нет в attemptEnv.ports`,
           );
+    // UI gates (alpha.69) — только облегчённый режим: в песочнице ОС
+    // проверок на macOS не стартует ни Chromium (нужен mach-register), ни
+    // симулятор (CoreSimulator XPC, запись в ~/Library/Developer).
+    repo.gates.forEach((g, i) => {
+      if (g.ui && harnessModeOf(policy) === 'strict' && policy.isolation.mode === 'os')
+        add(
+          'INVALID_INPUT',
+          ['repositories', r, 'gates', i, 'ui'],
+          `UI gate ${g.id} (${g.ui.type}) в строгом режиме не исполняется: в песочнице ОС проверок браузер и симулятор не стартуют. Облегчённый режим (решение владельца) или браузер в контейнере обычным gate без блока ui`,
+        );
+    });
     // Пул устройств мобильного UI gate — ресурсы kind: device.
     repo.gates.forEach((g, i) => {
       if (g.ui?.type !== 'mobile') return;
