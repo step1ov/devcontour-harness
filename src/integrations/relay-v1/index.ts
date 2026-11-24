@@ -1136,7 +1136,11 @@ export class RelayV1Transport implements RelayTransport {
         const passport = await get({ kind: 'product', id: 'passport' });
         await include(passport.ref, 'product', { code: 'product-passport', from: null }, passport);
       } catch (error) {
-        if (!(error instanceof TransportError && error.details.code === 'ENTITY_NOT_FOUND'))
+        // Паспорта нет (ENTITY_NOT_FOUND или иной «не найдено») — раздел пуст.
+        if (!(
+          error instanceof TransportError &&
+          (error.details.code === 'ENTITY_NOT_FOUND' || error.kind === 'not-found')
+        ))
           throw error;
       }
       // Неархивные документы, прикреплённые к задаче, и — по настройке — к целям.
