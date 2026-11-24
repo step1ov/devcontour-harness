@@ -54,8 +54,31 @@ In light mode:
 - browser checks run as ordinary gates (`ui: {type: "browser"}`,
   `<pkg>/docs/ui-gates.md`); no external browser controller is needed;
 - infra tasks, `infra.paths` and `gateChanges` (below) are **not
-  required**: acceptance tests live with the code and are reviewed like
-  code. They stay available when the owner wants that boundary.
+  required**, and there is no separate infra phase: acceptance tests,
+  fixtures and compose test services live with the product code inside
+  product works and are reviewed as code. **Don't split test
+  infrastructure into a separate stage.** Use the harness helpers instead:
+  per-attempt services (`COMPOSE_PROJECT_NAME`, `attemptEnv.ports`, the
+  `attempt-env.json` file named by `HARNESS_ATTEMPT_ENV_FILE`), the
+  `browser` (Playwright) gate, the gateway-mirror check
+  (`GATEWAY_MIRROR_MISSING`). Open an infra work only for a shared thing
+  several works need (for example a new compose service), reviewed like
+  code. Infra works stay available when the owner wants that boundary;
+- browser gates standardise on Playwright Test with its bundled headless
+  Chromium (`ui: {type: "browser"}`); agent-browser is an exploration tool
+  for agents, not a gate runner. Mobile gates (Maestro) are a contract in
+  this version (`<pkg>/docs/ui-gates.md`);
+- **pre-warm tools during setup** so gates run offline and fast: install the
+  pinned Playwright browser (`pnpm exec playwright install chromium`), pull
+  or build the compose images (`docker compose pull`/`build`), fill the
+  dependency store (`smoke`); report sizes and times in the setup report;
+- in the project's compose files: publish ports from `attemptEnv` variables
+  (or `127.0.0.1::<port>`), give every service a real healthcheck, and guard
+  a RabbitMQ `rabbitmq-diagnostics` healthcheck on the Erlang cookie file
+  (`test -s /var/lib/rabbitmq/.erlang.cookie && rabbitmq-diagnostics -q
+ping`) — parallel attempt stacks race without it (`doctor` notes
+  `compose-rabbitmq-cookie`); teardown is `docker compose down -v
+--remove-orphans`.
 
 ## Setup is configuration
 

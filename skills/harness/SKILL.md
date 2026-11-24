@@ -212,9 +212,14 @@ outline with a reason when the plan grows.
 `harnessMode` is light (`<pkg>/docs/light-mode.md`): writers and gates run
 on the host with Docker, browsers, network and their own ports and compose
 project (`attemptEnv`, `COMPOSE_PROJECT_NAME`); the only guard is writes
-outside the attempt worktree, its temp dir and tool caches. Acceptance tests
-live with the code as ordinary product tasks and are reviewed like code;
-infra works and `gateChanges` below are not required (still available).
+outside the attempt worktree, its temp dir and tool caches. Acceptance tests,
+fixtures and compose test services live with the product code inside
+product works and are reviewed as code; infra works, a separate infra phase
+and `gateChanges` below are not required. Don't split test infrastructure
+into a separate stage: use the harness helpers — per-attempt services and
+`attempt-env.json` (`HARNESS_ATTEMPT_ENV_FILE`), the `browser` (Playwright)
+gate, the gateway-mirror check. Open an infra work only for a shared thing
+several works need (for example a new compose service), reviewed like code.
 Strict mode (`harnessMode: strict`) is frozen; switching modes is the
 owner's decision — never change it yourself. When the product is served
 through a gateway in production, gates should go through the project's

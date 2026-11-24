@@ -111,8 +111,26 @@ strict`) для чужого кода или секретов production. Стр
 ```
 
 Переменные получают исполнитель, gates, lifecycle и `harness gates --sha`.
-Compose-файл проекта берёт порты из них (`"${API_PORT}:3000"`), teardown
-lifecycle — `docker compose down -v` (имя проекта уже в окружении).
+Те же значения (имя проекта compose, порты, адрес шлюза) попытка пишет в
+файл `attempt-env.json` в своём каталоге артефактов; путь —
+`HARNESS_ATTEMPT_ENV_FILE`. Compose-файл проекта берёт порты из переменных
+(`"${API_PORT}:3000"`), teardown lifecycle — `docker compose down -v
+--remove-orphans` (имя проекта уже в окружении). Потомки каждой проверки
+(демоны браузера, серверы) останавливаются вместе с ней.
+
+Советы для compose проекта: у каждого сервиса настоящий healthcheck и
+`up --wait`; данные приёмки — в tmpfs; healthcheck RabbitMQ через
+`rabbitmq-diagnostics` ждёт файл cookie Erlang (`test -s
+/var/lib/rabbitmq/.erlang.cookie && rabbitmq-diagnostics -q ping`) —
+иначе параллельные стеки попыток падают на гонке старта (`doctor`:
+`compose-rabbitmq-cookie`). При настройке прогрейте инструменты: браузер
+Playwright, образы compose, хранилище зависимостей — gates тогда идут без
+сети и быстро.
+
+Тестовая инфраструктура (приёмочные тесты, фикстуры, тестовые сервисы
+compose) живёт с кодом продукта в продуктовых работах и проходит ревью как
+код; отдельного этапа инфраструктуры нет. Работа инфраструктуры — только
+для общего, что нужно нескольким работам (например, новый сервис compose).
 
 ## Gates через шлюз (как в production)
 
@@ -128,6 +146,10 @@ lifecycle — `docker compose down -v` (имя проекта уже в окру
   }
 }]
 ```
+
+Объявлена топология production (`release.topology`), а ни один
+репозиторий не ходит через шлюз — `doctor` предупреждает
+`GATEWAY_MIRROR_MISSING`.
 
 Harness передаёт `HARNESS_GATEWAY_URL` и каждой переменной из `env` адрес
 шлюза с суффиксом. Шлюз поднимает lifecycle проекта — сервис compose с той
