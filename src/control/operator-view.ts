@@ -83,8 +83,8 @@ import { Harness } from './harness.ts';
 import { carriedInput, statusOf } from './status.ts';
 import { acceptedTargets } from './target.ts';
 import { WorkflowQueue } from './workflow.ts';
-import { reviewRoundCap } from './review.ts';
-import { reviewSubjectSummary, subjectRoundBudget } from './review-summary.ts';
+import { reviewRoundCap, strictReviewRoundCap } from './review.ts';
+import { LIGHT_ROUNDS_EN, reviewSubjectSummary, subjectRoundBudget } from './review-summary.ts';
 import { stageOfStep } from './stage.ts';
 import { setupProgress } from './setup-progress.ts';
 import { cachedUpdates, installedHarness, loadUpdatesConfig } from '../update/check.ts';
@@ -422,7 +422,7 @@ export function reviewsOf(
           en: subjectLineParts(en, s.kind, s.subject),
         },
       }))(
-        `${s.kind} ${s.subject}: ${reviewVerdictText(s.approved, counts, 'en')}; rounds ${s.rounds.used}${s.rounds.max === null ? '' : '/' + s.rounds.max}`,
+        `${s.kind} ${s.subject}: ${reviewVerdictText(s.approved, counts, 'en')}; rounds ${s.rounds.max === null ? `${r.round}, ${LIGHT_ROUNDS_EN}` : `${s.rounds.used}/${s.rounds.max}`}`,
       ),
     };
   });
@@ -1365,7 +1365,9 @@ export function collectOperatorViewInput(
       effective: {
         inputPolicy,
         stall: policy.stallSweep ?? DEFAULT_STALL_SWEEP,
-        reviewRoundCap: reviewRoundCap(policy),
+        // Порог настроек — предел строгого режима; в облегчённом раундов не
+        // считают (строки ревью: «без предела»), поле договора — число.
+        reviewRoundCap: strictReviewRoundCap(policy),
       },
       defaulted: defaultedPaths(policy, raw),
       ...((layers) => (layers ? { manifestLayers: layers } : {}))(manifestLayers(view.baseDir)),
@@ -1957,7 +1959,7 @@ function emptyInput(policy: ViewPolicy, now: number, stateDir: string): Operator
     effective: {
       inputPolicy: policy.policy.inputPolicy ?? DEFAULT_INPUT_POLICY,
       stall: policy.policy.stallSweep ?? DEFAULT_STALL_SWEEP,
-      reviewRoundCap: reviewRoundCap(policy.policy),
+      reviewRoundCap: strictReviewRoundCap(policy.policy),
     },
     defaulted: defaultedPaths(policy.policy, policy.raw),
     ...((layers) => (layers ? { manifestLayers: layers } : {}))(manifestLayers(policy.baseDir)),

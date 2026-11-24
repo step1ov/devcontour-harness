@@ -16,6 +16,7 @@ import {
   digestOf,
   workGraphDigest,
   planContentDigest,
+  planOrderDigests,
   type Author,
   type ContextSnapshot,
   type ContractDocument,
@@ -399,12 +400,13 @@ export class Harness {
           ? { group: { id: subject, workIds: input.graph.orders.map((o) => o.id) } }
           : {}),
       },
-      maxRounds: reviewRoundCap(this.policy),
+      ...((cap) => (cap === null ? {} : { maxRounds: cap }))(reviewRoundCap(this.policy)),
       // Тот же план после одобренного раунда и доработка принятой работы —
       // не новые траты предела раундов (0.1.0-alpha.68).
       ...(input.kind === 'plan'
         ? ((since) => ({
             planDigest: planContentDigest(input.graph),
+            planOrders: planOrderDigests(input.graph),
             ...(since ? { roundEpoch: since } : {}),
           }))(this.engine.read((v) => planRoundEpoch(v, subject)))
         : {}),

@@ -84,6 +84,17 @@
       "type": "string",
       "pattern": "^[a-f0-9]{64}$"
     },
+    "planOrders": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "pattern": "^[A-Za-z0-9_-]{1,80}$"
+      },
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{64}$"
+      }
+    },
     "counted": {
       "type": "boolean"
     },
@@ -131,6 +142,32 @@
             "added",
             "removed",
             "changed"
+          ],
+          "additionalProperties": false
+        },
+        "orders": {
+          "type": "object",
+          "properties": {
+            "changed": {
+              "maxItems": 30,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,80}$"
+              }
+            },
+            "rework": {
+              "maxItems": 30,
+              "type": "array",
+              "items": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9_-]{1,80}$"
+              }
+            }
+          },
+          "required": [
+            "changed",
+            "rework"
           ],
           "additionalProperties": false
         }
