@@ -1105,8 +1105,11 @@ export class Runner {
   private history(attempt: AttemptState) {
     return this.engine.read((v) => v.attempts(attempt.workId));
   }
-  /** Попытки, чей исполнитель уже вызывался (P8-4: отказ до вызова — окружение). */
-  private writerCalled = new Set<string>();
+  /**
+   * Попытки, идущие в подготовке окружения на базе до кода исполнителя
+   * (P8-4, ревью alpha.70): отказ здесь — отказ окружения, не засчитан.
+   */
+  private preparing = new Set<string>();
   /** Поддержка протокола переходов находок адаптером reviewer, по runtime. */
   private protocols = new Map<RuntimeName, Promise<boolean>>();
   /**
@@ -1905,6 +1908,10 @@ export class Runner {
               repo.dependencyStore,
             ),
           );
+          // Подготовка окружения на базе (P8-4): до кода исполнителя. Взятый
+          // кандидат (`reusedFrom`) уже в дереве — его lifecycle исполняет
+          // код прежнего исполнителя, это не «до работы».
+          if (!attempt.reusedFrom) this.preparing.add(attempt.id);
           const candidate = await withEnvironment(
             repo.lifecycle ?? this.policy.lifecycle,
             cwd,
@@ -1931,6 +1938,8 @@ export class Runner {
                 ),
               );
               prepared(execution);
+              // Дальше — код исполнителя (черновик, установка его манифестов).
+              this.preparing.delete(attempt.id);
               // Черновик прежней попытки — до установки: манифесты, которые он
               // меняет, исполнитель увидит уже установленными.
               if (!attempt.reusedFrom)
@@ -2060,8 +2069,6 @@ export class Runner {
                         ),
                       );
                     const fork = await this.forkOf(attempt, work);
-                    // Исполнитель вызван: прежний отказ — уже не «до работы» (P8-4).
-                    this.writerCalled.add(attempt.id);
                     const response = await this.call(
                       this.adapter(attempt.runtime),
                       {
@@ -2449,11 +2456,17 @@ export class Runner {
         // (lifecycle, docker/compose, установка) упала, кандидата нет, writer
         // не вызывался — это отказ окружения, а не «неизвестно»: попытка не
         // засчитана, выдача держится как остановка окружения.
+        // Только отказ, случившийся во время подготовки на базе (lifecycle
+        // setup, хранилище зависимостей, prepare), у попытки без взятого или
+        // восстановленного кода исполнителя (по записанному состоянию).
+        const persisted = this.engine.read((v) => v.attempt(attempt.id));
         const preWriter =
           classified === 'unknown' &&
-          !this.writerCalled.has(attempt.id) &&
-          !this.engine.read((v) => v.attempt(attempt.id))?.candidateSha;
-        this.writerCalled.delete(attempt.id);
+          this.preparing.has(attempt.id) &&
+          !persisted?.reusedFrom &&
+          !persisted?.continuedFrom?.applied &&
+          !persisted?.candidateSha;
+        this.preparing.delete(attempt.id);
         const kind: FailureKind = preWriter ? 'environment' : classified;
         // Незакоммиченная работа сохраняется при любом отказе до кандидата:
         // по времени, «не закончил», обрыв. Иначе повтор начинал с пустого
