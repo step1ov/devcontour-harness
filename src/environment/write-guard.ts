@@ -160,10 +160,11 @@ export function guardedArgv(
       } catch {
         /* нет прав — каталог останется закрытым */
       }
-  const binds = entries.flatMap((e) => {
-    const p = 'subpath' in e ? e.subpath : e.prefix;
-    return ['--bind-try', p, p];
-  });
+  // Файл с префиксом (ссылка git и её `.lock`) привязкой не выразить: git
+  // пишет `.lock` и переименовывает. Открыт каталог файла (P8-1).
+  const binds = [
+    ...new Set(entries.map((e) => ('subpath' in e ? e.subpath : resolve(e.prefix, '..')))),
+  ].flatMap((p) => ['--bind-try', p, p]);
   // /proc — привязкой хоста, а не новым procfs: `--proc` требует своего
   // пространства PID, а PID остаются общими с хостом (ps, kill).
   return [
@@ -180,6 +181,57 @@ export function guardedArgv(
     ...binds,
     '--',
     ...argv,
+  ];
+}
+
+const gitOut = (cwd: string, args: string[]) =>
+  execFileSync('git', ['-C', cwd, ...args], {
+    encoding: 'utf8',
+    timeout: 10_000,
+    stdio: ['ignore', 'pipe', 'ignore'],
+  }).trim();
+
+/**
+ * Метаданные git рабочего дерева попытки (0.1.0-alpha.70, P8-1): gate или
+ * исполнитель, запускающий `git stash`, `git add`, `git commit`,
+ * `git checkout -- .`, пишет не только в само дерево. У связанного дерева
+ * (`git worktree add`) свой каталог `<common>/worktrees/<имя>` (index,
+ * index.lock, HEAD, logs/HEAD, ORIG_HEAD) — он открыт целиком. Из общего
+ * каталога репозитория открыто только нужное: `objects` (новые объекты
+ * add/stash/commit), ветка дерева (`refs/heads/<ветка>` и её журнал) и
+ * stash (`refs/stash`, `logs/refs/stash`; общий для всех деревьев
+ * репозитория). На Linux bubblewrap привязывает каталоги, не файлы с
+ * префиксом: там открыты каталоги этих ссылок (`refs/heads`, `logs/refs/heads`,
+ * `refs`, `logs/refs` — без `objects` других путей общего каталога нет).
+ * Основное рабочее дерево и прочие файлы `.git` (config, hooks, другие
+ * деревья) закрыты. Не связанное дерево (сам checkout репозитория) — ничего
+ * сверх него: его каталог git — общий каталог целиком.
+ */
+export function gitWorktreeGuardEntries(cwd: string): GuardEntry[] {
+  let gitDir: string;
+  let common: string;
+  try {
+    gitDir = realOr(gitOut(cwd, ['rev-parse', '--absolute-git-dir']));
+    const raw = gitOut(cwd, ['rev-parse', '--git-common-dir']);
+    common = realOr(resolve(cwd, raw));
+  } catch {
+    return [];
+  }
+  if (gitDir === common) return [];
+  let branch: string | undefined;
+  try {
+    branch = gitOut(cwd, ['symbolic-ref', '-q', 'HEAD']) || undefined;
+  } catch {
+    branch = undefined;
+  }
+  return [
+    { subpath: gitDir },
+    { subpath: join(common, 'objects') },
+    ...(branch?.startsWith('refs/heads/')
+      ? [{ prefix: join(common, branch) }, { prefix: join(common, 'logs', branch) }]
+      : []),
+    { prefix: join(common, 'refs', 'stash') },
+    { prefix: join(common, 'logs', 'refs', 'stash') },
   ];
 }
 

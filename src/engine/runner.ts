@@ -183,7 +183,7 @@ import {
 } from '../verification/dependencies.ts';
 import { CleanupFailure, cleanupEnvironment } from '../environment/lifecycle.ts';
 import { defaultResourceDatabase, withResources } from '../environment/resources.ts';
-import { guardEntries } from '../environment/write-guard.ts';
+import { gitWorktreeGuardEntries, guardEntries } from '../environment/write-guard.ts';
 import {
   attemptEnvFile,
   allocateAttemptPorts,
@@ -972,12 +972,19 @@ export class Runner {
           ...(!review && harnessModeOf(this.policy) === 'light'
             ? {
                 light: writeGuardActive(this.policy)
-                  ? {
-                      guard: guardEntries(this.policy, [
-                        input.cwd,
-                        ...(scratch ? [scratch] : []),
-                      ]).map((e) => ('subpath' in e ? e.subpath : e.prefix)),
-                    }
+                  ? (() => {
+                      // Дерево попытки и его метаданные git (P8-1).
+                      const entries = guardEntries(
+                        this.policy,
+                        [input.cwd, ...(scratch ? [scratch] : [])],
+                        gitWorktreeGuardEntries(input.cwd),
+                      );
+                      const prefixes = entries.flatMap((e) => ('prefix' in e ? [e.prefix] : []));
+                      return {
+                        guard: entries.flatMap((e) => ('subpath' in e ? [e.subpath] : [])),
+                        ...(prefixes.length ? { guardPrefixes: prefixes } : {}),
+                      };
+                    })()
                   : {},
               }
             : {}),

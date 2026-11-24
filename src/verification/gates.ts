@@ -29,7 +29,12 @@ import {
   writeGuardActive,
   NO_RETRY_GATE_CODES,
 } from '../contracts/index.ts';
-import { WriteGuardUnavailable, guardEntries, guardedArgv } from '../environment/write-guard.ts';
+import {
+  WriteGuardUnavailable,
+  gitWorktreeGuardEntries,
+  guardEntries,
+  guardedArgv,
+} from '../environment/write-guard.ts';
 import { ReapFailure, command, git, gitOutput, gitRawOutput } from '../environment/process.ts';
 import {
   isolation,
@@ -571,7 +576,15 @@ export async function runCheck(
       // процессы открыты. Временный каталог — свой (scratch).
       assertExecutable(argv[0]!, env.PATH, options.cwd);
       // Нет механизма — отказ среды, как недоступная изоляция строгого режима.
-      argv = guardedArgv(argv, guardEntries(h.config, [...options.write, scratch, marks]));
+      // Метаданные git дерева попытки (P8-1): gate с `git stash`/`checkout`.
+      argv = guardedArgv(
+        argv,
+        guardEntries(
+          h.config,
+          [...options.write, scratch, marks],
+          gitWorktreeGuardEntries(options.cwd),
+        ),
+      );
       env = { ...env, ...toolStateEnv(env, scratch), TMPDIR: scratch };
     } else if (strictSandbox(h.config)) {
       const support = isolationBackend.check();

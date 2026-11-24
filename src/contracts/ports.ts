@@ -233,7 +233,14 @@ export interface SandboxSpec {
    * своего CLI. Нет `guard` — без границы (`writeGuard.off` или
    * `isolation.mode: none`). Нет поля — прежняя изоляция.
    */
-  light?: { guard?: string[] };
+  light?: {
+    guard?: string[];
+    /**
+     * Файлы с префиксом пути, открытые на запись (0.1.0-alpha.70, P8-1):
+     * ссылки git дерева попытки в общем каталоге репозитория и их `.lock`.
+     */
+    guardPrefixes?: string[];
+  };
 }
 
 export interface RuntimeRequest {
