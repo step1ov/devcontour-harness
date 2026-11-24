@@ -556,7 +556,7 @@ export function renderTaskContext(
     `# Контекст задачи ${key} из Relay`,
     '',
     'Полное описание того, что реализует задача, прочитанное одним согласованным чтением Relay при снимке. ' +
-      'Это и есть постановка: читать Relay не нужно (из песочницы исполнителя он недоступен).',
+      'Это и есть постановка: читать Relay не нужно — снимок закреплён для ревью плана и приёмки.',
     '',
   ];
   const sections: TaskContextRecord['section'][] = [
@@ -630,6 +630,13 @@ export function buildSnapshot(input: {
   let contextBytes = 0;
   /** Контекст задач по идентичности: часть ревизии набора (новое согласование при правке FI/SI). */
   const contextBy: [string, string][] = [];
+  /**
+   * Контекст задачи в ревизии постановок (alpha.69): без записей, включённых
+   * только как документы задачи — их учёт уже есть (обязательные — в
+   * постановке, необязательные — `documentsDrift`); иначе записанный ответ
+   * владельца документом задачи делал бы согласование устаревшим.
+   */
+  const contextOrdersBy: [string, string][] = [];
   /** Документы требований, на которые контекст задачи ссылается вместо текста (alpha.68). */
   const requirementDocs: [string, string][] = [];
   /** Необязательные документы задач: ревизия набора (v2), не постановка задачи. */
@@ -841,6 +848,7 @@ export function buildSnapshot(input: {
       const fallback = (reason: string) => {
         taskContext = { status: 'too-large', reason };
         contextBy.push([identityOf, 'too-large']);
+        contextOrdersBy.push([identityOf, 'too-large']);
         missing.push({
           id: 'x' + sha256(identityOf + ':task-context').slice(0, 20),
           reason: `Контекст задачи ${task.key} из Relay не включён: ${reason}. Исполнитель получает задачу, критерии и документы задачи, но не описание функции и сценария`,
@@ -873,13 +881,29 @@ export function buildSnapshot(input: {
             digest: file.digest,
           };
           contextBy.push([identityOf, file.digest]);
+          contextOrdersBy.push([
+            identityOf,
+            digestOf(
+              outcome.context.records
+                .filter((r) => !r.reasons.every((x) => x.code === 'task-document'))
+                .map((r) => [r.section, r.kind, r.id, r.revision, r.title, r.summary, r.body]),
+            ),
+          ]);
           // Документ требований, который контекст задачи заменил ссылкой на
           // закреплённый документ задачи, — часть постановки: его содержание
           // входит в ревизию постановок (alpha.68). Ревизии набора v1/v2 —
           // прежние формулы: закреплённые прежними версиями снимки остаются
           // согласованными.
+          // Только документы, которые контекст включил не одним основанием
+          // «документ задачи» (например, документ цели): документ задачи сам
+          // по себе — обязательный или необязательный по настройке (alpha.69).
+          const beyondTask = new Set(
+            outcome.context.records
+              .filter((r) => !r.reasons.every((x) => x.code === 'task-document'))
+              .map((r) => r.id),
+          );
           const referenced = [...pinnedDocs]
-            .filter(([, path]) => text.includes(path))
+            .filter(([id, path]) => beyondTask.has(id) && text.includes(path))
             .map(([id]) => id)
             .sort();
           if (referenced.length)
@@ -1037,9 +1061,9 @@ export function buildSnapshot(input: {
         : {}),
       // Контекст задачи из backend: правка FI/SI, фичи, сценария, паспорта или
       // документа цели — новое согласование. Без контекста ревизия прежняя.
-      ...(contextBy.length
-        ? { taskContext: [...contextBy].sort(([a], [b]) => (a < b ? -1 : 1)) }
-        : {}),
+      ...((by) => (by.length ? { taskContext: [...by].sort(([a], [b]) => (a < b ? -1 : 1)) } : {}))(
+        v === 'orders' ? contextOrdersBy : contextBy,
+      ),
     });
   const revision = setRevision(2);
   const legacyRevision = setRevision(1);

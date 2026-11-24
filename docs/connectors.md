@@ -175,10 +175,18 @@ reviewer, `references/` закрепляется digest без вложения.
 
 ### Контекст исполнения задачи
 
-Исполнитель работает в песочнице без сети и Relay не читает. Если Relay
-объявляет capability `relay-task-context-v1` (`GET /context` проекта), снимок
-одним согласованным чтением `GET /board-tasks/{ref}/context?targetDocuments=…`
-берёт всё, что исполнителю нужно по задаче, и кладёт в пакет задачи файл
+Снимок закрепляет всё, что исполнителю нужно по задаче, — для ревью плана,
+согласования и приёмки. С 0.1.0-alpha.69 для этого достаточно обычной Relay
+0.13 без доработок: транспорт собирает контекст сам из её маршрутов —
+задача (`GET /board-tasks/{ref}`, явные цели «Реализует»), каждая цель и её
+фича, сценарий и приложение (`GET /entities/get`), паспорт продукта,
+неархивные документы задачи и целей (`GET /entities?kind=document&target=…&archived=false`).
+Согласованность без токена сервера: после сборки ревизии задачи и всех
+записей перечитываются (`GET /entities?refs=…`), расхождение — новая
+сборка; снимок дополнительно сверяет два раунда чтения. Если сервер
+объявляет capability `relay-task-context-v1`, тот же состав читается одним
+вызовом `GET /board-tasks/{ref}/context?targetDocuments=…`. Снимок кладёт в
+пакет задачи файл
 `relay-context.md`: цели задачи (реализации FI/SI, фичи, сценарии) с полным
 Markdown, фичи и сценарии этих целей, приложения, паспорт продукта и
 документы (документы задачи — ссылкой на уже закреплённый файл
@@ -196,13 +204,14 @@ Markdown, фичи и сценарии этих целей, приложения
   результата конфликтом не становится.
 - Ревизия задачи в ответе контекста сверяется с полным чтением задачи;
   несовпадение — раунд перечитывается, граф не собирается из разных редакций.
-- Пределы: `taskContext.maxBytes` на задачу и `taskContext.totalBytes` на
-  снимок; ответ больше предела или `CONTEXT_TOO_LARGE` Relay — задача идёт
+- Пределы: `taskContext.maxBytes` на задачу (текст записей при сборке на
+  клиенте; не больше 1000 записей) и `taskContext.totalBytes` на снимок;
+  больше предела или `CONTEXT_TOO_LARGE` Relay — задача идёт
   без контекста (как раньше: задача, критерии, документы задачи), с отметкой
   в `missing` снимка, в manifest (`tasks[].taskContext.status: too-large`) и в
   `task.md`. Усечённого контекста нет.
-- Без capability (Relay старше) или с `taskContext.mode: off` контекст не
-  читается, и снимок, ревизия и digest — те же, что до alpha.60.
+- С `taskContext.mode: off` контекст не читается, и снимок, ревизия и
+  digest — те же, что до alpha.60.
 - Другая версия формы ответа (`contractVersion` контекста не 1) —
   `CONNECTOR_VERSION_MISMATCH` с названием версий и что обновить.
 
@@ -214,13 +223,10 @@ Markdown, фичи и сценарии этих целей, приложения
 версий — [проверенные версии](compatibility-versions.md#relay-минимальная-и-рекомендуемая-версия).
 
 - `source-check`, `source-snapshot` и `source-status` возвращают
-  `compatibility` (`level`: `recommended` или `below-recommended`,
-  `taskContext`, `contractVersion`, `minimum`, `recommended`, `line`), а Relay
-  ниже рекомендуемой — предупреждение в `warnings`: «Relay без контекста
-  задачи: работаю без полного контекста задачи — исполнитель не получит
-  описание функции и сценария. Нужна Relay ≥ 0.14.0 (ожидается; до выпуска
-  подходит сборка 0.13.1-harness.1). Обновите Relay или продолжайте как
-  сейчас…». Это предупреждение, не отказ.
+  `compatibility` (`level`, `taskContext`, `taskContextSource` — `client`
+  (сборка harness) или `server` (маршрут Relay), `contractVersion`,
+  `minimum`, `recommended`, `line`). Рекомендуемая Relay — обычная 0.13.x:
+  предупреждения о версии Relay с alpha.69 нет.
 - `doctor --source <connector.json>` (или `connector.json` рядом с
   `--policy`) и `init` (`--source` или `.harness/connector.json`) сверяют
   Relay так же: `RELAY_COMPATIBILITY: …` в `warnings` doctor (и поле

@@ -606,12 +606,11 @@ first graph.
   then verifies the connection and warns; add tasks before the snapshot.
 
 The connector puts the full task context (FI/SI, their features and
-scenarios, application, product passport, documents) into the writer's pack
-when Relay declares `relay-task-context-v1`. When `source-check` returns a
-`warnings` line about Relay below the recommended version, tell the user
-that one line: the writer will not get the feature and scenario description
-until Relay is updated; continuing is their choice. In the product's
-AGENTS.md rule "read the task in Relay", the pack replaces the read.
+scenarios, application, product passport, documents) into the writer's pack.
+Any unmodified Relay 0.13.x is enough: the connector builds the context from
+the ordinary Relay routes (a server that declares `relay-task-context-v1` is
+read with one call); no Relay build with harness changes is needed. In the
+product's AGENTS.md rule "read the task in Relay", the pack replaces the read.
 
 Checks that do not write to Relay:
 

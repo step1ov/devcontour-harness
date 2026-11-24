@@ -2,8 +2,6 @@ import '../temp-scope.ts';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, realpathSync, rmSync } from 'node:fs';
-import { createServer, request } from 'node:http';
-import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, describe, it } from 'node:test';
@@ -16,10 +14,11 @@ import { baseInput } from '../operator-view-input.ts';
 import { relayServerModule, type RelayFixture } from './relay-v1-backend.ts';
 
 /*
- * alpha.60 против НАСТОЯЩЕГО Relay с контекстом исполнения задачи
- * (`relay-task-context-v1`; сборка с этой capability — DC_RELAY_V1_BUILD).
- * Сервер старше (без capability) моделирует прокси, убирающий её из
- * `GET /context`: те же данные, прежняя связка. Нет сборки — BLOCKED.
+ * Контекст задачи против НАСТОЯЩЕГО Relay 0.13 без доработок (сборка
+ * DC_RELAY_V1_BUILD на d692b5b, без `relay-task-context-v1`): с 0.1.0-alpha.69
+ * контекст собирает транспорт harness из обычных маршрутов (задача,
+ * `entities/get`, документы по цели) — тот же relay-context.md. Нет сборки —
+ * BLOCKED.
  */
 
 type Fixture = RelayFixture & { config: string; buildDir: string };
@@ -55,38 +54,6 @@ const refOf = (kind: string, key: string) => {
 };
 const relations = (kind: string, id: string) =>
   JSON.stringify([{ target: { kind, id }, type: 'references', description: '' }]);
-
-/** Прокси «Relay старше»: те же данные, без capability контекста в `GET /context`. */
-async function olderRelay(target: string) {
-  const t = new URL(target);
-  const server = createServer((req, res) => {
-    const up = request(
-      { host: t.hostname, port: t.port, method: req.method, path: req.url, headers: req.headers },
-      (upRes) => {
-        const chunks: Buffer[] = [];
-        upRes.on('data', (c: Buffer) => chunks.push(c));
-        upRes.on('end', () => {
-          let body = Buffer.concat(chunks).toString('utf8');
-          if (/\/context$/.test(new URL(req.url ?? '/', 'http://x').pathname)) {
-            const j = JSON.parse(body) as { data: { capabilities?: string[] } };
-            j.data.capabilities = j.data.capabilities?.filter((c) => c !== 'relay-task-context-v1');
-            body = JSON.stringify(j);
-          }
-          const headers = { ...upRes.headers };
-          delete headers['content-length'];
-          res.writeHead(upRes.statusCode ?? 502, headers);
-          res.end(body);
-        });
-      },
-    );
-    req.pipe(up);
-  });
-  await new Promise<void>((r) => server.listen(0, '127.0.0.1', r));
-  return {
-    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
-    close: () => new Promise<void>((r) => server.close(() => r())),
-  };
-}
 
 const configFor = (endpoint: string, extra: Record<string, unknown> = {}) =>
   parseConfig(
@@ -236,6 +203,7 @@ void describe('alpha.60: Relay с контекстом задачи (насто�
     try {
       const report = await c.check();
       assert.equal(report.compatibility?.level, 'recommended');
+      assert.equal(report.compatibility?.taskContextSource, 'client');
       assert.equal(report.compatibility?.contractVersion, 1);
       assert.equal(report.mapping[0]?.taskContext, 'included');
       assert.equal(report.warnings, undefined);
@@ -317,36 +285,19 @@ void describe('alpha.60: Relay с контекстом задачи (насто�
     }
   });
 
-  it('Relay старше (без capability): связка работает как прежде, предупреждение простыми словами', async () => {
-    const proxy = await olderRelay(srv.url);
+  it('taskContext.mode: off — контекста нет, предупреждения о версии Relay нет', async () => {
+    const off = await openConnector(configFor(srv.url, { taskContext: { mode: 'off' } }), {
+      stateDir: join(root, 'state-off'),
+    });
     try {
-      const old = await openConnector(configFor(proxy.url), { stateDir: join(root, 'state-old') });
-      const off = await openConnector(configFor(srv.url, { taskContext: { mode: 'off' } }), {
-        stateDir: join(root, 'state-off'),
-      });
-      try {
-        const report = await old.check();
-        assert.equal(report.compatibility?.level, 'below-recommended');
-        assert.match(
-          report.warnings![0]!,
-          /работаю без полного контекста задачи — исполнитель не получит описание функции и сценария/,
-        );
-        const a = await old.source.snapshot();
-        const b = await off.source.snapshot();
-        assert.ok(!a.context.sources[0]!.files.some((f) => f.path === TASK_CONTEXT_FILE));
-        assert.equal(
-          a.revision,
-          b.revision,
-          'без capability — та же ревизия, что у выключенного контекста',
-        );
-        assert.equal(a.manifest.contextDigest, b.manifest.contextDigest);
-        assert.equal(a.manifest.tasks[0]!.taskContext, undefined);
-      } finally {
-        old.close();
-        off.close();
-      }
+      const report = await off.check();
+      assert.equal(report.compatibility?.level, 'recommended');
+      assert.equal(report.compatibility?.taskContextUsed, false);
+      const snap = await off.source.snapshot();
+      assert.ok(!snap.context.sources[0]!.files.some((f) => f.path === TASK_CONTEXT_FILE));
+      assert.equal(snap.manifest.tasks[0]!.taskContext, undefined);
     } finally {
-      await proxy.close();
+      off.close();
     }
   });
 });

@@ -468,6 +468,12 @@ test('H3-01: прежние команды и схемы их данных не 
   // Порядок ключей cliDataSchemas H2 — без capabilities; аддитивные значения
   // перечней убираются, остальное — байты H2.
   const h2 = JSON.stringify(data, (k, v: unknown) => {
+    // Откуда контекст задачи Relay (0.1.0-alpha.69).
+    if (k === 'properties' && v && typeof v === 'object' && 'taskContextUsed' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.taskContextSource;
+      v = rest;
+    }
     // Облегчённый режим (0.1.0-alpha.69): режим, граница записи, порты
     // попытки, приёмка выпуска, шлюз и UI gates в политике.
     if (k === 'properties' && v && typeof v === 'object' && 'policyVersion' in v) {

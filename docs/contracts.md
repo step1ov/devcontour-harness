@@ -1844,10 +1844,9 @@ view` в сеть не ходит. Тексты маскируются и обр
   нет. Не больше 50 (`truncated.sourceQuestions`).
 - `health.sources[] {connector, provider, level?, taskContext?,
 contractVersion?, line?, checkedAt}` — совместимость с Relay по последнему
-  наблюдению связки: `level` (`recommended`, `below-recommended`), объявил ли
-  Relay контекст задачи, версия договора REST и строка простыми словами
-  («Relay без контекста задачи: исполнитель не получит описание функции и
-  сценария; нужна Relay ≥ 0.14.0»).
+  наблюдению связки: `level` (`recommended`, `below-recommended`), есть ли
+  контекст задачи (с alpha.69 — у любой Relay 0.13: его собирает harness),
+  версия договора REST и строка простыми словами.
 - `questions[].options[] {id, label, recommended?}` и `questions[].rationale`
   — варианты ответа с рекомендуемым и обоснование исполнителя, как в `harness
 input-show` (маскируются, обрезаются до 200 символов; с `--no-titles` их

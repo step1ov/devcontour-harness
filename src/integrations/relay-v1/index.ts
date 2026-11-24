@@ -221,6 +221,35 @@ const taskContextSchema = z.object({
   consistency: z.string().min(1).max(500),
   complete: z.literal(true),
 });
+/**
+ * Контекст задачи на клиенте (alpha.69): поля, которые Relay 0.13 уже отдаёт
+ * по `GET /board-tasks/:ref` (явные цели «Реализует») и `GET /entities/get`
+ * (полная запись). Лишние поля backend допустимы.
+ */
+const taskLinksSchema = z.object({
+  id: idString,
+  key: z.string(),
+  revision: revisionSchema,
+  productLinks: z.array(refSchema).max(100).optional(),
+});
+const contextEntitySchema = z.object({
+  ref: refSchema,
+  key: z.string(),
+  title: z.string(),
+  summary: z.string().optional(),
+  revision: revisionSchema,
+  data: z.object({
+    kind: z.string().optional(),
+    description: z.string().optional(),
+    body: z.string().optional(),
+    featureId: z.string().nullable().optional(),
+    scenarioId: z.string().nullable().optional(),
+    applicationId: z.string().nullable().optional(),
+  }),
+});
+const entityRevisionSchema = z.object({ ref: refSchema, revision: revisionSchema });
+/** Предел записей клиентского контекста (как у сервера Relay): больше — `too-large`. */
+export const TASK_CONTEXT_RECORD_LIMIT = 1000;
 const questionSummarySchema = entitySummarySchema.extend({
   title: z.string(),
   updatedAt: z.string().optional(),
@@ -374,7 +403,8 @@ interface CallOptions {
   method: 'GET' | 'POST';
   /** Путь относительно `/api/v1/projects/{p}` (или абсолютный `/api/v1/...` при `root`). */
   path: string;
-  query?: Record<string, string | number | boolean | undefined>;
+  /** Массив — повтор параметра (`refs=a&refs=b`). */
+  query?: Record<string, string | number | boolean | string[] | undefined>;
   body?: Record<string, unknown>;
   root?: boolean;
   signal?: AbortSignal | undefined;
@@ -426,7 +456,8 @@ export class RelayV1Transport implements RelayTransport {
     const prefix = o.root ? '' : `/api/v1/projects/${encodeURIComponent(this.settings.projectId)}`;
     const u = new URL(`${this.base}${prefix}${o.path}`);
     for (const [k, v] of Object.entries(o.query ?? {}))
-      if (v !== undefined) u.searchParams.set(k, String(v));
+      if (Array.isArray(v)) for (const item of v) u.searchParams.append(k, item);
+      else if (v !== undefined) u.searchParams.set(k, String(v));
     return u.toString();
   }
 
@@ -960,8 +991,255 @@ export class RelayV1Transport implements RelayTransport {
     options: { targetDocuments: boolean; maxBytes: number },
     signal?: AbortSignal,
   ): Promise<TaskContextOutcome> {
+    // Сервер с готовым маршрутом контекста — одно чтение; иначе (Relay
+    // 0.13 без доработок) контекст собирает сам транспорт из обычных
+    // маршрутов — тот же состав и та же форма (alpha.69).
+    const caps = await this.capabilityList('task.context', signal);
+    if (!caps.includes(TASK_CONTEXT_CAPABILITY))
+      return this.buildTaskContext(ref, options, signal);
+    return this.readNativeTaskContext(ref, options, signal);
+  }
+
+  /**
+   * Контекст задачи на клиенте из маршрутов Relay 0.13: задача (явные цели
+   * «Реализует»), каждая цель FI/SI, её фича, сценарий и приложение
+   * (`GET /entities/get`), паспорт продукта, неархивные документы задачи и,
+   * с `targetDocuments`, её целей (`GET /entities?kind=document&target=…`).
+   * Состав и основания — как у маршрута `relay-task-context-v1`. Согласованность
+   * без токена сервера: после сборки ревизии задачи и всех записей читаются
+   * заново (`GET /entities?refs=…`); расхождение — новая сборка (до
+   * `maxReadRetries` раз), а снимок дополнительно сверяет два раунда.
+   */
+  private async buildTaskContext(
+    ref: string,
+    options: { targetDocuments: boolean; maxBytes: number },
+    signal?: AbortSignal,
+  ): Promise<TaskContextOutcome> {
+    let last: TaskContextOutcome | undefined;
+    for (let attempt = 0; attempt <= this.maxReadRetries; attempt++) {
+      const built = await this.buildTaskContextOnce(ref, options, signal);
+      if (built.outcome.status === 'too-large') return built.outcome;
+      last = built.outcome;
+      if (await this.contextStable(built.task, built.revisions, signal)) return built.outcome;
+    }
+    return last!;
+  }
+
+  private async buildTaskContextOnce(
+    ref: string,
+    options: { targetDocuments: boolean; maxBytes: number },
+    signal?: AbortSignal,
+  ): Promise<{
+    outcome: TaskContextOutcome;
+    task: { id: string; revision: number };
+    revisions: Map<string, { kind: string; id: string; revision: number }>;
+  }> {
     const op = 'task.context';
-    await this.requireCapability(op, TASK_CONTEXT_CAPABILITY, signal);
+    const task = await this.call(op, taskLinksSchema, {
+      method: 'GET',
+      path: `/board-tasks/${this.enc(ref)}`,
+      signal,
+    });
+    type Section = TaskContextRecord['section'];
+    type Entity = z.output<typeof contextEntitySchema>;
+    const address = (r: { kind: string; id: string }) => `${r.kind}:${r.id}`;
+    const included = new Map<
+      string,
+      { section: Section; entity: Entity; reasons: { code: string; from: string | null }[] }
+    >();
+    let bytes = 0;
+    const tooLarge = (reason: string) => ({
+      outcome: { status: 'too-large' as const, reason },
+      task: { id: task.id, revision: task.revision },
+      revisions: new Map<string, { kind: string; id: string; revision: number }>(),
+    });
+    class TooLarge extends Error {}
+    const get = (r: { kind: string; id: string }) =>
+      this.call(op, contextEntitySchema, {
+        method: 'GET',
+        path: '/entities/get',
+        query: { ref: r.id, kind: r.kind },
+        signal,
+      });
+    const include = async (
+      r: { kind: string; id: string },
+      section: Section,
+      reason: { code: string; from: { kind: string; id: string } | null },
+      known?: Entity,
+    ): Promise<Entity> => {
+      const from = reason.from ? address(reason.from) : null;
+      const existing = included.get(address(r));
+      if (existing) {
+        if (!existing.reasons.some((x) => x.code === reason.code && x.from === from))
+          existing.reasons.push({ code: reason.code, from });
+        return existing.entity;
+      }
+      if (included.size >= TASK_CONTEXT_RECORD_LIMIT)
+        throw new TooLarge(`записей контекста больше предела ${TASK_CONTEXT_RECORD_LIMIT}`);
+      const entity = known ?? (await get(r));
+      bytes += Buffer.byteLength(
+        (entity.data.description ?? '') + (entity.data.body ?? '') + entity.title,
+        'utf8',
+      );
+      if (bytes > options.maxBytes)
+        throw new TooLarge(`контекст задачи больше предела taskContext.maxBytes=${options.maxBytes}`);
+      included.set(address(entity.ref), { section, entity, reasons: [{ code: reason.code, from }] });
+      return entity;
+    };
+    const taskRef = { kind: 'task', id: task.id };
+    try {
+      // Цели и их владельцы: FI → фича (и сценарий), приложение; SI-сценарий → фича.
+      const targets: Entity[] = [];
+      for (const link of task.productLinks ?? [])
+        targets.push(await include(link, 'target', { code: 'task-target', from: taskRef }));
+      const owners: Entity[] = [];
+      for (const target of targets) {
+        const d = target.data;
+        const from = target.ref;
+        if (d.kind === 'implementation') {
+          if (d.featureId)
+            owners.push(
+              await include({ kind: 'feature', id: d.featureId }, 'requirement', {
+                code: 'target-feature',
+                from,
+              }),
+            );
+          if (d.scenarioId)
+            owners.push(
+              await include({ kind: 'scenario', id: d.scenarioId }, 'requirement', {
+                code: 'target-scenario',
+                from,
+              }),
+            );
+          if (d.applicationId)
+            owners.push(
+              await include({ kind: 'application', id: d.applicationId }, 'application', {
+                code: 'target-application',
+                from,
+              }),
+            );
+        }
+        if (d.kind === 'scenario' && d.featureId)
+          owners.push(
+            await include({ kind: 'feature', id: d.featureId }, 'requirement', {
+              code: 'target-feature',
+              from,
+            }),
+          );
+      }
+      try {
+        const passport = await get({ kind: 'product', id: 'passport' });
+        await include(passport.ref, 'product', { code: 'product-passport', from: null }, passport);
+      } catch (error) {
+        if (!(error instanceof TransportError && error.details.code === 'ENTITY_NOT_FOUND'))
+          throw error;
+      }
+      // Неархивные документы, прикреплённые к задаче, и — по настройке — к целям.
+      const attached = async (owner: { kind: string; id: string }, code: string) => {
+        const list = await this.pages(
+          op,
+          entityRevisionSchema,
+          '/entities',
+          { kind: 'document', target: owner.id, archived: 'false' },
+          signal,
+        );
+        for (const item of list.items) await include(item.ref, 'document', { code, from: owner });
+      };
+      await attached(taskRef, 'task-document');
+      if (options.targetDocuments) {
+        const seen = new Set<string>();
+        for (const { ref: r } of [...targets, ...owners])
+          if (!seen.has(address(r))) {
+            seen.add(address(r));
+            await attached(r, 'target-document');
+          }
+      }
+    } catch (error) {
+      if (error instanceof TooLarge) return tooLarge(error.message);
+      if (
+        error instanceof TransportError &&
+        (error.details.code === RESPONSE_LIMIT || error.details.code === 'CONTEXT_TOO_LARGE')
+      )
+        return tooLarge(`ответ Relay больше предела: ${error.message}`);
+      throw error;
+    }
+    const keys = new Map<string, string>([[address(taskRef), task.key]]);
+    for (const [k, v] of included) keys.set(k, v.entity.key);
+    const order: Section[] = ['target', 'requirement', 'application', 'product', 'document'];
+    const records: TaskContextRecord[] = order.flatMap((section) =>
+      [...included.values()]
+        .filter((e) => e.section === section)
+        .map(({ entity, reasons }) => ({
+          section,
+          kind: entity.ref.kind,
+          id: entity.ref.id,
+          key: entity.key,
+          title: entity.title,
+          revision: entity.revision,
+          summary: entity.summary ?? '',
+          body: entity.data.description ?? entity.data.body ?? '',
+          reasons: reasons.map((x) => ({
+            code: x.code,
+            from: x.from ? (keys.get(x.from) ?? x.from.split(':').slice(1).join(':')) : null,
+          })),
+        })),
+    );
+    const revisions = new Map(
+      [...included.values()].map((e) => [
+        address(e.entity.ref),
+        { kind: e.entity.ref.kind, id: e.entity.ref.id, revision: e.entity.revision },
+      ]),
+    );
+    return {
+      outcome: {
+        status: 'ok',
+        context: {
+          contractVersion: TASK_CONTEXT_CONTRACT_VERSION,
+          consistency: 'client-v1:' + digest([task.revision, options.targetDocuments, records]),
+          taskRevision: task.revision,
+          records,
+        },
+      },
+      task: { id: task.id, revision: task.revision },
+      revisions,
+    };
+  }
+
+  /** Ревизии задачи и записей контекста не изменились после сборки. */
+  private async contextStable(
+    task: { id: string; revision: number },
+    revisions: Map<string, { kind: string; id: string; revision: number }>,
+    signal?: AbortSignal,
+  ) {
+    const op = 'task.context';
+    const now = await this.call(op, taskLinksSchema, {
+      method: 'GET',
+      path: `/board-tasks/${this.enc(task.id)}`,
+      signal,
+    });
+    if (now.revision !== task.revision) return false;
+    const all = [...revisions.values()];
+    for (let i = 0; i < all.length; i += 100) {
+      const chunk = all.slice(i, i + 100);
+      const page = await this.call(op, offsetPage(entityRevisionSchema), {
+        method: 'GET',
+        path: '/entities',
+        query: { refs: chunk.map((r) => r.id), limit: 100 },
+        signal,
+      });
+      const seen = new Map(page.items.map((x) => [`${x.ref.kind}:${x.ref.id}`, x.revision]));
+      if (chunk.some((r) => seen.get(`${r.kind}:${r.id}`) !== r.revision)) return false;
+    }
+    return true;
+  }
+
+  /** Контекст одним чтением маршрута `relay-task-context-v1` (сервер его объявил). */
+  private async readNativeTaskContext(
+    ref: string,
+    options: { targetDocuments: boolean; maxBytes: number },
+    signal?: AbortSignal,
+  ): Promise<TaskContextOutcome> {
+    const op = 'task.context';
     let raw: unknown;
     try {
       raw = await this.call(op, z.unknown(), {

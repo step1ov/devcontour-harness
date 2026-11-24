@@ -128,7 +128,7 @@ const question: SourceQuestionRecord = {
   updatedAt: '2026-11-20T10:00:00.000Z',
 };
 
-test('alpha.60: без capability контекста снимок прежний и контекст не читается', async () => {
+test('alpha.69: без capability сервера контекст всё равно читается (его собирает транспорт); выключенный — нет', async () => {
   const s = await scenario(fakeSuiteBackend());
   try {
     const plain = await openConnector(s.loaded(), {
@@ -137,16 +137,16 @@ test('alpha.60: без capability контекста снимок прежний
     });
     const before = await plain.source.snapshot();
     plain.close();
+    // Relay 0.13 без маршрута контекста: транспорт собирает контекст сам,
+    // связка читает его так же (alpha.69), уровень — рекомендуемый.
     const noCap = contextual(s.project.transport(), { caps: [] });
     const a = await openConnector(s.loaded(), { stateDir: s.state, transport: noCap.transport });
     const same = await a.source.snapshot();
     a.close();
-    assert.equal(noCap.seen.length, 0, 'без capability route контекста не вызывается');
-    assert.equal(same.revision, before.revision);
-    assert.equal(same.manifest.graphDigest, before.manifest.graphDigest);
-    assert.equal(same.manifest.contextDigest, before.manifest.contextDigest);
-    assert.equal(same.manifest.tasks[0]!.taskContext, undefined);
-    assert.equal(same.manifest.compatibility?.level, 'below-recommended');
+    assert.ok(noCap.seen.length > 0, 'контекст читается и без capability сервера');
+    assert.ok(same.manifest.tasks[0]!.taskContext, 'контекст закреплён в снимке');
+    assert.equal(same.manifest.compatibility?.level, 'recommended');
+    assert.equal(same.manifest.compatibility?.taskContextSource, 'client');
 
     // Выключено в конфигурации: capability есть, но контекст не читается.
     const cfg = structuredClone(s.config) as Record<string, unknown>;
@@ -337,13 +337,11 @@ test('alpha.60: связка без задач — source-check проходит
     assert.equal(report.connected, true);
     assert.deepEqual(report.problems, []);
     assert.deepEqual(report.mapping, []);
-    assert.equal(report.warnings?.length, 2, 'Relay без контекста и нет задач');
+    // Предупреждения о Relay без контекста больше нет (alpha.69): только «нет задач».
+    assert.equal(report.warnings?.length, 1, 'нет задач');
     const warnings = (report.warnings ?? []).join('\n');
     assert.match(warnings, /нет задач/);
-    assert.match(
-      warnings,
-      new RegExp(`Relay ≥ ${RELAY_TASK_CONTEXT_VERSION.replace(/\./g, '\\.')}`),
-    );
+    assert.doesNotMatch(warnings, /без контекста/);
     await assert.rejects(
       c.snapshot(join(s.root, 'x')),
       (e: unknown) =>
@@ -357,13 +355,14 @@ test('alpha.60: связка без задач — source-check проходит
 
 test('alpha.60: совместимость Relay — уровни и строки; несовместимый договор — именованная причина для doctor', async () => {
   const base = { provider: 'relay-v1-http' as const, build: { contractVersion: '1' } };
+  // Обычная Relay 0.13 — рекомендуемая: контекст собирает harness (alpha.69).
   const none = relayCompatibility({ ...base, capabilities: [] })!;
-  assert.equal(none.level, 'below-recommended');
-  assert.match(
-    none.line,
-    /работаю без полного контекста задачи — исполнитель не получит описание функции и сценария/,
-  );
-  assert.match(none.line, /0\.13\.1-harness\.1/);
+  assert.equal(none.level, 'recommended');
+  assert.equal(none.taskContextUsed, true);
+  assert.equal(none.taskContextSource, 'client');
+  assert.equal(none.recommended, RELAY_TASK_CONTEXT_VERSION);
+  assert.equal(RELAY_TASK_CONTEXT_VERSION, '0.13.0');
+  assert.match(none.line, /собирает harness из маршрутов Relay 0\.13/);
   const full = relayCompatibility({ ...base, capabilities: [RELAY_TASK_CONTEXT_CAPABILITY] })!;
   assert.equal(full.level, 'recommended');
   assert.equal(full.taskContextUsed, true);
@@ -381,8 +380,9 @@ test('alpha.60: совместимость Relay — уровни и строк�
       stateDir: s.state,
       transport: contextual(s.project.transport(), { caps: [] }).transport,
     });
-    assert.equal(ok.compatibility?.level, 'below-recommended');
-    assert.match(ok.warning!, /нужна Relay|Нужна Relay/);
+    // Relay 0.13 без capability — рекомендуемая, предупреждения нет (alpha.69).
+    assert.equal(ok.compatibility?.level, 'recommended');
+    assert.equal(ok.warning, undefined);
     const mismatch = new Proxy(s.project.transport(), {
       get(target, prop) {
         if (prop === 'identity')

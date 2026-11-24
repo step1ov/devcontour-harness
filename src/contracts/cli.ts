@@ -2557,6 +2557,8 @@ export const relayCompatibilitySchema = z.strictObject({
   provider: z.literal('relay-v1-http'),
   contractVersion: z.number().int().nullable(),
   taskContext: z.boolean(),
+  /** alpha.69: откуда контекст — маршрут сервера или сборка harness из маршрутов Relay 0.13. */
+  taskContextSource: z.enum(['server', 'client']).optional(),
   taskContextUsed: z.boolean(),
   level: z.enum(['recommended', 'below-recommended']),
   minimum: z.string(),
