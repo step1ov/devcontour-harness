@@ -48,7 +48,15 @@ process.env.HARNESS_BROWSER_HEADLESS !== '0'`), берёт адрес прило
 {
   "id": "mobile-e2e",
   "kind": "check",
-  "command": ["maestro", "test", "--format", "junit", "--output", "test-results/maestro.xml", "flows/"],
+  "command": [
+    "maestro",
+    "test",
+    "--format",
+    "junit",
+    "--output",
+    "test-results/maestro.xml",
+    "flows/"
+  ],
   "resources": ["sim-1"],
   "ui": {
     "type": "mobile",
