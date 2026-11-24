@@ -882,7 +882,7 @@ export class Runner {
   private async call(
     adapter: RuntimeAdapter,
     input: {
-      task: 'implement' | 'review-code';
+      task: 'implement' | 'review-code' | 'review-refute';
       attempt: AttemptState;
       cwd: string;
       prompt: string;
@@ -3700,7 +3700,7 @@ export class Runner {
       response = await this.call(
         this.adapter(attempt.reviewer),
         {
-          task: 'review-code',
+          task: 'review-refute',
           attempt,
           cwd: input.cwd,
           dir,

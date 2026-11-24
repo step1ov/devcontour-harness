@@ -208,7 +208,12 @@ export interface ExecutionStore {
 /* RuntimeAdapter                                                      */
 /* ------------------------------------------------------------------ */
 
-export type RuntimeTask = 'implement' | 'review-code' | 'review-plan' | 'review-contract' | 'plan';
+/**
+ * Задача вызова. `review-refute` (0.1.0-alpha.70) — второй проход ревью:
+ * reviewer только читает, ответ — `refuteResultSchema`.
+ */
+export type RuntimeTask =
+  'implement' | 'review-code' | 'review-refute' | 'review-plan' | 'review-contract' | 'plan';
 
 export interface SandboxSpec {
   mode: 'os' | 'none';

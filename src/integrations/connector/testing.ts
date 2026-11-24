@@ -290,6 +290,12 @@ export function fixtureAdapters(
       runtime: 'codex',
       capabilities: capabilities('codex'),
       invoke: (request) => {
+        // Второй проход ревью (alpha.70): подтверждает все находки первого,
+        // в счёт вызовов reviewer не входит.
+        if (request.task === 'review-refute')
+          return Promise.resolve(
+            respond({ summary: 'fixture: confirmed', verdicts: [], missed: [] }),
+          );
         calls.reviewer++;
         if (request.task === 'review-plan') calls.plan++;
         const reject = behaviour.reviewer === 'reject' && request.task === 'review-code';

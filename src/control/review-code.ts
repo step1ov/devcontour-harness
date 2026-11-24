@@ -481,7 +481,7 @@ export async function reviewBranch(
             adapter,
             {
               callId: randomUUID(),
-              task: 'review-code',
+              task: 'review-refute',
               binding: choice.reviewer,
               cwd,
               prompt: prompt + '\n\n' + refutePromptText(blocking, choice2.mode),
