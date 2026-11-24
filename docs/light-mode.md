@@ -12,7 +12,7 @@
 | Изоляция попыток друг от друга       | своё дерево, своё имя проекта compose, свои порты                                | своё дерево, песочница                                  |
 | Работы инфраструктуры, `gateChanges` | не нужны (доступны)                                                              | нужны для `.harness/` и gates                           |
 | Ревью плана                          | раунды без предела; бюджет — время и стоимость выпуска                           | предел раундов                                          |
-| Приёмка выпуска                      | обязательна перед `release done`                                                 | совет (`release.review: required` включает)             |
+| Приёмка выпуска                      | обязательна перед `release done`                                                 | обязательна перед `release done`                        |
 
 Политика без `harnessMode` — облегчённая. Строгий режим — явный выбор
 владельца (`"harnessMode": "strict"` или `harness init --harness-mode
@@ -67,7 +67,11 @@ strict`) для чужого кода или секретов production. Стр
 `~/Library/Logs/CoreSimulator`, `~/Library/Developer/Xcode/DerivedData`,
 `~/.android`, `~/.gradle`, каталоги пользователя macOS
 `$DARWIN_USER_CACHE_DIR` и `$DARWIN_USER_TEMP_DIR` (Chrome создаёт во
-временном каталоге пользователя сокет профиля).
+временном каталоге пользователя сокет профиля). Значит, общий временный
+каталог пользователя macOS (системный `$TMPDIR`) открыт на запись — это
+принятая цена облегчённого режима; убрать его — `writeGuard.replace` без
+`$DARWIN_USER_TEMP_DIR` (тогда системный Chrome не стартует, Playwright —
+стартует).
 
 ```json
 "writeGuard": { "add": ["~/.cache/my-tool"] }

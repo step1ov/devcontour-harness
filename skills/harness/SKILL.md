@@ -305,7 +305,8 @@ Never call library internals (`Engine.approve`, store writes) to approve.
 added, removed, or changed in text, criteria, dependencies, write scope,
 kind, repository or required context. Reworks of accepted works, your
 diagnoses and addenda, owner answers and other context, source revisions,
-policy and reviewer changes are free. In light mode there is no round limit
+policy and reviewer changes are free, for plan and contract reviews alike.
+In light mode there is no round limit (plan or contract)
 at all — the budget is release time and cost (`budgets.group` /
 `budgets.total`; `doctor` warns `light-no-budget` without one), and raising
 it stays the owner's decision.
@@ -839,13 +840,17 @@ connector — is invisible unless you say it:
 --state <state>` (up to 200 characters; no secrets, no paths, no logs).
 - When all code is accepted, run the **release acceptance review**
   (`<pkg>/docs/release-review.md`):
-  `$H review-release --state <state> [--base <release base>]`. An independent
+  `$H review-release --state <state>`. The release base is recorded at the
+  first graph registration of the release or at `lead outline` (see
+  `status` → `releaseReview.base`); pass `--base` only to override it. An independent
   reviewer checks the accepted target against the brief, acceptance criteria,
   owner answers and the deploy topology (`release.topology`: gateway/proxy
   configs, production env files). Blocking findings are fixed by works (plan
-  them like any task), then run `review-release` again on the new target. In
-  light mode (or with `release.review: required`) `release done` refuses
-  until the latest round on the current target is approved.
+  them like any task), then run `review-release` again on the new target.
+  `release done` refuses in both modes until the latest round on the current
+  target is approved without blocking findings (only an explicit
+  `release.review: advisory` makes it a warning); open non-blocking notes do
+  not hold the release — mention them in the report.
 - When all code is accepted, delivered and checked, write the final report:
   `$H release done --state <state> --summary "<what was done, what is left>"`.
   Until then the view says «код принят, ведущий ещё работает: <your last
