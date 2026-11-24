@@ -452,9 +452,20 @@ export async function reviewBranch(
         throw new HarnessError('BUDGET_EXHAUSTED', error.message);
       throw error;
     });
+    const dirty = await git(
+      cwd,
+      'status',
+      '--porcelain',
+      '--untracked-files=all',
+      '--ignored',
+    ).catch(() => '(git status не ответил)');
+    const now = await git(cwd, 'rev-parse', 'HEAD').catch(() => '');
+    if (dirty || now !== head)
+      mutated = `reviewer изменил рабочее дерево обзора${now !== head ? ' (HEAD сдвинут)' : ''}`;
     // Второй проход приёмки выпуска (alpha.70, умолчание `always`): свежий
-    // вызов reviewer опровергает блокирующие находки и ищет пропущенные.
-    if (release && response.status === 'ok') {
+    // вызов reviewer опровергает блокирующие находки и ищет пропущенные —
+    // в своём detached-дереве head: его изменения не трогают первый проход.
+    if (release && response.status === 'ok' && !mutated) {
       const first = reviewResultSchema.safeParse(response.output);
       const choice2 = reviewPassModeOf(policy.review.passes, { kind: 'release' });
       if (first.success && !reviewIssues(first.data, open).length) {
@@ -476,47 +487,57 @@ export async function reviewBranch(
         )
           passes = choice2.mode === 'off' ? undefined : { ...record0, status: 'skipped' };
         else {
-          const refute = await measuredInvoke(
-            engine,
-            adapter,
-            {
-              callId: randomUUID(),
-              task: 'review-refute',
-              binding: choice.reviewer,
-              cwd,
-              prompt: prompt + '\n\n' + refutePromptText(blocking, choice2.mode),
-              outputSchema: refuteOutputSchema,
-              session: { kind: 'fresh' },
-              sandbox: {
-                mode: policy.isolation.mode,
-                writable: [],
-                denied: hidden,
-                ...(placement.root ? { checkouts: [placement.root] } : {}),
-                readable: [cwd, ...repos.map((r) => join(r, '.git'))],
-                network: { domains: policy.isolation.domains },
-              },
-              timeoutMs: policy.runTimeoutMs,
-              env: Object.fromEntries(
-                Object.entries(execution.env).filter(
-                  (e): e is [string, string] => e[1] !== undefined,
-                ),
+          const refuteCwd = cwd + '-refute';
+          const refute = await git(path, 'worktree', 'add', '--detach', refuteCwd, head)
+            .then(() =>
+              measuredInvoke(
+                engine,
+                adapter,
+                {
+                  callId: randomUUID(),
+                  task: 'review-refute',
+                  binding: choice.reviewer,
+                  cwd: refuteCwd,
+                  prompt: prompt + '\n\n' + refutePromptText(blocking, choice2.mode),
+                  outputSchema: refuteOutputSchema,
+                  session: { kind: 'fresh' },
+                  sandbox: {
+                    mode: policy.isolation.mode,
+                    writable: [],
+                    denied: hidden,
+                    ...(placement.root ? { checkouts: [placement.root] } : {}),
+                    readable: [refuteCwd, ...repos.map((r) => join(r, '.git'))],
+                    network: { domains: policy.isolation.domains },
+                  },
+                  timeoutMs: policy.runTimeoutMs,
+                  env: Object.fromEntries(
+                    Object.entries(execution.env).filter(
+                      (e): e is [string, string] => e[1] !== undefined,
+                    ),
+                  ),
+                  artifactDir: join(dir, 'refute'),
+                  secrets: [...(execution.redact.secrets ?? [])],
+                },
+                signal,
+                {
+                  repositoryId: repo.id,
+                  subjectId: subject,
+                  subjectKind: 'other',
+                  stage: 'code-review-refute',
+                },
               ),
-              artifactDir: join(dir, 'refute'),
-              secrets: [...(execution.redact.secrets ?? [])],
-            },
-            signal,
-            {
-              repositoryId: repo.id,
-              subjectId: subject,
-              subjectKind: 'other',
-              stage: 'code-review-refute',
-            },
-          ).catch((error: unknown) => {
-            if (signal.aborted) throw cancelled(signal);
-            if (error instanceof TaskFailure && error.kind === 'budget')
-              throw new HarnessError('BUDGET_EXHAUSTED', error.message);
-            return undefined;
-          });
+            )
+            .catch((error: unknown) => {
+              if (signal.aborted) throw cancelled(signal);
+              if (error instanceof TaskFailure && error.kind === 'budget')
+                throw new HarnessError('BUDGET_EXHAUSTED', error.message);
+              return undefined;
+            })
+            .finally(async () => {
+              await git(path, 'worktree', 'remove', '--force', refuteCwd).catch(() => undefined);
+              // Дерево создано выше этим вызовом.
+              await rm(refuteCwd, { recursive: true, force: true }).catch(() => undefined);
+            });
           const parsed2 =
             refute?.status === 'ok' ? refuteResultSchema.safeParse(refute.output) : undefined;
           if (!parsed2?.success)
@@ -563,16 +584,6 @@ export async function reviewBranch(
         }
       }
     }
-    const dirty = await git(
-      cwd,
-      'status',
-      '--porcelain',
-      '--untracked-files=all',
-      '--ignored',
-    ).catch(() => '(git status не ответил)');
-    const now = await git(cwd, 'rev-parse', 'HEAD').catch(() => '');
-    if (dirty || now !== head)
-      mutated = `reviewer изменил рабочее дерево обзора${now !== head ? ' (HEAD сдвинут)' : ''}`;
   } finally {
     if (added) await git(path, 'worktree', 'remove', '--force', cwd).catch(() => undefined);
     await rm(cwd, { recursive: true, force: true }).catch(() => undefined);

@@ -152,7 +152,9 @@ export const blockingOf = <F extends FirstPassFinding>(findings: readonly F[]) =
 /**
  * Слияние проходов: опровергнутые блокирующие находки снимаются, пропущенные
  * (только `always`) добавляются блокирующими. Одобрение пересчитывается:
- * нет ни одной блокирующей находки и ни одной прежней, оставшейся открытой.
+ * нет ни одной блокирующей находки и ни одной прежней, оставшейся открытой;
+ * явный отказ первого прохода снимается, только если второй опроверг все
+ * его блокирующие находки (отказ без них остаётся отказом).
  */
 export function mergePasses<F extends FirstPassFinding>(
   first: { approved: boolean; findings: readonly F[]; reopened: boolean },
@@ -175,7 +177,8 @@ export function mergePasses<F extends FirstPassFinding>(
   first.findings.forEach((f, i) => {
     const v = verdicts.get(i);
     if (f.severity === 'blocking' && v?.verdict === 'refuted')
-      refuted.push({ message: f.message.slice(0, 4000), basis: v.basis.trim().slice(0, 4000) });
+      // Полный текст: вызывающий маскирует, затем обрезает (ревью alpha.70).
+      refuted.push({ message: f.message, basis: v.basis.trim() });
     else kept.push(f);
   });
   const missed: FirstPassFinding[] =
@@ -191,7 +194,13 @@ export function mergePasses<F extends FirstPassFinding>(
         }))
       : [];
   const findings = [...kept, ...missed];
-  const approved = !first.reopened && !findings.some((f) => f.severity === 'blocking');
+  const clear = !first.reopened && !findings.some((f) => f.severity === 'blocking');
+  // Явный отказ первого прохода стоит, пока второй не опроверг каждую
+  // блокирующую находку, которая его вызвала; отказ без блокирующих
+  // находок второй проход не снимает (ревью alpha.70).
+  const approved = first.approved
+    ? clear
+    : blocking.length > 0 && refuted.length === blocking.length && clear;
   return {
     findings,
     approved,

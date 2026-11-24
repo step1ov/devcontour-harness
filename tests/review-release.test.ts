@@ -605,3 +605,17 @@ test('alpha.70: шаг документации выпуска — корни, �
     return true;
   });
 });
+
+test('ревью 1: отказ приёмки выпуска без блокирующих находок второй проход (always) не снимает', async () => {
+  const f = fixture();
+  ready(f.engine, graphOf({ w: [] }));
+  accept(f.engine, f.base, f.head);
+  f.scenario({
+    reviewer: verdict(false, { findings: [finding('Не проверить маршрут /media', 'note')] }),
+    refuter: { result: { summary: 'нечего опровергать', verdicts: [], missed: [] } },
+  });
+  const r = await f.review();
+  assert.equal(r.approved, false);
+  assert.equal(r.passes?.status, 'ran');
+  assert.equal(r.passes?.overturned, false);
+});

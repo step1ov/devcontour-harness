@@ -262,3 +262,57 @@ test('второй проход вне схемы — действует пер�
   assert.equal(r.findings?.length, 1);
   assert.match(r.summary, /второй проход не дал итога/);
 });
+
+test('ревью 1: явный отказ без блокирующих находок второй проход не снимает; без опровержения всех — тоже', () => {
+  const note = [{ severity: 'note' as const, message: 'не проверить критерий 2' }];
+  const empty = refuteResultSchema.parse({ summary: 's', verdicts: [], missed: [] });
+  assert.equal(
+    mergePasses({ approved: false, findings: note, reopened: false }, empty, 'always').approved,
+    false,
+  );
+  assert.equal(
+    mergePasses({ approved: false, findings: [], reopened: false }, empty, 'always').approved,
+    false,
+  );
+  const two = [
+    { severity: 'blocking' as const, message: 'A' },
+    { severity: 'blocking' as const, message: 'B' },
+  ];
+  const one = refuteResultSchema.parse({
+    summary: 's',
+    verdicts: [{ index: 0, verdict: 'refuted', basis: 'обработано' }],
+    missed: [],
+  });
+  assert.equal(
+    mergePasses({ approved: false, findings: two, reopened: false }, one, 'on-reject').approved,
+    false,
+  );
+  assert.equal(
+    mergePasses({ approved: true, findings: [], reopened: false }, empty, 'always').approved,
+    true,
+  );
+});
+
+test('ревью 1: второй проход, изменивший своё дерево, не превращает одобрение первого в отказ', async () => {
+  const ctx = setup({
+    scenario: {
+      writer: [implement()],
+      reviewer: [verdict(true)],
+      refuter: [
+        {
+          files: { 'src/greet.js': 'hacked\n' },
+          result: { summary: 'x', verdicts: [], missed: [] },
+        },
+      ],
+    } as any,
+    policy: (p: any) => (p.maxAttempts = 1),
+    graph: (g: any) => (g.orders[0].labels = ['auth']),
+  });
+  await runAll(ctx);
+  const a = ctx.engine.read((v) => v.attempts(WORK)[0]!);
+  assert.equal(a.status, 'succeeded', a.error);
+  const r = a.evidence.find((e) => e.kind === 'review')!;
+  assert.equal(r.passed, true);
+  assert.equal(r.reviewPasses?.status, 'failed');
+  assert.match(r.reviewPasses?.reason ?? '', /изменил своё дерево/);
+});

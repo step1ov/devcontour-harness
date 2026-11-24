@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { toolchainBaseline } from '../environment/toolchain-pin.ts';
-import { mkdir, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
   roleBinding,
@@ -3700,7 +3700,7 @@ export class Runner {
     verdict: Extract<CodeReviewVerdict, { valid: true }>;
     signal: AbortSignal;
     remaining: number;
-  }): Promise<{ record?: ReviewPassesRecord; verdict?: CodeReviewVerdict; dirty?: boolean }> {
+  }): Promise<{ record?: ReviewPassesRecord; verdict?: CodeReviewVerdict }> {
     const { attempt, work, verdict } = input;
     const choice = reviewPassModeOf(this.policy.review.passes, {
       kind: 'code',
@@ -3724,15 +3724,21 @@ export class Runner {
       return { record: { ...base, status: 'failed', reason: 'исчерпан срок логического ревью' } };
     const dir = join(input.dir, 'refute');
     await mkdir(dir, { recursive: true });
-    const status = await git(input.cwd, 'status', '--porcelain', '--untracked-files=all');
+    // Второй проход — в своём detached-дереве того же коммита (ревью
+    // alpha.70): его изменения не трогают проверяемое дерево и не меняют
+    // вердикт первого прохода.
+    const tree = await mkdtemp(join(controllerTemp.dir(), 'hx-refute-'));
+    const checkout = join(tree, 'tree');
     let response: Awaited<ReturnType<Runner['call']>>;
+    let dirty = false;
     try {
+      await git(input.cwd, 'worktree', 'add', '--detach', checkout, input.sha);
       response = await this.call(
         this.adapter(attempt.reviewer),
         {
           task: 'review-refute',
           attempt,
-          cwd: input.cwd,
+          cwd: checkout,
           dir,
           phase: input.phase,
           stage: input.phase + '-review-refute',
@@ -3753,6 +3759,10 @@ export class Runner {
         },
         input.signal,
       );
+      dirty =
+        !!(await git(checkout, 'status', '--porcelain', '--untracked-files=all').catch(
+          () => 'unknown',
+        )) || (await git(checkout, 'rev-parse', 'HEAD').catch(() => '')) !== input.sha;
     } catch (error) {
       // Отмена и утрата владения — не итог второго прохода.
       if (input.signal.aborted || error instanceof HarnessError) throw error;
@@ -3763,10 +3773,11 @@ export class Runner {
           reason: (error instanceof Error ? error.message : String(error)).slice(0, 1000),
         },
       };
+    } finally {
+      await git(input.cwd, 'worktree', 'remove', '--force', checkout).catch(() => undefined);
+      // Каталог создан выше этим вызовом (mkdtemp под временным каталогом controller).
+      await rm(tree, { recursive: true, force: true }).catch(() => undefined);
     }
-    const dirty =
-      (await git(input.cwd, 'status', '--porcelain', '--untracked-files=all')) !== status ||
-      (await git(input.cwd, 'rev-parse', 'HEAD')) !== input.sha;
     const log = join(dir, 'refute.json');
     await writeFile(
       log,
@@ -3775,8 +3786,7 @@ export class Runner {
     );
     if (dirty)
       return {
-        record: { ...base, status: 'failed', reason: 'reviewer изменил дерево', log },
-        dirty,
+        record: { ...base, status: 'failed', reason: 'reviewer изменил своё дерево', log },
       };
     const parsed = refuteResultSchema.safeParse(response.output);
     if (!parsed.success)
@@ -3819,7 +3829,10 @@ export class Runner {
         ...base,
         status: 'ran',
         confirmed: merged.confirmed,
-        refuted: merged.refuted,
+        refuted: merged.refuted.map((r) => ({
+          message: response.redact(r.message).slice(0, 4000),
+          basis: response.redact(r.basis).slice(0, 4000),
+        })),
         missed: merged.missed,
         overturned: !first.approved && merged.approved,
         log,
@@ -3996,7 +4009,7 @@ export class Runner {
       // Reviewer не меняет закреплённые зависимости, как и своё дерево.
       await assertDependencies(attempt.dependencies ?? []);
       const redact = response.redact;
-      let clean =
+      const clean =
         (await git(cwd, 'status', '--porcelain', '--untracked-files=all')) === status &&
         !(await git(cwd, 'status', '--porcelain', '--untracked-files=no')) &&
         (await git(cwd, 'rev-parse', 'HEAD')) === sha;
@@ -4039,7 +4052,6 @@ export class Runner {
         });
         passes = second.record;
         if (second.verdict) verdict = second.verdict;
-        if (second.dirty) clean = false;
       }
       const result = verdict.result;
       // Проверки reviewer — по журналу controller, а не по самоотчёту модели.
