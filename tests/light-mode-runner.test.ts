@@ -216,3 +216,41 @@ test('doctor: зеркало шлюза при объявленной топол
     checks.notes.join('\n'),
   );
 });
+
+test('нет механизма границы записи — отказ среды sandbox-launch, попытка не засчитана', async () => {
+  const { writeGuardProbe } = await import('../src/environment/write-guard.ts');
+  const original = writeGuardProbe.support;
+  writeGuardProbe.support = () => ({ ok: false, detail: 'нет механизма (тест)' });
+  try {
+    const ctx = setup({
+      scenario: { writer: implement(), reviewer: approve() },
+      policy: (p) => {
+        p.harnessMode = 'light';
+        p.isolation = { mode: 'os', domains: [] };
+        p.maxAttempts = 1;
+      },
+    });
+    await runAll(ctx);
+    const a = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
+    assert.equal(a.failureKind, 'environment', a.error);
+    assert.match(a.error ?? '', /нет механизма \(тест\)/);
+    const w = ctx.engine.read((v) => v.work('add-greeting')!);
+    assert.equal(w.attempt, 0, 'попытка не засчитана');
+  } finally {
+    writeGuardProbe.support = original;
+  }
+});
+
+test('механизм границы — только из системных путей: bwrap в PATH не принимается', async () => {
+  const { writeGuardSupport, TRUSTED_BWRAP } = await import('../src/environment/write-guard.ts');
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'fake-bwrap-')));
+  writeFileSync(join(dir, 'bwrap'), '#!/bin/sh\nexec "$@"\n', { mode: 0o755 });
+  const before = process.env.PATH;
+  process.env.PATH = `${dir}:${before ?? ''}`;
+  try {
+    const support = writeGuardSupport('linux');
+    if (!TRUSTED_BWRAP.some((p) => existsSync(p))) assert.equal(support.ok, false);
+  } finally {
+    process.env.PATH = before;
+  }
+});

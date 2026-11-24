@@ -110,6 +110,8 @@ export const TRUSTED_BWRAP = ['/usr/bin/bwrap', '/bin/bwrap'] as const;
 const trustedBwrap = () => TRUSTED_BWRAP.find((p) => existsSync(p));
 
 export class WriteGuardUnavailable extends Error {}
+/** Проба механизма; тест подменяет её, чтобы проверить отказ среды. */
+export const writeGuardProbe = { support: (platform: NodeJS.Platform) => writeGuardSupport(platform) };
 
 /** Механизм границы записи на этой машине, или почему его нет. */
 export function writeGuardSupport(
@@ -135,7 +137,7 @@ export function guardedArgv(
   entries: GuardEntry[],
   platform = process.platform,
 ): string[] {
-  const support = writeGuardSupport(platform);
+  const support = writeGuardProbe.support(platform);
   if (!support.ok)
     throw new WriteGuardUnavailable(
       `Граница записи облегчённого режима недоступна: ${support.detail}. Установите механизм (на Linux — bubblewrap) или снимите границу writeGuard.off: true (решение владельца)`,
