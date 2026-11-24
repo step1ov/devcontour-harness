@@ -237,9 +237,28 @@ async function mergeEnvFile(file: string, env: Record<string, string>) {
   } catch {
     current = {};
   }
+  // Список записанных портов — чтобы фаза снимала только их (ревью 2):
+  // переменные политики с тем же префиксом (`HX_DB_USER`) не трогаются.
+  const prior =
+    typeof current[SERVICE_PORT_KEYS] === 'string'
+      ? (current[SERVICE_PORT_KEYS] as string).split(',').filter(Boolean)
+      : [];
+  const keys = [...new Set([...prior, ...Object.keys(env)])].sort().join(',');
   const tmp = `${file}.${process.pid}.tmp`;
-  await writeFile(tmp, JSON.stringify({ ...current, ...env }, null, 2) + '\n');
+  await writeFile(
+    tmp,
+    JSON.stringify({ ...current, ...env, [SERVICE_PORT_KEYS]: keys }, null, 2) + '\n',
+  );
   await rename(tmp, file);
+}
+
+/** Ключ файла окружения попытки со списком записанных `env-up` портов. */
+export const SERVICE_PORT_KEYS = 'HARNESS_SERVICE_PORT_KEYS';
+
+/** Записанные `env-up` ключи портов (по списку `SERVICE_PORT_KEYS`). */
+export function servicePortKeys(data: Record<string, unknown>): string[] {
+  const raw = data[SERVICE_PORT_KEYS];
+  return typeof raw === 'string' ? raw.split(',').filter((k) => SERVICE_PORT_ENV.test(k)) : [];
 }
 
 /** Переменные портов сервисов из файла окружения попытки (нет файла — пусто). */
@@ -248,10 +267,12 @@ export function servicePortsFromFile(text: string | undefined): Record<string, s
   try {
     const parsed = JSON.parse(text) as unknown;
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    const data = parsed as Record<string, unknown>;
+    const keys = new Set(servicePortKeys(data));
     return Object.fromEntries(
-      Object.entries(parsed as Record<string, unknown>).filter(
+      Object.entries(data).filter(
         (e): e is [string, string] =>
-          SERVICE_PORT_ENV.test(e[0]) && typeof e[1] === 'string' && /^\d{1,5}$/.test(e[1]),
+          keys.has(e[0]) && typeof e[1] === 'string' && /^\d{1,5}$/.test(e[1]),
       ),
     );
   } catch {

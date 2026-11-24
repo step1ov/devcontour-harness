@@ -1682,14 +1682,18 @@ async function run(
         cwd: process.cwd(),
         ...(files ? { files } : {}),
         ...(wait !== undefined ? { waitTimeoutS: wait } : {}),
-        // Журналы сервисов маскируются значениями секретных переменных шага.
+        // Журналы сервисов маскируются значениями объявленных секретов шага
+        // (`HARNESS_SECRET_NAMES` задаёт controller, ревью 2) и переменных с
+        // секретным именем; маска — по полному тексту, до обрезки.
         redact: redactor(
           Object.entries(process.env)
             .filter(
               (e): e is [string, string] =>
-                /TOKEN|SECRET|PASSWORD|PASSWD|KEY|CREDENTIAL|_URL$/i.test(e[0]) &&
                 typeof e[1] === 'string' &&
-                e[1].length >= 8,
+                e[1].length > 0 &&
+                ((process.env.HARNESS_SECRET_NAMES ?? '').split(',').includes(e[0]) ||
+                  (/TOKEN|SECRET|PASSWORD|PASSWD|KEY|CREDENTIAL|_URL$/i.test(e[0]) &&
+                    e[1].length >= 4)),
             )
             .map(([, value]) => value),
         ),

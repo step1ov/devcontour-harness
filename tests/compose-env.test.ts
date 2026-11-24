@@ -263,7 +263,7 @@ test('CLI env-up: подставной docker в PATH; отказ готовно
 case "$*" in
   *" up "*) echo "container db is unhealthy" >&2; exit 1 ;;
   *" ps "*) echo '[{"Service":"db","State":"running","Health":"unhealthy","Publishers":[]}]' ;;
-  *" logs "*) echo "db: not ready" ;;
+  *" logs "*) echo "db: not ready pass=z9q" ;;
 esac
 exit 0
 `,
@@ -276,12 +276,20 @@ exit 0
     {
       cwd: dir,
       encoding: 'utf8',
-      env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, COMPOSE_PROJECT_NAME: 'hx-app-x' },
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        COMPOSE_PROJECT_NAME: 'hx-app-x',
+        // Объявленный секрет политики с несекретным именем и коротким значением.
+        DB_PASS: 'z9q',
+        HARNESS_SECRET_NAMES: 'DB_PASS',
+      },
     },
   );
   assert.equal(r.status, 1, r.stdout + r.stderr);
   assert.match(r.stderr, /стек hx-app-x не готов: container db is unhealthy/);
-  assert.match(r.stderr, /--- db .*\n.*db: not ready/);
+  assert.match(r.stderr, /--- db .*\n.*db: not ready pass=/);
+  assert.doesNotMatch(r.stderr + r.stdout, /z9q/, 'объявленный секрет замаскирован');
   const noProject = spawnSync(
     process.execPath,
     ['--import', import.meta.resolve('tsx'), cli, 'env-up'],
@@ -299,8 +307,8 @@ test('ревью 1: gate фазы получает порты сервисов, 
   const { setup, runAll, implement, approve } = await import('./runner-fixture.ts');
   const up = `const fs=require('fs');const f=process.env.HARNESS_ATTEMPT_ENV_FILE;const d=JSON.parse(fs.readFileSync(f,'utf8'));
 if(d.HX_DB_5432) {console.error('stale port '+d.HX_DB_5432);process.exit(3)}
-d.HX_DB_5432=process.env.DEVCONTOUR_PHASE==='candidate'?'21001':'21002';fs.writeFileSync(f,JSON.stringify(d));`;
-  const gate = `const want=process.env.DEVCONTOUR_PHASE==='candidate'?'21001':'21002';const ok=process.env.HX_DB_5432===want;
+d.HX_DB_5432=process.env.DEVCONTOUR_PHASE==='candidate'?'21001':'21002';d.HARNESS_SERVICE_PORT_KEYS='HX_DB_5432';fs.writeFileSync(f,JSON.stringify(d));`;
+  const gate = `const want=process.env.DEVCONTOUR_PHASE==='candidate'?'21001':'21002';const ok=process.env.HX_DB_5432===want&&process.env.HX_DB_USER==='app';
 require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase classname="svc" name="port">'+(ok?'':'<failure message="got '+process.env.HX_DB_5432+' want '+want+'"/>')+'</testcase></testsuite>');process.exit(ok?0:1);`;
   const ctx = setup({
     scenario: { writer: implement(), reviewer: approve() },
@@ -308,6 +316,8 @@ require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><test
       delete p.harnessMode;
       p.maxAttempts = 1;
       p.repositories[0].gates[0].command = [process.execPath, '-e', gate];
+      // Переменная политики с тем же префиксом — не порт: остаётся (ревью 2).
+      p.environment = { ...p.environment, values: { ...p.environment.values, HX_DB_USER: 'app' } };
       p.repositories[0].lifecycle = {
         setup: [{ id: 'services', command: [process.execPath, '-e', up], timeoutMs: 30_000 }],
         ready: [],
@@ -350,7 +360,9 @@ test('ревью 1: env-up там, где файл окружения не за�
   }
   // Секрет на границе обрезки маскируется целиком: маска — до обрезки.
   const secret = 'S3CRET-VALUE-XYZ';
-  const long = 'x'.repeat(8000 - 4) + secret;
+  // Секрет пересекает границу обрезки хвоста (8000): обрезка до маски
+  // оставила бы «ALUE-XYZ».
+  const long = secret + 'x'.repeat(8000 - 8);
   const bad: DockerRun = (args) =>
     Promise.resolve(
       args.includes('up')
@@ -367,5 +379,5 @@ test('ревью 1: env-up там, где файл окружения не за�
     docker: bad,
     redact: (t) => t.replaceAll(secret, '***'),
   });
-  assert.doesNotMatch(failed.readiness?.logs.rabbit ?? '', /S3CR|XYZ/);
+  assert.doesNotMatch(failed.readiness?.logs.rabbit ?? '', /VALUE-XYZ|ALUE/);
 });
