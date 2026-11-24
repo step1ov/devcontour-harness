@@ -39,10 +39,14 @@ export type CodeReviewGates = z.infer<typeof codeReviewGatesSchema>;
  * чтение. Запись — наблюдение, а не приёмка: `acceptance` всегда `false`,
  * target ref не меняется, поручений и попыток нет. Поля находок и reviewer —
  * те же, что у раунда ревью плана и контракта (`reviewRecordSchema`).
+ *
+ * `kind: release` (alpha.69, P7-6) — ревью выпуска (`harness review-release`):
+ * та же запись в той же коллекции, предмет — репозиторий, роль и база
+ * выпуска; head — принятая цель, в запросе ещё договор выпуска (`contextDigest`).
  */
 export const codeReviewRecordSchema = z.strictObject({
   id: z.string().min(1).max(200),
-  kind: z.literal('code'),
+  kind: z.enum(['code', 'release']),
   /** Запись ревью ветки не принимает работу: приёмку даёт только `harness run`. */
   acceptance: z.literal(false),
   /**
@@ -66,6 +70,12 @@ export const codeReviewRecordSchema = z.strictObject({
   commits: z.number().int().nonnegative(),
   /** Digest diff, который получил reviewer. */
   diffDigest: digestSchema,
+  /**
+   * Только `kind: release`: digest договора выпуска в запросе (постановки,
+   * критерии, ответы владельца, топология). Другой договор на том же head —
+   * новый раунд, а не прежнее одобрение.
+   */
+  contextDigest: digestSchema.optional(),
   round: z.number().int().positive(),
   at: isoTimeSchema,
   approved: z.boolean(),
