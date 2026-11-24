@@ -1,4 +1,5 @@
 import { mkdir, writeFile, readFile, realpath } from 'node:fs/promises';
+import { SERVICE_PORT_ENV, servicePortsFromFile } from './compose-env.ts';
 import { basename, dirname, join, relative, sep } from 'node:path';
 import type { z } from 'zod';
 import {
@@ -428,6 +429,40 @@ export async function withEnvironment<T>(
   return phaseEnvironment(lifecycle, cwd, dir, execution, signal, action, measure, trusted);
 }
 
+/**
+ * Снять переменные портов сервисов (`HX_*`) с окружения фазы и с файла
+ * окружения попытки (`HARNESS_ATTEMPT_ENV_FILE`): порты прошлой фазы
+ * принадлежат снятому стеку.
+ */
+async function clearServicePorts(env: NodeJS.ProcessEnv) {
+  for (const k of Object.keys(env)) if (SERVICE_PORT_ENV.test(k)) delete env[k];
+  const file = env.HARNESS_ATTEMPT_ENV_FILE;
+  if (!file) return;
+  let text: string;
+  try {
+    text = await readFile(file, 'utf8');
+  } catch {
+    return;
+  }
+  try {
+    const data = JSON.parse(text) as Record<string, unknown>;
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+    const kept = Object.fromEntries(Object.entries(data).filter(([k]) => !SERVICE_PORT_ENV.test(k)));
+    if (Object.keys(kept).length !== Object.keys(data).length)
+      await writeFile(file, JSON.stringify(kept, null, 2) + '\n');
+  } catch {
+    /* файл не JSON — его пишет не harness: не трогаем */
+  }
+}
+
+/** Порты сервисов этой фазы (после setup и ready) — в окружение её gates. */
+async function refreshServicePorts(env: NodeJS.ProcessEnv) {
+  const file = env.HARNESS_ATTEMPT_ENV_FILE;
+  if (!file) return;
+  const text = await readFile(file, 'utf8').catch(() => undefined);
+  Object.assign(env, servicePortsFromFile(text));
+}
+
 /** Переменные, которые выбирают демон контейнеров (селекторы). */
 export const CONTAINER_SELECTOR_KEYS = [
   'DOCKER_HOST',
@@ -586,6 +621,10 @@ async function phaseEnvironment<T>(
   trusted?: TrustedTree,
 ): Promise<T> {
   if (!lifecycle) return action();
+  // Порты сервисов `harness env-up` (alpha.70, ревью 1): прежние фазы
+  // переменных не передают — до setup они снимаются с файла окружения
+  // попытки и с окружения фазы, после setup и ready — читаются заново.
+  await clearServicePorts(execution.env);
   await mkdir(dir, { recursive: true });
   // Каталог окружения фазы — вне worktree, рядом с receipt: шаги lifecycle
   // хранят в нём своё состояние (env-файлы, снимок ресурсов), а prepare и
@@ -656,6 +695,7 @@ async function phaseEnvironment<T>(
     await measure('ready', () =>
       runSteps(lifecycle.ready, cwd, join(dir, 'ready'), execution, signal),
     );
+    await refreshServicePorts(execution.env);
     result = await action();
   } catch (error) {
     // A thrown undefined/false must still fail the attempt after cleanup.

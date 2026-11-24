@@ -1,3 +1,6 @@
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access --
+ * Тест правит сырой JSON политики до разбора схемой.
+ */
 /**
  * 0.1.0-alpha.70 (follow-up a69): сервисы попытки в docker compose.
  * `env-up` снимает остатки проекта попытки, поднимает стек с `--wait`,
@@ -231,4 +234,37 @@ exit 0
   );
   assert.notEqual(noProject.status, 0);
   assert.match(noProject.stdout + noProject.stderr, /NOT_READY/);
+});
+
+test('ревью 1: gate фазы получает порты сервисов, поднятых setup этой фазы; порты прошлой фазы не переносятся', async () => {
+  const { setup, runAll, implement, approve } = await import('./runner-fixture.ts');
+  const up = `const fs=require('fs');const f=process.env.HARNESS_ATTEMPT_ENV_FILE;const d=JSON.parse(fs.readFileSync(f,'utf8'));
+if(d.HX_DB_5432) {console.error('stale port '+d.HX_DB_5432);process.exit(3)}
+d.HX_DB_5432=process.env.DEVCONTOUR_PHASE==='candidate'?'21001':'21002';fs.writeFileSync(f,JSON.stringify(d));`;
+  const gate = `const want=process.env.DEVCONTOUR_PHASE==='candidate'?'21001':'21002';const ok=process.env.HX_DB_5432===want;
+require('fs').writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,'<testsuite><testcase classname="svc" name="port">'+(ok?'':'<failure message="got '+process.env.HX_DB_5432+' want '+want+'"/>')+'</testcase></testsuite>');process.exit(ok?0:1);`;
+  const ctx = setup({
+    scenario: { writer: implement(), reviewer: approve() },
+    policy: (p: Record<string, any>) => {
+      delete p.harnessMode;
+      p.maxAttempts = 1;
+      p.repositories[0].gates[0].command = [process.execPath, '-e', gate];
+      p.repositories[0].lifecycle = {
+        setup: [{ id: 'services', command: [process.execPath, '-e', up], timeoutMs: 30_000 }],
+        ready: [],
+        teardown: [{ id: 'down', command: [process.execPath, '-e', '0'], timeoutMs: 30_000 }],
+      };
+    },
+  });
+  await runAll(ctx);
+  const a = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
+  assert.equal(a.status, 'succeeded', a.error);
+  const gates = a.evidence.filter((e) => e.kind === 'test');
+  assert.deepEqual(
+    gates.map((e) => [e.phase, e.passed]),
+    [
+      ['candidate', true],
+      ['integration', true],
+    ],
+  );
 });

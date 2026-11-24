@@ -4,7 +4,7 @@ import { controllerTemp } from '../environment/controller-temp.ts';
 import type { LeadDiagnosis } from '../contracts/execution.ts';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { toolchainBaseline } from '../environment/toolchain-pin.ts';
 import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
@@ -189,7 +189,6 @@ import {
 import { CleanupFailure, cleanupEnvironment } from '../environment/lifecycle.ts';
 import { defaultResourceDatabase, withResources } from '../environment/resources.ts';
 import { gitWorktreeGuard, guardEntries, importGuardObjects } from '../environment/write-guard.ts';
-import { servicePortsFromFile } from '../environment/compose-env.ts';
 import {
   attemptEnvFile,
   allocateAttemptPorts,
@@ -853,18 +852,11 @@ export class Runner {
         // Облегчённый режим (alpha.69): своё имя проекта compose, свои порты
         // и шлюз gates — исполнителю и gates одинаково.
         ...(harnessModeOf(this.policy) === 'light'
-          ? ((file) => ({
-              // Порты сервисов, которые поднял `harness env-up` этой
-              // попытки (alpha.70): gates получают их в окружении.
-              ...servicePortsFromFile(existsSync(file) ? readFileSync(file, 'utf8') : undefined),
-              ...attemptVariables(
-                attempt.id,
-                this.attemptPorts.get(attempt.id)?.get(repo.id) ?? {},
-                repo.gateway,
-                repo.id,
-                file,
-              ),
-            }))(
+          ? attemptVariables(
+              attempt.id,
+              this.attemptPorts.get(attempt.id)?.get(repo.id) ?? {},
+              repo.gateway,
+              repo.id,
               join(
                 this.dirOf(attempt.repositoryId),
                 'artifacts',
