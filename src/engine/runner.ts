@@ -188,7 +188,7 @@ import {
 } from '../verification/dependencies.ts';
 import { CleanupFailure, cleanupEnvironment } from '../environment/lifecycle.ts';
 import { defaultResourceDatabase, withResources } from '../environment/resources.ts';
-import { gitWorktreeGuardEntries, guardEntries } from '../environment/write-guard.ts';
+import { gitWorktreeGuard, guardEntries, importGuardObjects } from '../environment/write-guard.ts';
 import { servicePortsFromFile } from '../environment/compose-env.ts';
 import {
   attemptEnvFile,
@@ -945,6 +945,12 @@ export class Runner {
       );
     }
     const scratch = temp?.dir;
+    // Исполнитель облегчённого режима под границей: свой каталог git дерева
+    // и своё хранилище объектов (P8-1, ревью alpha.70).
+    const gitGuard =
+      !review && harnessModeOf(this.policy) === 'light' && writeGuardActive(this.policy)
+        ? gitWorktreeGuard(input.cwd, execution.env)
+        : undefined;
     // Вызов под учётом: бюджет проверяется до вызова, расход закрепляется за попыткой.
     const response = await measuredInvoke(
       this.engine,
@@ -986,11 +992,11 @@ export class Runner {
             ? {
                 light: writeGuardActive(this.policy)
                   ? (() => {
-                      // Дерево попытки и его метаданные git (P8-1).
+                      // Дерево попытки и его каталог git (P8-1).
                       const entries = guardEntries(
                         this.policy,
                         [input.cwd, ...(scratch ? [scratch] : [])],
-                        gitWorktreeGuardEntries(input.cwd),
+                        gitGuard?.entries ?? [],
                       );
                       const prefixes = entries.flatMap((e) => ('prefix' in e ? [e.prefix] : []));
                       return {
@@ -1003,9 +1009,12 @@ export class Runner {
             : {}),
         },
         timeoutMs: Math.min(this.policy.runTimeoutMs, input.timeoutMs ?? Infinity),
-        env: Object.fromEntries(
-          Object.entries(execution.env).filter((e): e is [string, string] => e[1] !== undefined),
-        ),
+        env: {
+          ...Object.fromEntries(
+            Object.entries(execution.env).filter((e): e is [string, string] => e[1] !== undefined),
+          ),
+          ...(gitGuard?.env ?? {}),
+        },
         artifactDir: input.dir,
         secrets: [...(execution.redact.secrets ?? [])],
         ...(review && input.probe ? { probe: input.probe } : {}),
@@ -1017,10 +1026,14 @@ export class Runner {
         runId: input.attempt.id,
         stage: input.stage ?? (review ? input.phase + '-review' : 'implementation'),
       },
-    ).finally(() =>
+    ).finally(() => {
+      // Объекты git, записанные исполнителем, — в общее хранилище (P8-1).
+      if (gitGuard) importGuardObjects(input.cwd, gitGuard);
       // Временные файлы исполнителя — не артефакт попытки: каталог свой, создан выше.
-      scratch ? rm(scratch, { recursive: true, force: true }).catch(() => undefined) : undefined,
-    );
+      return scratch
+        ? rm(scratch, { recursive: true, force: true }).catch(() => undefined)
+        : undefined;
+    });
     // Ответ «передан исполнителю» — только когда runtime вызова writer
     // попытки, выданной с ним, действительно работал (ответ не
     // `unavailable`: процесс запустился), а не по apply, claim или началу

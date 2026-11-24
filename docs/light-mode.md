@@ -65,16 +65,23 @@ strict`) для чужого кода или секретов production. Стр
 - каталог своего вызова (исполнитель: файл ответа runtime и свой домашний
   каталог CLI);
 - кеши инструментов (`DEFAULT_WRITE_GUARD_CACHES`);
-- метаданные git своего дерева попытки (с 0.1.0-alpha.70): gate или
-  исполнитель с `git stash`, `git add`, `git commit`, `git checkout -- .`
-  пишет и вне файлов дерева. Открыты каталог git связанного дерева
-  (`.git/worktrees/<имя>`: index, `index.lock`, HEAD, журналы) и из общего
-  `.git` репозитория только: `objects`, ссылка ветки дерева
-  (`refs/heads/<ветка>`, `logs/refs/heads/<ветка>`) и stash (`refs/stash`,
-  `logs/refs/stash` — stash общий для всех деревьев репозитория). На Linux
-  bubblewrap открывает каталоги, не файлы: там открыты каталоги этих ссылок
-  (`refs/heads`, `logs/refs/heads`, `refs`, `logs/refs`). Основное рабочее
-  дерево, `config`, `hooks` и чужие деревья закрыты.
+- каталог git своего дерева попытки (с 0.1.0-alpha.70): деревья попыток
+  — detached-деревья `git worktree`; открыт только их каталог
+  `.git/worktrees/<имя>` (index, `index.lock`, HEAD, журналы). Общий `.git`
+  репозитория закрыт целиком: ссылки веток, stash владельца, `config`,
+  `hooks`, объекты и паки. Новые объекты процесс пишет в своё хранилище
+  (`<gitdir>/hx-objects` через `GIT_OBJECT_DIRECTORY`), общее читает как
+  alternates; `gc.auto=0` и `maintenance.auto=false`, так что сборка мусора
+  паки владельца не трогает. После процесса controller переносит его
+  объекты в общее хранилище с проверкой хешей (`pack-objects |
+unpack-objects`). `git add`, `git commit`, `git checkout -- .`,
+  `git diff` работают; **`git stash` отказывает** (ссылка stash общая для
+  всех деревьев репозитория): вместо `git stash` в gate —
+  `git diff > "$TMPDIR/p" && git checkout -- . && … && git apply "$TMPDIR/p"`.
+  `git` в другом репозитории из процесса под границей видит хранилище
+  попытки как своё (`GIT_OBJECT_DIRECTORY`): `git clone` работает, а
+  команды внутри клона — с `env -u GIT_OBJECT_DIRECTORY -u
+GIT_ALTERNATE_OBJECT_DIRECTORIES`
 
 **Настройки CLI пользователя закрыты.** Каждый вызов исполнителя получает
 свой каталог настроек (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`) под каталогом

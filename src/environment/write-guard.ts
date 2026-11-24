@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, rmSync } from 'node:fs';
 import { readBoundedHandle } from './bounded-read.ts';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
@@ -160,11 +160,12 @@ export function guardedArgv(
       } catch {
         /* нет прав — каталог останется закрытым */
       }
-  // Файл с префиксом (ссылка git и её `.lock`) привязкой не выразить: git
-  // пишет `.lock` и переименовывает. Открыт каталог файла (P8-1).
-  const binds = [
-    ...new Set(entries.map((e) => ('subpath' in e ? e.subpath : resolve(e.prefix, '..')))),
-  ].flatMap((p) => ['--bind-try', p, p]);
+  // Файл с префиксом bubblewrap привязывает только существующим путём
+  // (каталоги-родители не открываются: ревью alpha.70).
+  const binds = entries.flatMap((e) => {
+    const p = 'subpath' in e ? e.subpath : e.prefix;
+    return ['--bind-try', p, p];
+  });
   // /proc — привязкой хоста, а не новым procfs: `--proc` требует своего
   // пространства PID, а PID остаются общими с хостом (ps, kill).
   return [
@@ -192,22 +193,32 @@ const gitOut = (cwd: string, args: string[]) =>
   }).trim();
 
 /**
- * Метаданные git рабочего дерева попытки (0.1.0-alpha.70, P8-1): gate или
- * исполнитель, запускающий `git stash`, `git add`, `git commit`,
- * `git checkout -- .`, пишет не только в само дерево. У связанного дерева
- * (`git worktree add`) свой каталог `<common>/worktrees/<имя>` (index,
- * index.lock, HEAD, logs/HEAD, ORIG_HEAD) — он открыт целиком. Из общего
- * каталога репозитория открыто только нужное: `objects` (новые объекты
- * add/stash/commit), ветка дерева (`refs/heads/<ветка>` и её журнал) и
- * stash (`refs/stash`, `logs/refs/stash`; общий для всех деревьев
- * репозитория). На Linux bubblewrap привязывает каталоги, не файлы с
- * префиксом: там открыты каталоги этих ссылок (`refs/heads`, `logs/refs/heads`,
- * `refs`, `logs/refs` — без `objects` других путей общего каталога нет).
- * Основное рабочее дерево и прочие файлы `.git` (config, hooks, другие
- * деревья) закрыты. Не связанное дерево (сам checkout репозитория) — ничего
- * сверх него: его каталог git — общий каталог целиком.
+ * Метаданные git рабочего дерева попытки (0.1.0-alpha.70, P8-1; ревью 1).
+ * Gate или исполнитель с `git add`, `git commit`, `git checkout -- .`
+ * пишет не только в файлы дерева. Открыт на запись только каталог git
+ * связанного (detached) дерева попытки — `<common>/worktrees/<имя>`: index,
+ * `index.lock`, HEAD, журналы. Общий каталог репозитория закрыт целиком:
+ * ни `objects` (паки владельца не перепаковать и не удалить), ни ссылки
+ * веток, ни stash владельца. Новые объекты процесс пишет в своё хранилище
+ * попытки (`<gitdir>/hx-objects`, `GIT_OBJECT_DIRECTORY`), общее — только
+ * чтение (`GIT_ALTERNATE_OBJECT_DIRECTORIES`); автосборка мусора выключена
+ * (`gc.auto=0`, `maintenance.auto=false`). После процесса controller
+ * переносит его объекты в общее хранилище с проверкой
+ * (`importGuardObjects`: `pack-objects | unpack-objects`). `git stash`
+ * под границей отказывает (ссылка stash общая) — docs/light-mode.md.
+ * Не связанное дерево (сам checkout) — ничего сверх него.
  */
-export function gitWorktreeGuardEntries(cwd: string): GuardEntry[] {
+export interface GitWorktreeGuard {
+  entries: GuardEntry[];
+  env: Record<string, string>;
+  /** Своё хранилище объектов процесса и общее хранилище репозитория. */
+  objects: { own: string; shared: string };
+}
+
+export function gitWorktreeGuard(
+  cwd: string,
+  env: NodeJS.ProcessEnv = process.env,
+): GitWorktreeGuard | undefined {
   let gitDir: string;
   let common: string;
   try {
@@ -215,24 +226,70 @@ export function gitWorktreeGuardEntries(cwd: string): GuardEntry[] {
     const raw = gitOut(cwd, ['rev-parse', '--git-common-dir']);
     common = realOr(resolve(cwd, raw));
   } catch {
-    return [];
+    return undefined;
   }
-  if (gitDir === common) return [];
-  let branch: string | undefined;
-  try {
-    branch = gitOut(cwd, ['symbolic-ref', '-q', 'HEAD']) || undefined;
-  } catch {
-    branch = undefined;
+  if (gitDir === common) return undefined;
+  const own = join(gitDir, 'hx-objects');
+  const shared = join(common, 'objects');
+  mkdirSync(join(own, 'pack'), { recursive: true });
+  mkdirSync(join(own, 'info'), { recursive: true });
+  // Пары конфигурации git через окружение — к уже заданным процессу.
+  const count = Number(env.GIT_CONFIG_COUNT ?? 0) || 0;
+  return {
+    entries: [{ subpath: gitDir }],
+    env: {
+      GIT_OBJECT_DIRECTORY: own,
+      GIT_ALTERNATE_OBJECT_DIRECTORIES: shared,
+      GIT_CONFIG_COUNT: String(count + 2),
+      [`GIT_CONFIG_KEY_${count}`]: 'gc.auto',
+      [`GIT_CONFIG_VALUE_${count}`]: '0',
+      [`GIT_CONFIG_KEY_${count + 1}`]: 'maintenance.auto',
+      [`GIT_CONFIG_VALUE_${count + 1}`]: 'false',
+    },
+    objects: { own, shared },
+  };
+}
+
+/**
+ * Перенести объекты процесса из его хранилища в общее (controller, вне
+ * границы): список объектов своего хранилища, `pack-objects` из него и
+ * `unpack-objects` в общее — git проверяет каждый объект по его хешу,
+ * подложенный файл с чужим именем не проходит. Своё хранилище затем
+ * очищается. Ошибка переноса — исключение вызывающему.
+ */
+export function importGuardObjects(cwd: string, guard: GitWorktreeGuard) {
+  const ownEnv = {
+    ...process.env,
+    GIT_OBJECT_DIRECTORY: guard.objects.own,
+    GIT_ALTERNATE_OBJECT_DIRECTORIES: '',
+  };
+  const ids = execFileSync(
+    'git',
+    ['-C', cwd, 'cat-file', '--batch-all-objects', '--batch-check=%(objectname)'],
+    { env: ownEnv, encoding: 'utf8', timeout: 60_000, maxBuffer: 64 * 1024 * 1024 },
+  )
+    .split('\n')
+    .filter((l) => /^[0-9a-f]{40,64}$/.test(l));
+  if (ids.length) {
+    const pack = execFileSync('git', ['-C', cwd, 'pack-objects', '--stdout', '-q'], {
+      env: ownEnv,
+      input: ids.join('\n') + '\n',
+      timeout: 120_000,
+      maxBuffer: 1024 * 1024 * 1024,
+    });
+    const sharedEnv = { ...process.env };
+    delete sharedEnv.GIT_OBJECT_DIRECTORY;
+    delete sharedEnv.GIT_ALTERNATE_OBJECT_DIRECTORIES;
+    execFileSync('git', ['-C', cwd, 'unpack-objects', '-q'], {
+      env: sharedEnv,
+      input: pack,
+      timeout: 120_000,
+    });
   }
-  return [
-    { subpath: gitDir },
-    { subpath: join(common, 'objects') },
-    ...(branch?.startsWith('refs/heads/')
-      ? [{ prefix: join(common, branch) }, { prefix: join(common, 'logs', branch) }]
-      : []),
-    { prefix: join(common, 'refs', 'stash') },
-    { prefix: join(common, 'logs', 'refs', 'stash') },
-  ];
+  // Своё хранилище — только каталог, созданный `gitWorktreeGuard` под gitdir попытки.
+  rmSync(guard.objects.own, { recursive: true, force: true });
+  mkdirSync(join(guard.objects.own, 'pack'), { recursive: true });
+  return ids.length;
 }
 
 /** Записываемые пути gate или исполнителя: свои каталоги + кеши политики. */
