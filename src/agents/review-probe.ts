@@ -101,6 +101,8 @@ export const probeSpec = z.object({
     mode: z.enum(['os', 'none']),
     domains: z.array(z.string()).max(PROBE_LIST_LIMIT),
   }),
+  /** Каталог временных файлов controller (alpha.69): отчёты проб — в нём, не в TMPDIR. */
+  controllerTemp: z.string().min(1).optional(),
   /** Режим и граница записи политики (alpha.69): проверки reviewer — как gates. */
   harnessMode: harnessModeSchema.optional(),
   writeGuard: writeGuardSchema.optional(),

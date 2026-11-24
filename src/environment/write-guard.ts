@@ -211,7 +211,7 @@ export async function writerRuntimeHome(
   /** Записываемые файлы входа (настоящие пути) — для границы записи. */
   entries: GuardEntry[];
   /** Перенести вход, заменённый CLI файлом, в настоящий файл. */
-  writeBack(): Promise<void>;
+  writeBack: () => Promise<void>;
 }> {
   const { mkdir, symlink, writeFile, lstat, readFile, rename } = await import('node:fs/promises');
   await mkdir(dir, { recursive: true, mode: 0o700 });

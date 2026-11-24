@@ -1683,7 +1683,6 @@ export class Runner {
     const snapshots: DependencySnapshot[] = [];
     let preserve = false;
     const leases: AttemptPorts[] = [];
-    let ports: AttemptPorts | undefined;
     try {
       // Облегчённый режим: свои порты попытки — до любой фазы, у каждого
       // репозитория попытки (её и проверяемых потребителей) свои: стеки
@@ -1708,7 +1707,6 @@ export class Runner {
             );
             leases.push(lease);
             byRepo.set(repositoryId, lease.ports);
-            if (repositoryId === repo.id) ports = lease;
           }
         } catch (error) {
           throw new BlockedError(error instanceof Error ? error.message : String(error));
@@ -3394,6 +3392,7 @@ export class Runner {
       isolation: this.policy.isolation,
       harnessMode: harnessModeOf(this.policy),
       ...(this.policy.writeGuard ? { writeGuard: this.policy.writeGuard } : {}),
+      ...(controllerTemp.active() ? { controllerTemp: controllerTemp.dir() } : {}),
       commandTimeoutMs: limits.commandTimeoutMs,
       budgetMs,
       deadline,

@@ -347,6 +347,8 @@ export async function doctor(
   const mode = policy ? modeReport(policy) : undefined;
   if (mode) {
     notes.unshift(mode.line);
+    const login = policy ? claudeLoginWarning(policy) : undefined;
+    if (login) warnings.push(login);
     // Облегчённый режим без границы записи — предупреждение, не заметка.
     if (mode.mode === 'light' && !mode.writeGuard?.active)
       warnings.push(
@@ -702,4 +704,41 @@ export function modeReport(policy: ExecutionPolicy) {
       caches: active ? guardCaches(policy.writeGuard).map((c) => c.path) : [],
     },
   };
+}
+
+/**
+ * Исполнитель claude в облегчённом режиме на macOS (alpha.69, ревью): свой
+ * каталог настроек вызова не видит вход по подписке из Keychain — нужен
+ * `CLAUDE_CODE_OAUTH_TOKEN` или `ANTHROPIC_API_KEY` в окружении исполнителя.
+ */
+export function claudeLoginWarning(
+  policy: ExecutionPolicy,
+  platform: NodeJS.Platform = process.platform,
+): string | undefined {
+  if (harnessModeOf(policy) !== 'light' || platform !== 'darwin') return undefined;
+  const bindings = [
+    ...Object.values(policy.roles),
+    ...policy.repositories.flatMap((r) => Object.values(r.roles ?? {})),
+  ].map((b) => b.writer);
+  const claude = bindings.filter((w) => w.runtime === 'claude');
+  if (!claude.length) return undefined;
+  const names = new Set(['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']);
+  const has = (env?: {
+    inherit: string[];
+    values: Record<string, string>;
+    secrets: Record<string, string>;
+  }) =>
+    !!env &&
+    [...env.inherit, ...Object.keys(env.values), ...Object.keys(env.secrets)].some((k) =>
+      names.has(k),
+    );
+  const covered = claude.every(
+    (w) =>
+      has(policy.environment) ||
+      policy.repositories.some((r) => has(r.environment)) ||
+      (w.toolProfile ? has(policy.toolProfiles[w.toolProfile]?.environment) : false),
+  );
+  return covered
+    ? undefined
+    : 'LIGHT_CLAUDE_LOGIN: исполнитель claude в облегчённом режиме получает свой каталог настроек, а вход по подписке на macOS хранится в Keychain и туда не переносится: выполните claude setup-token и передайте CLAUDE_CODE_OAUTH_TOKEN исполнителю (environment.inherit) или задайте ANTHROPIC_API_KEY';
 }

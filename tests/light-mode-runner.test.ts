@@ -328,3 +328,35 @@ test('механизм границы — только из системных �
     process.env.PATH = before;
   }
 });
+
+test('каталог controller короткий (сокеты unix) и закрыт; doctor — вход claude на macOS', async () => {
+  const { controllerTempRoot, controllerTemp } =
+    await import('../src/environment/controller-temp.ts');
+  const deep = join(tmpdir(), 'a'.repeat(120), 'state');
+  const root = controllerTempRoot(deep);
+  const sock = join(root, 'dc-gate-AbCdEf', 'srt-XXXXXX', 's12345678.sock');
+  assert.ok(sock.length < 90, `${sock.length}: ${sock}`);
+  controllerTemp.useDir(root);
+  try {
+    assert.equal(controllerTemp.dir(), root);
+    const { statSync } = await import('node:fs');
+    assert.equal(statSync(root).mode & 0o077, 0, 'каталог только владельцу');
+  } finally {
+    controllerTemp.use(undefined);
+    rmSync(root, { recursive: true, force: true });
+  }
+  const { claudeLoginWarning } = await import('../src/control/doctor.ts');
+  const raw = example('policy') as Record<string, any>;
+  delete raw.harnessMode;
+  raw.roles.developer.writer.runtime = 'claude';
+  assert.match(
+    claudeLoginWarning(executionPolicySchema.parse(raw), 'darwin') ?? '',
+    /^LIGHT_CLAUDE_LOGIN: .*CLAUDE_CODE_OAUTH_TOKEN/,
+  );
+  raw.environment = { inherit: ['CLAUDE_CODE_OAUTH_TOKEN'] };
+  assert.equal(claudeLoginWarning(executionPolicySchema.parse(raw), 'darwin'), undefined);
+  assert.equal(
+    claudeLoginWarning(executionPolicySchema.parse({ ...raw, environment: undefined }), 'linux'),
+    undefined,
+  );
+});

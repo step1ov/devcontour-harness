@@ -10,7 +10,6 @@ import {
   chmod,
 } from 'node:fs/promises';
 import { controllerTemp } from '../environment/controller-temp.ts';
-import { tmpdir } from 'node:os';
 import { hostLoad, loadText, type HostLoad } from '../environment/host-load.ts';
 import { join, resolve, sep, delimiter, relative, dirname } from 'node:path';
 import { accessSync, constants, existsSync, readdirSync } from 'node:fs';
@@ -808,7 +807,7 @@ export async function probeProcessList(
   const ps = ['/bin/ps', '/usr/bin/ps'].find((p) => existsSync(p));
   if (!ps) return { status: 'unknown', detail: 'ps не найден в /bin и /usr/bin' };
   const argv = [ps, '-o', 'pid=', '-p', '1'];
-  const dir = await realpath(await mkdtemp(join(tmpdir(), 'dc-ps-probe-')));
+  const dir = await realpath(await mkdtemp(join(controllerTemp.dir(), 'dc-ps-probe-')));
   try {
     const result = await runCheck(
       // Проба строгой песочницы ОС проверок — явно строгий режим.
@@ -966,7 +965,7 @@ async function probeInGateSandbox(
 ): Promise<SandboxLimitCapability> {
   const support = isolationBackend.check();
   if (!support.ok) return { status: 'unknown', detail: support.detail };
-  const dir = await realpath(await mkdtemp(join(tmpdir(), 'dc-limit-probe-')));
+  const dir = await realpath(await mkdtemp(join(controllerTemp.dir(), 'dc-limit-probe-')));
   try {
     const result = await runCheck(
       // Проба строгой песочницы ОС проверок — явно строгий режим.
