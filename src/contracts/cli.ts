@@ -1807,6 +1807,58 @@ export const cliCommands = {
     ],
     refusals: ['NOT_FOUND', 'NOT_READY'],
   },
+  'env-up': {
+    description:
+      'Сервисы попытки облегчённого режима (0.1.0-alpha.70): из шага lifecycle или gate попытки поднимает docker compose под именем проекта попытки (COMPOSE_PROJECT_NAME задаёт harness) с up -d --wait, убрав остатки того же проекта; динамические порты (ports: "127.0.0.1::<порт>") дописывает в файл окружения попытки (HARNESS_ATTEMPT_ENV_FILE) переменными HX_<СЕРВИС>_<ПОРТ> — gates попытки получают их в окружении; при отказе готовности — compose ps -a и хвосты журналов нездоровых сервисов (замаскированные) в compose-readiness.json и ответе. Модель не вызывается',
+    writes: true,
+    idempotency: 'Повтор поднимает стек заново (прежний того же проекта снимается)',
+    args: [
+      {
+        name: '--file',
+        value: 'path',
+        required: false,
+        description: 'Файл compose (по умолчанию — правила docker compose в каталоге)',
+      },
+      {
+        name: '--wait',
+        value: 'number',
+        required: false,
+        description: 'Предел ожидания готовности (--wait-timeout, по умолчанию 120 с)',
+      },
+    ],
+    refusals: ['INVALID_INPUT', 'NOT_READY', 'RUNTIME_UNAVAILABLE'],
+  },
+  'env-down': {
+    description:
+      'Убрать сервисы попытки (0.1.0-alpha.70): docker compose down -v --remove-orphans -t 2 под именем проекта попытки; для шага teardown',
+    writes: true,
+    idempotency: 'Повтор без стека — без изменений',
+    args: [
+      {
+        name: '--file',
+        value: 'path',
+        required: false,
+        description: 'Файл compose',
+      },
+    ],
+    refusals: ['INVALID_INPUT', 'RUNTIME_UNAVAILABLE'],
+  },
+  'env-sweep': {
+    description:
+      'Уборка по метке (0.1.0-alpha.70): проекты docker compose hx-* попыток, которых нет среди идущих попыток состояния, снимаются down -v --remove-orphans; с --dry-run — только список',
+    writes: true,
+    idempotency: 'Повтор после уборки — пустой список',
+    args: [
+      state,
+      {
+        name: '--dry-run',
+        value: 'flag',
+        required: false,
+        description: 'Только перечислить',
+      },
+    ],
+    refusals: ['NOT_FOUND', 'RUNTIME_UNAVAILABLE'],
+  },
   'lead-outline': {
     description:
       'План выпуска ведущего до первого графа (и до первого run — с --policy): этапы × компоненты с грубым размером (S/M/L или число задач) и тем, кто их делает (writers, environment, owner). Прогноз считает незарегистрированные части плана объёмом выпуска; без плана status и панель подсказывают RELEASE_OUTLINE_MISSING, run не блокируется (0.1.0-alpha.68). Синоним: harness lead outline --file F',
@@ -2555,6 +2607,49 @@ export const workActionDataSchema = z.strictObject({
    */
   by: z.enum(['lead', 'operator']).optional(),
   bySource: z.enum(['flag', 'default']).optional(),
+});
+
+/** `harness env-up` / `env-down` / `env-sweep`: сервисы попытки (alpha.70). */
+const composePortSchema = z.strictObject({ host: z.string().max(100), port: z.number().int() });
+export const envUpDataSchema = z.strictObject({
+  project: z.string().max(100),
+  ok: z.boolean(),
+  services: z.record(
+    z.string().max(100),
+    z.strictObject({
+      ports: z.record(z.string().max(10), composePortSchema),
+      state: z.string().max(40).optional(),
+      health: z.string().max(40).optional(),
+    }),
+  ),
+  env: z.record(z.string().max(200), z.string().max(10)),
+  envFile: z.string().max(4096).optional(),
+  readiness: z
+    .strictObject({
+      services: z.array(
+        z.strictObject({
+          service: z.string().max(100),
+          state: z.string().max(40),
+          health: z.string().max(40).optional(),
+          exitCode: z.number().int().optional(),
+        }),
+      ),
+      logs: z.record(z.string().max(100), z.string().max(8000)),
+      error: z.string().max(4000),
+    })
+    .optional(),
+});
+export const envDownDataSchema = z.strictObject({
+  project: z.string().max(100),
+  ok: z.boolean(),
+  error: z.string().max(2000).optional(),
+});
+export const envSweepDataSchema = z.strictObject({
+  ok: z.boolean(),
+  stale: z.array(z.string().max(100)).optional(),
+  removed: z.array(z.string().max(100)),
+  kept: z.array(z.string().max(100)),
+  error: z.string().max(2000).optional(),
 });
 
 /** `harness proposal`: решённое предложение исполнителя (alpha.70). */
@@ -3618,6 +3713,9 @@ export const cliDataSchemas = {
   retry: workActionDataSchema,
   diagnose: diagnoseDataSchema,
   proposal: proposalDataSchema,
+  'env-up': envUpDataSchema,
+  'env-down': envDownDataSchema,
+  'env-sweep': envSweepDataSchema,
   result: resultEnvelopeSchema,
   deliver: resultEnvelopeSchema,
   cleanup: cleanupDataSchema,

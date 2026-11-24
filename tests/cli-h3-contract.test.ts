@@ -91,6 +91,10 @@ const laterCommands: readonly string[] = [
   'review-release',
   // Решение ведущего по предложению исполнителя (0.1.0-alpha.70).
   'proposal',
+  // Сервисы попытки в docker compose (0.1.0-alpha.70).
+  'env-up',
+  'env-down',
+  'env-sweep',
 ];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [

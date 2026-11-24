@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { composeDown, composeSweep, composeUp } from './environment/compose-env.ts';
+import { redactor } from './environment/redaction.ts';
+import { composeProjectName } from './environment/attempt-ports.ts';
 import { execFileSync } from 'node:child_process';
 import {
   existsSync,
@@ -554,7 +557,7 @@ const flagOwners = {
   brief: ['plan-request', 'plan-check'],
   contracts: ['plan-request', 'plan-check'],
   requirements: ['plan-request'],
-  'dry-run': ['worktree-cleanup'],
+  'dry-run': ['worktree-cleanup', 'env-sweep'],
   'probe-sandbox': ['doctor'],
   detail: ['status'],
   since: ['report'],
@@ -581,7 +584,7 @@ const flagOwners = {
   text: ['input-answer', 'lead-begin', 'lead-note', 'lead-end'],
   ttl: ['lead-begin', 'preview-start'],
   summary: ['release-done'],
-  file: ['lead-outline'],
+  file: ['lead-outline', 'env-up', 'env-down'],
   option: ['input-answer'],
   kind: ['input-answer'],
   actor: ['input-answer', 'input-carry', 'review-plan', 'review-contract', 'review-accept'],
@@ -620,7 +623,7 @@ const flagOwners = {
   schedule: ['update'],
   mode: ['update'],
   prefix: ['update'],
-  wait: ['update'],
+  wait: ['update', 'env-up'],
   scheduled: ['update'],
   'confirm-formats': ['update'],
   preview: ['preview-start', 'preview-stop'],
@@ -1648,6 +1651,82 @@ async function run(
           .recordReleaseBases(new Set(h.policy.repositories.map((r) => r.id)), 'outline')
           .catch(() => undefined);
         return { command, data };
+      } finally {
+        h.close();
+      }
+    }
+    case 'env-up':
+    case 'env-down': {
+      const files = v.file ? [v.file] : undefined;
+      let wait: number | undefined;
+      if (v.wait !== undefined) {
+        wait = Number(v.wait);
+        if (!Number.isInteger(wait) || wait < 1 || wait > 3600)
+          throw new HarnessError('INVALID_INPUT', '--wait: целое число секунд 1–3600', [
+            { path: ['--wait'], message: v.wait },
+          ]);
+      }
+      if (!process.env.COMPOSE_PROJECT_NAME)
+        throw new HarnessError(
+          'NOT_READY',
+          `${command}: COMPOSE_PROJECT_NAME не задан — команда для шагов lifecycle и gates попытки облегчённого режима (имя проекта задаёт harness)`,
+        );
+      const options = {
+        env: process.env,
+        cwd: process.cwd(),
+        ...(files ? { files } : {}),
+        ...(wait !== undefined ? { waitTimeoutS: wait } : {}),
+        // Журналы сервисов маскируются значениями секретных переменных шага.
+        redact: redactor(
+          Object.entries(process.env)
+            .filter(
+              (e): e is [string, string] =>
+                /TOKEN|SECRET|PASSWORD|PASSWD|KEY|CREDENTIAL|_URL$/i.test(e[0]) &&
+                typeof e[1] === 'string' &&
+                e[1].length >= 8,
+            )
+            .map(([, value]) => value),
+        ),
+      };
+      if (command === 'env-down') return { command, data: await composeDown(options) };
+      const data = await composeUp(options);
+      if (data.readiness)
+        process.stderr.write(
+          `env-up: стек ${data.project} не готов: ${data.readiness.error}\n` +
+            data.readiness.services
+              .map((s) => `  ${s.service}: ${s.state}${s.health ? ' (' + s.health + ')' : ''}`)
+              .join('\n') +
+            '\n' +
+            Object.entries(data.readiness.logs)
+              .map(([svc, log]) => `--- ${svc} (последние строки)\n${log}`)
+              .join('\n') +
+            '\n',
+        );
+      return { command, data, ...(data.ok ? {} : { code: 1 }) };
+    }
+    case 'env-sweep': {
+      const h = open(need('state'), binding(need('state')), false);
+      try {
+        const keep = new Set(
+          h.engine.read((v) =>
+            v
+              .attempts()
+              .filter((a) => a.status === 'active')
+              .flatMap((a) => [
+                composeProjectName(a.id, a.repositoryId),
+                ...h.policy.repositories.map((r) => composeProjectName(a.id, r.id)),
+              ]),
+          ),
+        );
+        return {
+          command,
+          data: await composeSweep({
+            env: process.env,
+            cwd: process.cwd(),
+            keep,
+            ...(v['dry-run'] ? { dryRun: true } : {}),
+          }),
+        };
       } finally {
         h.close();
       }
