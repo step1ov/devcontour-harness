@@ -83,6 +83,7 @@ import {
   type WorkGraph,
   type WorkOrder,
   type WorkState,
+  harnessModeOf,
 } from '../contracts/index.ts';
 import { HARNESS_VERSION } from '../package.ts';
 import {
@@ -6450,7 +6451,8 @@ export function infraPendingOf(work: WorkState, view: ExecutionView): string[] {
 export function budgetLimitsOf(policy: ExecutionPolicy): Record<string, number | null> {
   const out: Record<string, number | null> = {
     maxAttempts: policy.maxAttempts,
-    reviewRounds: policy.maxAttempts * 2,
+    // Облегчённый режим (0.1.0-alpha.69): раундов ревью не считают — без предела.
+    reviewRounds: harnessModeOf(policy) === 'light' ? null : policy.maxAttempts * 2,
     repairBudget: policy.repairBudget,
     leadResets: recoveryPolicyOf(policy).leadResets,
   };

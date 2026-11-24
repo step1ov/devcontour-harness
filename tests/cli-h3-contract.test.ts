@@ -559,6 +559,8 @@ test('H3-01: прежние команды и схемы их данных не 
         delete o.planDigest;
         delete o.counted;
         delete o.changes;
+        // alpha.69: состав плана раунда (`planOrders`).
+        delete o.planOrders;
       }
       if ('used' in o && 'max' in o) {
         delete o.remaining;
