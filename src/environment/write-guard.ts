@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync, realpathSync } from 'node:fs';
+import { readBoundedHandle } from './bounded-read.ts';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import {
@@ -258,7 +259,8 @@ export async function writerRuntimeHome(
   };
 }
 
-const AUTH_LIMIT = 1024 * 1024;
+/** Предел файла входа (байты, прочитанные с дескриптора). */
+export const AUTH_LIMIT = 1024 * 1024;
 
 /** Прочитать файл входа: только обычный файл, без ссылок, с пределом; JSON-объект. */
 async function readAuthFile(path: string): Promise<{ text: string } | undefined> {
@@ -266,11 +268,14 @@ async function readAuthFile(path: string): Promise<{ text: string } | undefined>
   const { constants } = await import('node:fs');
   try {
     if (!(await lstat(path)).isFile()) return undefined;
-    const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const handle = await open(
+      path,
+      constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK,
+    );
     try {
-      const st = await handle.stat();
-      if (!st.isFile() || st.size > AUTH_LIMIT) return undefined;
-      const text = (await handle.readFile()).toString('utf8');
+      // Предел — по прочитанным байтам на том же дескрипторе (без ссылок):
+      // файл, выросший после проверки размера, — отказ.
+      const text = await readBoundedHandle(handle, AUTH_LIMIT);
       const json = JSON.parse(text) as unknown;
       return json && typeof json === 'object' && !Array.isArray(json) ? { text } : undefined;
     } finally {

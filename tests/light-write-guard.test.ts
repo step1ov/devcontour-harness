@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import {
+  appendFileSync,
   chmodSync,
   existsSync,
   mkdtempSync,
@@ -423,3 +424,22 @@ test(
     assert.equal(existsSync(join(home, 'pwned')), false, 'граница не расширена до $HOME');
   },
 );
+
+test('файл входа, выросший за предел между проверкой и чтением, отклонён', async () => {
+  const { writerRuntimeHome, AUTH_LIMIT } = await import('../src/environment/write-guard.ts');
+  const { boundedReadHooks } = await import('../src/environment/bounded-read.ts');
+  const home = realpathSync(mkdtempSync(join(tmpdir(), 'light-grow-')));
+  execFileSync('mkdir', ['-p', join(home, '.codex')]);
+  const real = join(home, '.codex', 'auth.json');
+  writeFileSync(real, AUTH);
+  // Между проверкой размера и чтением файл дописан за предел.
+  boundedReadHooks.afterStat = () =>
+    Promise.resolve(appendFileSync(real, ' '.repeat(AUTH_LIMIT + 10)));
+  try {
+    const out = await writerRuntimeHome('codex', join(home, 'rt'), {}, home);
+    assert.match(out.refused ?? '', /не обычный файл JSON/);
+    assert.equal(existsSync(join(home, 'rt', 'auth.json')), false, 'копии нет');
+  } finally {
+    delete boundedReadHooks.afterStat;
+  }
+});
