@@ -188,7 +188,7 @@ test('Relay 0.13 без маршрута контекста: цели, треб�
   const w = world();
   const srv = await relay013(w);
   try {
-    const out = await srv.transport.readTaskContext!('WEB-1', {
+    const out = await srv.transport.readTaskContext('WEB-1', {
       targetDocuments: true,
       maxBytes: 1 << 20,
     });
@@ -231,7 +231,7 @@ test('Relay 0.13 без маршрута контекста: цели, треб�
     for (const heading of [/WEB-SI-1/, /FEATURE-1/, /SCENARIO-1/, /PRODUCT/, /DOC-1/])
       assert.match(text, heading);
     // Без targetDocuments — только документы задачи.
-    const narrow = await srv.transport.readTaskContext!('WEB-1', {
+    const narrow = await srv.transport.readTaskContext('WEB-1', {
       targetDocuments: false,
       maxBytes: 1 << 20,
     });
@@ -246,13 +246,13 @@ test('предел: больше maxBytes — too-large без усечения;
   w.entities = w.entities.filter((e) => e.ref.kind !== 'product');
   const srv = await relay013(w);
   try {
-    const small = await srv.transport.readTaskContext!('WEB-1', {
+    const small = await srv.transport.readTaskContext('WEB-1', {
       targetDocuments: true,
       maxBytes: 16,
     });
     assert.equal(small.status, 'too-large');
     assert.match(small.status === 'too-large' ? small.reason : '', /taskContext\.maxBytes=16/);
-    const full = await srv.transport.readTaskContext!('WEB-1', {
+    const full = await srv.transport.readTaskContext('WEB-1', {
       targetDocuments: false,
       maxBytes: 1 << 20,
     });
@@ -277,7 +277,7 @@ test('согласованность без токена сервера: зап�
     return original(...items);
   };
   try {
-    const out = await srv.transport.readTaskContext!('WEB-1', {
+    const out = await srv.transport.readTaskContext('WEB-1', {
       targetDocuments: false,
       maxBytes: 1 << 20,
     });
@@ -297,10 +297,12 @@ test('сервер объявил relay-task-context-v1 — читается е�
   const w = world();
   const srv = await relay013(w, ['relay-projects-v1', 'relay-task-context-v1']);
   try {
-    await srv.transport.readTaskContext!('WEB-1', {
-      targetDocuments: false,
-      maxBytes: 1 << 20,
-    }).catch(() => undefined);
+    await srv.transport
+      .readTaskContext('WEB-1', {
+        targetDocuments: false,
+        maxBytes: 1 << 20,
+      })
+      .catch(() => undefined);
     assert.ok(srv.seen.some((p) => p.startsWith(`${BASE}/board-tasks/WEB-1/context`)));
   } finally {
     await srv.close();

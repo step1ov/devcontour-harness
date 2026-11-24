@@ -995,8 +995,7 @@ export class RelayV1Transport implements RelayTransport {
     // 0.13 без доработок) контекст собирает сам транспорт из обычных
     // маршрутов — тот же состав и та же форма (alpha.69).
     const caps = await this.capabilityList('task.context', signal);
-    if (!caps.includes(TASK_CONTEXT_CAPABILITY))
-      return this.buildTaskContext(ref, options, signal);
+    if (!caps.includes(TASK_CONTEXT_CAPABILITY)) return this.buildTaskContext(ref, options, signal);
     return this.readNativeTaskContext(ref, options, signal);
   }
 
@@ -1082,8 +1081,14 @@ export class RelayV1Transport implements RelayTransport {
         'utf8',
       );
       if (bytes > options.maxBytes)
-        throw new TooLarge(`контекст задачи больше предела taskContext.maxBytes=${options.maxBytes}`);
-      included.set(address(entity.ref), { section, entity, reasons: [{ code: reason.code, from }] });
+        throw new TooLarge(
+          `контекст задачи больше предела taskContext.maxBytes=${options.maxBytes}`,
+        );
+      included.set(address(entity.ref), {
+        section,
+        entity,
+        reasons: [{ code: reason.code, from }],
+      });
       return entity;
     };
     const taskRef = { kind: 'task', id: task.id };
