@@ -5074,6 +5074,36 @@ function fitSize(
     const done = tryFinish(assemble(v, {}, true));
     if (done) return done;
   }
+  // 3b. Расход по спискам (ревизия 10, ревью 1): итоги, роли и модели
+  // остаются; списки работ и попыток уходят в свои счётчики опущенного.
+  if (v.costs?.byWork.length || v.works.some((w) => w.cost?.byAttempt.length)) {
+    v = {
+      ...v,
+      ...(v.costs
+        ? {
+            costs: {
+              ...v.costs,
+              byWork: [],
+              byWorkTruncated: v.costs.byWorkTruncated + v.costs.byWork.length,
+            },
+          }
+        : {}),
+      works: v.works.map((w) =>
+        w.cost?.byAttempt.length
+          ? {
+              ...w,
+              cost: {
+                ...w.cost,
+                byAttempt: [],
+                byAttemptTruncated: w.cost.byAttemptTruncated + w.cost.byAttempt.length,
+              },
+            }
+          : w,
+      ),
+    };
+    const done = tryFinish(assemble(v, {}, true));
+    if (done) return done;
+  }
   // 4. Хвосты списков одной долей n/64: наибольшая n, при которой помещается.
   const cut = (n: number) => {
     const extra: Record<string, number> = {};

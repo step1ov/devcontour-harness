@@ -172,7 +172,11 @@ lead outline`): незарегистрированные этапы и комп�
   `other`), `byModel[]` (`runtime`, `vendor`, `model`; до 50, опущенное —
   `byModelTruncated`), `byWork[]` (`workId`, `attempts[]` — последние 20
   попыток, ранние — `attemptsTruncated`; опущенные работы —
-  `byWorkTruncated`).
+  `byWorkTruncated`). Попытки — по времени (номер, начало первого вызова),
+  в списке — последние 20. Сверх байтового предела представление сперва
+  убирает списки `costs.byWork` и `works[].cost.byAttempt` (итоги, роли и
+  модели остаются; опущенное — в `byWorkTruncated` и
+  `byAttemptTruncated`).
 - **Расход работы** (`works[].cost`, ревизия 10): `{usd, bound, calls,
 unpricedCalls, byAttempt[], byAttemptTruncated}` — для деталей работы,
   без предела списка работ.
@@ -188,13 +192,16 @@ unpricedCalls, byAttempt[], byAttemptTruncated}` — для деталей ра�
 - **Шаг документации выпуска** (`forecast.progress.release.docs`, ревизия
   10): есть всегда, когда `release.docs` не `off`; `mode`, `status`
   (`no-works`, `missing`, `not-after-roots`, `pending`, `done`), `works`,
-  `missingRoots` (корни без работы документации — и при `missing`), `line`
+  `missingRoots` (корни без работы документации — и при `missing`; только
+  работы текущего выпуска, после последнего `release done`), `line`
   на языке представления (`--lang`), в том числе для `done`.
 - **Справочник причин** (`works[].attempts.lastFailure`, ревизия 10):
   `reference` — путь в пакете (`docs/failure-causes.md#kind-gate`),
-  `referenceUrl` — тот же документ в репозитории harness этой версии:
-  `<repository из package.json>/blob/v<версия>/docs/failure-causes.md#…`
-  (версия не вида `X.Y.Z…` — ветка `master`; нет `repository` — поля нет).
+  `referenceUrl` — тот же документ в репозитории harness на ветке
+  `master` (`<repository из package.json>/blob/master/docs/failure-causes.md#…`;
+  теги выпусков ставятся не всегда, поэтому ссылка не на тег версии; документ
+  на master может быть новее установленной версии, якоря стабильны; нет
+  `repository` — поля нет).
 
 ## Гарантии
 

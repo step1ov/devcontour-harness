@@ -638,6 +638,14 @@ export class Engine {
           // Разборы и сбросы ведущего — история работы: новой редакцией
           // предел сбросов не обойти (счёт — по пределу попыток, `rework.budgets`).
           ...(prior?.leadRecovery ? { leadRecovery: prior.leadRecovery } : {}),
+          // Предложения исполнителей и решения по ним — история работы
+          // (alpha.70, ревью 1): новой редакцией графа не стираются.
+          ...(prior?.proposals?.length ? { proposals: prior.proposals } : {}),
+          // Исследование — к той же постановке: изменённое поручение его
+          // не наследует (его основание — прежняя постановка).
+          ...(prior?.research && contentDigest(prior.order) === contentDigest(order)
+            ? { research: prior.research }
+            : {}),
           // Удержание операции принадлежит ей: новая редакция источника его не
           // снимает — только release или передача владельцем.
           ...(prior?.hold ? { hold: prior.hold } : {}),
@@ -2490,9 +2498,21 @@ export class Engine {
     if (!proposals.length) return [];
     return this.withAttempt(id, token, 'proposal.recorded', (a, w, tx) => {
       const existing = w.proposals ?? [];
-      const room = Math.max(0, PROPOSAL_LIMITS.perWork - existing.length);
+      // Разделения — свой предел: задачи-продолжения его не съедают (ревью 1).
+      const splits = existing.filter((p) => p.kind === 'split').length;
+      const followUps = existing.length - splits;
+      const followRoom = Math.max(
+        0,
+        PROPOSAL_LIMITS.perWork - PROPOSAL_LIMITS.splitsPerWork - followUps,
+      );
+      const splitRoom = Math.max(0, PROPOSAL_LIMITS.splitsPerWork - splits);
+      let f = 0;
+      let sp = 0;
+      const fitting = proposals.filter((p) =>
+        p.kind === 'split' ? sp++ < splitRoom : f++ < followRoom,
+      );
       const at = iso(this.now());
-      const added = proposals.slice(0, room).map((p, i): WorkProposal =>
+      const added = fitting.map((p, i): WorkProposal =>
         workProposalSchema.parse({
           id: 'P-' + digestOf({ work: w.id, run: a.id, i, title: p.title }).slice(0, 12),
           kind: p.kind,

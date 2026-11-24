@@ -77,6 +77,8 @@ export function costBreakdown(
   const roles = new Map<CostRole, CostAmount>();
   const models = new Map<string, { runtime: string; model: string } & CostAmount>();
   const works = new Map<string, CostAmount & { attempts: Map<string, CostAmount> }>();
+  // Начало попытки — по её самому раннему вызову (порядок попыток).
+  const firstAt = new Map<string, string>();
   for (const r of records) {
     add(total, r);
     if (!options.releaseSince || r.startedAt > options.releaseSince) add(release, r);
@@ -90,8 +92,11 @@ export function costBreakdown(
       const w =
         works.get(workId) ?? works.set(workId, { ...empty(), attempts: new Map() }).get(workId)!;
       add(w, r);
-      if (r.runId)
+      if (r.runId) {
         add(w.attempts.get(r.runId) ?? w.attempts.set(r.runId, empty()).get(r.runId)!, r);
+        const at = firstAt.get(r.runId);
+        if (!at || r.startedAt < at) firstAt.set(r.runId, r.startedAt);
+      }
     }
   }
   const byUsd = (a: CostAmount, b: CostAmount) => b.usd - a.usd || b.calls - a.calls;
@@ -102,7 +107,7 @@ export function costBreakdown(
     .map((m) => round({ ...m, vendor: vendorOf(m.runtime) }))
     .sort(byUsd);
   const works_ = [...works]
-    .map(([workId, w]) => workCostOf(workId, w, options.attemptOf, attemptLimit))
+    .map(([workId, w]) => workCostOf(workId, w, options.attemptOf, attemptLimit, firstAt))
     .sort(byUsd);
   return {
     total: round(total),
@@ -124,8 +129,18 @@ function workCostOf(
   w: CostAmount & { attempts: Map<string, CostAmount> },
   attemptOf: ((runId: string) => number | undefined) | undefined,
   limit: number,
+  firstAt: ReadonlyMap<string, string>,
 ): WorkCost {
-  const attempts = [...w.attempts].map(([runId, a]) =>
+  // По времени (номер попытки, затем начало, затем ID): «последние» — последние
+  // по времени, а не по порядку записей учёта (ревью alpha.70).
+  const order = (runId: string) =>
+    [attemptOf?.(runId) ?? Number.MAX_SAFE_INTEGER, firstAt.get(runId) ?? '', runId] as const;
+  const sorted = [...w.attempts].sort(([a], [b]) => {
+    const x = order(a);
+    const y = order(b);
+    return x[0] - y[0] || x[1].localeCompare(y[1]) || x[2].localeCompare(y[2]);
+  });
+  const attempts = sorted.map(([runId, a]) =>
     round({
       runId,
       ...((n) => (n !== undefined ? { attempt: n } : {}))(attemptOf?.(runId)),

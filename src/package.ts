@@ -20,14 +20,13 @@ export const HARNESS_REPOSITORY_URL: string | undefined = (() => {
 })();
 
 /**
- * База ссылок на документы этой версии: `<репозиторий>/blob/v<версия>/`;
- * версии нет — ветка `master`. Нет репозитория — `undefined`.
+ * База ссылок на документы (ревью alpha.70): `<репозиторий>/blob/master/`.
+ * Теги выпусков в репозитории ставятся не всегда, поэтому ссылка на тег
+ * версии вела бы в 404; документ на master может быть новее установленной
+ * версии (якоря справочника стабильны). Нет репозитория — `undefined`.
  */
 export function harnessDocsBase(
-  version: string | undefined = HARNESS_VERSION,
   repository: string | undefined = HARNESS_REPOSITORY_URL,
 ): string | undefined {
-  if (!repository) return undefined;
-  const ref = version && /^\d+\.\d+\.\d+/.test(version) ? `v${version}` : 'master';
-  return `${repository}/blob/${ref}/`;
+  return repository ? `${repository}/blob/master/` : undefined;
 }

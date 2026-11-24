@@ -169,3 +169,83 @@ test('разбор в начале попытки: разделение — ве
   assert.match(writerPrompt, /Triage before coding/);
   h.close();
 });
+
+test('ревью 1: новая редакция графа не стирает предложения и решения; исследование — только у той же постановки', async () => {
+  const { engineOf, graphOf, ready } = await import('./engine-fixture.ts');
+  const env = engineOf();
+  const e = env.engine;
+  ready(e, graphOf({ a: [], b: [] }));
+  e.lead('c1');
+  const run = e.claim('c1')!;
+  const [id] = e.recordProposals(run.id, run.token, [
+    {
+      kind: 'split',
+      title: 'A',
+      goal: 'Разделить работу A',
+      acceptance: [],
+      reason: 'две части',
+      parts: [],
+    },
+  ]);
+  e.recordResearch(run.id, run.token, { text: 'исследование работы ' + run.workId });
+  e.fail(run.id, run.token, 'split', { kind: 'needs-lead' });
+  e.decideProposal(run.workId, id!, { decision: 'reject', by: 'lead', reason: 'Делать целиком' });
+  // Редакция 2: соседняя работа изменена, эта — та же постановка.
+  const next = graphOf({ a: [], b: [] }, '2');
+  const other = next.orders.find((o) => o.id !== run.workId)!;
+  other.title = 'Изменённая соседняя работа';
+  ready(e, next);
+  const w = e.read((v) => v.work(run.workId)!);
+  assert.equal(w.proposals?.[0]?.status, 'rejected');
+  assert.equal(w.proposals?.[0]?.decision?.reason, 'Делать целиком');
+  assert.match(w.research?.text ?? '', /исследование/);
+  // Редакция 3: изменена сама работа — исследование не наследуется.
+  const third = graphOf({ a: [], b: [] }, '3');
+  third.orders.find((o) => o.id === run.workId)!.goal = 'Другая цель этой работы целиком.';
+  ready(e, third);
+  const w3 = e.read((v) => v.work(run.workId)!);
+  assert.equal(w3.research, undefined);
+  assert.equal(w3.proposals?.length, 1);
+});
+
+test('ревью 1: разделение после отклонённого — засчитанная незавершённость, не новое предложение', async () => {
+  const split = {
+    result: {
+      completed: false,
+      summary: 'Предлагаю разделить',
+      discoveries: [],
+      triage: {
+        decision: 'split',
+        reason: 'Две части',
+        parts: [
+          { title: 'API', goal: 'Функция greet', acceptance: ['greet'] },
+          { title: 'Экран', goal: 'Экран greet', acceptance: ['экран'] },
+        ],
+      },
+    },
+  };
+  const ctx = hsetup({
+    scenario: { writer: [split, split], reviewer: approve() },
+    policy: (p: any) => (p.maxAttempts = 3),
+  });
+  const h = ctx.open();
+  await h.run({ graph: ctx.graph, author: 'claude' });
+  const first = h.engine.read((v) => v.attempts(WORK)[0]!);
+  h.engine.decideProposal(WORK, first.writerSplit!, {
+    decision: 'reject',
+    by: 'lead',
+    reason: 'Делать целиком',
+  });
+  h.engine.retry(WORK, undefined, 'lead');
+  await h.run({ graph: ctx.graph, author: 'claude' }).catch(() => undefined);
+  const second = h.engine.read((v) => v.attempts(WORK)[1]!);
+  assert.equal(second.failureKind, 'unfinished', second.error);
+  assert.equal(second.writerSplit, undefined);
+  assert.match(second.error ?? '', /снова предложил разделить/);
+  assert.equal(
+    h.engine.read((v) => v.work(WORK)!.proposals?.length),
+    1,
+    'нового предложения нет',
+  );
+  h.close();
+});

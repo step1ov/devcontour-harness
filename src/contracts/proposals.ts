@@ -17,7 +17,10 @@ export const proposalStatuses = ['proposed', 'accepted', 'rejected'] as const;
 export const PROPOSAL_LIMITS = {
   followUps: 10,
   parts: 8,
+  /** Всего записей на работу; у разделений — свой предел внутри (`splitsPerWork`). */
   perWork: 50,
+  /** Записей разделения на работу: задачи-продолжения их место не занимают. */
+  splitsPerWork: 10,
   acceptance: 10,
 } as const;
 

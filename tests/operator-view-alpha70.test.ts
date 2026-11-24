@@ -14,6 +14,7 @@ import { costBreakdown, costRoleOf } from '../src/projections/costs.ts';
 import { harnessDocsBase } from '../src/package.ts';
 import { releaseDocsLine } from '../src/control/release-docs.ts';
 import { operatorView } from '../src/projections/operator-view.ts';
+import { baseInput } from './operator-view-input.ts';
 import { engineOf, graphOf, policyOf, ready, sha } from './engine-fixture.ts';
 
 const call = (over: Partial<CallRecord>): CallRecord => ({
@@ -254,19 +255,12 @@ test('view: второй проход и предложения у работы,
   );
 });
 
-test('lastFailure.referenceUrl — адрес документа этой версии; шаг документации принят — строка done', () => {
-  assert.equal(
-    harnessDocsBase('0.1.0-alpha.70', 'https://github.com/o/r'),
-    'https://github.com/o/r/blob/v0.1.0-alpha.70/',
-  );
-  assert.equal(
-    harnessDocsBase('dev', 'https://github.com/o/r'),
-    'https://github.com/o/r/blob/master/',
-  );
-  assert.equal(harnessDocsBase('0.1.0', ''), undefined);
+test('lastFailure.referenceUrl — адрес документа на master; шаг документации принят — строка done', () => {
+  assert.equal(harnessDocsBase('https://github.com/o/r'), 'https://github.com/o/r/blob/master/');
+  assert.equal(harnessDocsBase(''), undefined);
   assert.match(
     harnessDocsBase() ?? '',
-    /^https:\/\/github\.com\/[^/]+\/devcontour-harness\/blob\/v\d/,
+    /^https:\/\/github\.com\/[^/]+\/devcontour-harness\/blob\/master\/$/,
   );
   const env = engineOf(policyOf((p) => delete p.harnessMode));
   ready(env.engine, graphOf({ w1: [] }));
@@ -295,4 +289,36 @@ test('lastFailure.referenceUrl — адрес документа этой вер
     releaseDocsLine({ mode: 'advisory', status: 'done', roots: ['a'], works: ['docs'] }, 'en'),
     'Release documentation step: docs work docs accepted',
   );
+});
+
+test('ревью 1: попытки в расходе — по времени, «последние» — последние по времени; большой расход ужимается fitSize, итоги остаются', () => {
+  const c = costBreakdown(
+    [
+      call({ id: 'z', workId: 'a', runId: 'run-z', startedAt: '2026-11-24T09:00:00.000Z' }),
+      call({ id: 'a', workId: 'a', runId: 'run-a', startedAt: '2026-11-24T12:00:00.000Z' }),
+      call({ id: 'm', workId: 'a', runId: 'run-m', startedAt: '2026-11-24T10:00:00.000Z' }),
+    ],
+    { limits: { attempts: 2 } },
+  );
+  assert.deepEqual(
+    c.byWork[0]!.attempts.map((x) => x.runId),
+    ['run-m', 'run-a'],
+  );
+  assert.equal(c.byWork[0]!.attemptsTruncated, 1);
+  // Расход 200 работ по 20 попыток не делает представление недоступным.
+  const records = Array.from({ length: 200 * 20 }, (_, i) =>
+    call({
+      id: `c${i}`,
+      workId: `work-${Math.floor(i / 20)}`,
+      runId: `run-${i}-${'x'.repeat(150)}`,
+      startedAt: new Date(Date.parse('2026-11-24T00:00:00.000Z') + i * 1000).toISOString(),
+    }),
+  );
+  const costs = costBreakdown(records);
+  const view = operatorViewSchema.parse(
+    operatorView(baseInput({ costs }), { maxBytes: 256 * 1024 }),
+  );
+  assert.equal(view.costs?.total.calls, 4000);
+  assert.equal(view.costs?.byWork.length, 0);
+  assert.equal(view.costs?.byWorkTruncated, 200);
 });
