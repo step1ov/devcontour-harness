@@ -1,6 +1,7 @@
 import { appendFileSync } from 'node:fs';
+import { controllerTemp } from '../environment/controller-temp.ts';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { homedir, tmpdir } from 'node:os';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { z } from 'zod';
 import type {
@@ -29,7 +30,7 @@ import { redactor } from '../environment/redaction.ts';
 import {
   WriteGuardUnavailable,
   guardedArgv,
-  runtimeStateEntries,
+  writerRuntimeHome,
 } from '../environment/write-guard.ts';
 import { inspectReview } from './inspect.ts';
 import { probeCallMs, probeServer, probeTool } from './review-probe.ts';
@@ -236,7 +237,7 @@ export function cliAdapter(
       if (r.session.kind !== 'fresh')
         throw new Error(`${runtime}: продолжение сессии не поддерживается`);
       const review = r.task !== 'implement';
-      const dir = r.artifactDir ?? (await mkdtemp(join(tmpdir(), 'harness-call-')));
+      const dir = r.artifactDir ?? (await mkdtemp(join(controllerTemp.dir(), 'harness-call-')));
       await mkdir(dir, { recursive: true });
       const schemaPath = join(dir, 'schema.json'),
         resultPath = join(dir, 'result.json'),
@@ -388,11 +389,30 @@ export function cliAdapter(
       // Граница записи облегчённого режима: процесс runtime и все его
       // потомки пишут только в свои каталоги, кеши и состояние своего CLI.
       let launch = argv;
+      // Свой домашний каталог CLI на вызов: настройки пользователя (общие с
+      // ведущим и reviewer) исполнителю на запись не открыты (alpha.69).
+      const runtimeHome = light ? join(dir, 'runtime-home') : undefined;
+      let homeEnv: Record<string, string> = {};
+      // Входа для своего каталога не нашлось: вызов идёт (вход может прийти
+      // иначе), а отказ runtime получит подсказку, что сделать.
+      let homeHint: string | undefined;
+      if (runtimeHome) {
+        const prepared = await writerRuntimeHome(
+          runtime,
+          runtimeHome,
+          r.env,
+          r.env.HOME ?? homedir(),
+        );
+        homeEnv = prepared.env;
+        homeHint = prepared.missing;
+      }
       if (light?.guard)
         try {
+          // Каталог вызова открыт на запись: в нём файл ответа runtime
+          // (`--output-last-message`) и свой домашний каталог CLI.
           launch = guardedArgv(argv, [
             ...light.guard.map((subpath) => ({ subpath })),
-            ...runtimeStateEntries(runtime),
+            { subpath: dir },
           ]);
         } catch (error) {
           if (!(error instanceof WriteGuardUnavailable)) throw error;
@@ -414,7 +434,14 @@ export function cliAdapter(
         model: null,
         runtimeVersion: version,
         usage: unknownUsage(),
-        diagnostics: { exitCode: null, reason: redact(reason).slice(0, 500), log: logPath },
+        diagnostics: {
+          exitCode: null,
+          reason: redact(homeHint ? `${reason}; облегчённый режим: ${homeHint}` : reason).slice(
+            0,
+            500,
+          ),
+          log: logPath,
+        },
       });
       let result;
       // События runtime для inspection разбираются до маскирования (иначе
@@ -445,7 +472,7 @@ export function cliAdapter(
             (r.task === 'review-code'
               ? '\nReport execution.commands with command, exitCode and summary, or an empty list and a concrete execution.noCommandsReason. Never claim a command was run based only on the supplied diff.'
               : ''),
-          env: { ...r.env, HOME: r.env.HOME ?? homedir() },
+          env: { ...r.env, HOME: r.env.HOME ?? homedir(), ...homeEnv },
           redact,
         });
       } catch (error) {
@@ -453,6 +480,10 @@ export function cliAdapter(
         if (code === 'ENOENT' || code === 'EACCES' || code === 'EPERM')
           return unavailable(`${runtime}: runtime не запускается: ${String(error)}`);
         throw error;
+      } finally {
+        // Копия входа живёт только на время вызова; обратно ничего не копируется.
+        if (runtimeHome)
+          await rm(runtimeHome, { recursive: true, force: true }).catch(() => undefined);
       }
       const usage = telemetry.usage(result.code === 0 && !result.timedOut && !signal.aborted);
       const model = telemetry.model();
@@ -524,7 +555,10 @@ export function cliAdapter(
           ...base,
           // Нехватка окна — ответ runtime о запросе, а не недоступный runtime.
           status: started || contextExhausted ? 'failed' : 'unavailable',
-          diagnostics: diagnostics(`код ${result.code}${reason() ? ': ' + reason() : ''}`),
+          diagnostics: diagnostics(
+            `код ${result.code}${reason() ? ': ' + reason() : ''}` +
+              (!started && homeHint ? `; облегчённый режим: ${homeHint}` : ''),
+          ),
         };
       let output: unknown;
       try {

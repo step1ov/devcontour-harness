@@ -9,6 +9,7 @@ import {
   lstat,
   chmod,
 } from 'node:fs/promises';
+import { controllerTemp } from '../environment/controller-temp.ts';
 import { tmpdir } from 'node:os';
 import { hostLoad, loadText, type HostLoad } from '../environment/host-load.ts';
 import { join, resolve, sep, delimiter, relative, dirname } from 'node:path';
@@ -29,7 +30,7 @@ import {
   writeGuardActive,
   NO_RETRY_GATE_CODES,
 } from '../contracts/index.ts';
-import { guardEntries, guardedArgv } from '../environment/write-guard.ts';
+import { WriteGuardUnavailable, guardEntries, guardedArgv } from '../environment/write-guard.ts';
 import { ReapFailure, command, git, gitOutput, gitRawOutput } from '../environment/process.ts';
 import {
   isolation,
@@ -551,10 +552,10 @@ export async function runCheck(
     // Токен старта в stderr текущей попытки.
     printed = false;
   const token = randomUUID().replace(/-/g, '');
-  const scratch = await realpath(await mkdtemp(join(tmpdir(), 'dc-gate-')));
+  const scratch = await realpath(await mkdtemp(join(controllerTemp.dir(), 'dc-gate-')));
   // Метка старта — вне TMPDIR команды: проверка, чистящая свой временный
   // каталог, не должна стирать признак того, что она уже начиналась.
-  const marks = await realpath(await mkdtemp(join(tmpdir(), 'dc-start-')));
+  const marks = await realpath(await mkdtemp(join(controllerTemp.dir(), 'dc-start-')));
   // Свой короткий временный каталог srt (`srtTempDir`), если его пришлось создать.
   let srtTemp: string | undefined;
   /** Отказ тела проверки: уборка его не заменяет. */
@@ -1332,7 +1333,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       ? 'Проверка свойств и эталонных наборов'
       : 'Генеративная проверка';
   const propertyDir = property
-    ? await realpath(await mkdtemp(join(tmpdir(), 'harness-property-')))
+    ? await realpath(await mkdtemp(join(controllerTemp.dir(), 'harness-property-')))
     : undefined;
   const propertyPath = propertyDir ? join(propertyDir, 'report.json') : undefined;
   const seed = property ? propertySeed(property.runId, phase, gate.id) : 0;
@@ -1341,7 +1342,7 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
   // закреплённых байтов в каталоге controller вне worktree, только для чтения.
   const corpus = expected?.corpus && property?.corpus ? property.corpus : undefined;
   const corpusDir = corpus
-    ? await realpath(await mkdtemp(join(tmpdir(), 'harness-corpus-')))
+    ? await realpath(await mkdtemp(join(controllerTemp.dir(), 'harness-corpus-')))
     : undefined;
   const corpusPath = corpusDir ? join(corpusDir, 'corpus.json') : undefined;
   if (corpusPath) {
@@ -1762,6 +1763,12 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       cause = 'sandbox-policy';
     }
     if (error instanceof UntrustedCheckoutError) kind = 'scope-violation';
+    // Нет механизма границы записи (alpha.69): проверка не стартовала —
+    // отказ среды, исполнителю не засчитывается.
+    if (error instanceof WriteGuardUnavailable) {
+      kind = 'environment';
+      cause = 'sandbox-launch';
+    }
     // Процессы проверки не удалось остановить или пересчитать: о коде это
     // ничего не говорит — отказ среды. Проверка при этом не пройдена, и
     // повтора на том же дереве нет (повтор интеграции — только у `gate`):

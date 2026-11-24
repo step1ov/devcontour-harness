@@ -9,6 +9,7 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  rmSync,
   writeFileSync,
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
@@ -79,8 +80,24 @@ test('политика без harnessMode — облегчённый режим;
 
 test('кеши границы: умолчания, add, replace; профиль Seatbelt открывает только их и /dev', () => {
   const defaults = guardCaches(undefined, '/home/u').map((c) => c.source);
-  for (const id of ['npm', 'mac-caches', 'maestro', 'core-simulator', 'android', 'docker-buildx'])
+  for (const id of [
+    'npm-cache',
+    'playwright-mac',
+    'core-simulator',
+    'android-avd',
+    'gradle-caches',
+    'docker-buildx',
+  ])
     assert.ok(defaults.includes(id), id);
+  // Настройки CLI пользователя, исполняемые каталоги npx, corepack и
+  // дистрибутивы gradle на запись не открыты (alpha.69, ревью).
+  for (const c of guardCaches(undefined, '/home/u'))
+    assert.ok(
+      !/\/\.(codex|claude)(\.json)?$|\/\.claude\/|_npx|corepack|\/\.gradle$|\/\.gradle\/wrapper|\/Library\/Caches$|\/\.cache$/.test(
+        c.path,
+      ),
+      c.path,
+    );
   const added = guardCaches({ add: ['~/.custom-cache'] }, '/home/u');
   assert.ok(added.some((c) => c.path.endsWith('/home/u/.custom-cache')));
   assert.deepEqual(
@@ -139,6 +156,15 @@ test(
     const scratch = join(root, 'scratch');
     execFileSync('mkdir', ['-p', cwd, scratch]);
     const outside = join(root, 'outside.txt');
+    // Свой HOME с настройками CLI: исполнитель их не меняет (alpha.69, ревью).
+    const home = join(root, 'home');
+    execFileSync('mkdir', ['-p', join(home, '.codex'), join(home, '.claude')]);
+    writeFileSync(join(home, '.codex', 'auth.json'), '{"fake":true}');
+    writeFileSync(join(home, '.codex', 'config.toml'), 'model = "x"\n');
+    writeFileSync(join(home, '.claude', 'settings.json'), '{}');
+    // Каталог вызова вне временного каталога: файл ответа codex пишется в него.
+    const call = realpathSync(mkdtempSync('/tmp/light-call-'));
+    t.after(() => rmSync(call, { recursive: true, force: true }));
     const exe = join(root, 'fake-runtime.sh');
     writeFileSync(
       exe,
@@ -146,6 +172,11 @@ test(
 if [ "$1" = "--version" ]; then echo "fake 1.0"; exit 0; fi
 cat > /dev/null
 R="${cwd}/report.txt"
+OUT=""
+while [ $# -gt 0 ]; do [ "$1" = "--output-last-message" ] && OUT="$2"; shift; done
+( echo hacked > "$HOME/.claude/settings.json" ) 2>/dev/null && echo "claude-settings=ok" >> "$R" || echo "claude-settings=denied" >> "$R"
+( echo hacked > "$HOME/.codex/config.toml" ) 2>/dev/null && echo "codex-config=ok" >> "$R" || echo "codex-config=denied" >> "$R"
+[ -f "$CODEX_HOME/auth.json" ] && [ "$CODEX_HOME" != "$HOME/.codex" ] && echo "codex-home=own" >> "$R" || echo "codex-home=shared" >> "$R"
 ( echo inside > "${cwd}/inside.txt" ) && echo "write-inside=ok" >> "$R" || echo "write-inside=fail" >> "$R"
 ( echo outside > "${outside}" ) 2>/dev/null && echo "write-outside=ok" >> "$R" || echo "write-outside=denied" >> "$R"
 ( echo tmp > "$TMPDIR/t.txt" ) && echo "write-tmp=ok" >> "$R" || echo "write-tmp=fail" >> "$R"
@@ -156,12 +187,13 @@ ${
     ? `"${browser.bin}" ${browser.args.join(' ')} --no-sandbox --user-data-dir="$TMPDIR/profile" --dump-dom 'data:text/html,<p>guarded</p>' 2>/dev/null | grep -q guarded && echo "browser=ok" >> "$R" || echo "browser=fail" >> "$R"`
     : 'echo "browser=skip" >> "$R"'
 }
+printf '{"done":true}' > "$OUT"
 echo '{}'
 `,
     );
     chmodSync(exe, 0o755);
     const adapter = cliAdapter('codex', { executable: exe });
-    await adapter.invoke(
+    const response = await adapter.invoke(
       {
         callId: 'c1',
         task: 'implement',
@@ -177,8 +209,8 @@ echo '{}'
           light: { guard: [cwd, scratch] },
         },
         timeoutMs: 150_000,
-        env: { PATH: process.env.PATH!, HOME: homedir(), TMPDIR: scratch },
-        artifactDir: join(root, 'call'),
+        env: { PATH: process.env.PATH!, HOME: home, TMPDIR: scratch },
+        artifactDir: call,
       },
       AbortSignal.timeout(170_000),
     );
@@ -188,6 +220,13 @@ echo '{}'
         .split('\n')
         .map((l) => l.split('=') as [string, string]),
     );
+    assert.equal(response.status, 'ok', JSON.stringify(response.diagnostics));
+    assert.deepEqual(response.output, { done: true }, 'ответ из каталога вызова прочитан');
+    assert.equal(report['claude-settings'], 'denied');
+    assert.equal(report['codex-config'], 'denied');
+    assert.equal(readFileSync(join(home, '.codex', 'config.toml'), 'utf8'), 'model = "x"\n');
+    assert.equal(report['codex-home'], 'own');
+    assert.equal(existsSync(join(call, 'runtime-home')), false, 'копия входа убрана');
     assert.equal(report['write-inside'], 'ok');
     assert.equal(report['write-tmp'], 'ok');
     assert.equal(report['write-outside'], 'denied');

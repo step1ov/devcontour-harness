@@ -1,4 +1,5 @@
 import { freshDiagnosis } from '../projections/lead-recovery.ts';
+import { controllerTemp } from '../environment/controller-temp.ts';
 import type { LeadDiagnosis } from '../contracts/execution.ts';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -364,6 +365,9 @@ export class Runner {
   constructor(readonly options: RunnerOptions) {
     this.engine = options.engine;
     this.policy = options.engine.policy;
+    // Временные файлы controller — под каталогом состояния, когда граница
+    // записи открывает исполнителю системный временный каталог (alpha.69).
+    controllerTemp.use(writeGuardActive(this.policy) ? options.stateDir : undefined);
     this.owner = options.owner ?? 'harness-' + randomUUID();
     this.corpus = new CorpusStore(
       this.engine,

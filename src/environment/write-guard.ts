@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, realpathSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { delimiter, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import {
   DEFAULT_WRITE_GUARD_CACHES,
   type ExecutionPolicy,
@@ -81,16 +81,6 @@ export function guardCaches(
   });
 }
 
-/**
- * Собственное состояние CLI исполнителя (сессии, журналы, настройки): без
- * записи в него runtime не работает. Открыто только исполнителю.
- */
-export function runtimeStateEntries(runtime: 'codex' | 'claude', home = homedir()): GuardEntry[] {
-  return runtime === 'codex'
-    ? [{ subpath: realOr(join(home, '.codex')) }]
-    : [{ subpath: realOr(join(home, '.claude')) }, { prefix: realOr(join(home, '.claude.json')) }];
-}
-
 const sbString = (value: string) => '"' + value.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
 const sbRegex = (value: string) =>
   '#"^' + value.replace(/[.*+?^${}()|[\]\\/"]/g, (c) => (c === '"' ? '\\"' : '\\' + c)) + '"';
@@ -111,31 +101,28 @@ export function seatbeltProfile(entries: GuardEntry[]) {
   ].join('\n');
 }
 
-/** Найти исполняемый файл в PATH. */
-function which(name: string, path = process.env.PATH ?? '') {
-  for (const dir of path.split(delimiter)) {
-    if (!dir) continue;
-    const file = join(dir, name);
-    if (existsSync(file)) return file;
-  }
-  return undefined;
-}
+/**
+ * Механизм границы — только из системных путей (alpha.69, ревью): не из PATH,
+ * где каталог, открытый исполнителю на запись, мог бы подложить свой `bwrap`.
+ */
+export const TRUSTED_SANDBOX_EXEC = '/usr/bin/sandbox-exec';
+export const TRUSTED_BWRAP = ['/usr/bin/bwrap', '/bin/bwrap'] as const;
+const trustedBwrap = () => TRUSTED_BWRAP.find((p) => existsSync(p));
 
 export class WriteGuardUnavailable extends Error {}
 
 /** Механизм границы записи на этой машине, или почему его нет. */
 export function writeGuardSupport(
   platform = process.platform,
-  path = process.env.PATH,
 ): { ok: true; mechanism: string } | { ok: false; detail: string } {
   if (platform === 'darwin')
-    return existsSync('/usr/bin/sandbox-exec')
+    return existsSync(TRUSTED_SANDBOX_EXEC)
       ? { ok: true, mechanism: 'seatbelt' }
-      : { ok: false, detail: 'нет /usr/bin/sandbox-exec' };
+      : { ok: false, detail: `нет ${TRUSTED_SANDBOX_EXEC}` };
   if (platform === 'linux')
-    return which('bwrap', path)
+    return trustedBwrap()
       ? { ok: true, mechanism: 'bubblewrap' }
-      : { ok: false, detail: 'нет bubblewrap (bwrap) в PATH' };
+      : { ok: false, detail: `нет bubblewrap (${TRUSTED_BWRAP.join(' или ')})` };
   return { ok: false, detail: `платформа ${platform} не поддерживается` };
 }
 
@@ -147,28 +134,29 @@ export function guardedArgv(
   argv: string[],
   entries: GuardEntry[],
   platform = process.platform,
-  path = process.env.PATH,
 ): string[] {
-  const support = writeGuardSupport(platform, path);
+  const support = writeGuardSupport(platform);
   if (!support.ok)
     throw new WriteGuardUnavailable(
       `Граница записи облегчённого режима недоступна: ${support.detail}. Установите механизм (на Linux — bubblewrap) или снимите границу writeGuard.off: true (решение владельца)`,
     );
-  if (platform === 'darwin')
-    return ['/usr/bin/sandbox-exec', '-p', seatbeltProfile(entries), ...argv];
+  if (platform === 'darwin') return [TRUSTED_SANDBOX_EXEC, '-p', seatbeltProfile(entries), ...argv];
   const binds = entries.flatMap((e) => {
     const p = 'subpath' in e ? e.subpath : e.prefix;
     return ['--bind-try', p, p];
   });
+  // /proc — привязкой хоста, а не новым procfs: `--proc` требует своего
+  // пространства PID, а PID остаются общими с хостом (ps, kill).
   return [
-    which('bwrap', path)!,
+    trustedBwrap()!,
     '--ro-bind',
     '/',
     '/',
     '--dev-bind',
     '/dev',
     '/dev',
-    '--proc',
+    '--ro-bind',
+    '/proc',
     '/proc',
     ...binds,
     '--',
@@ -187,4 +175,59 @@ export function guardEntries(
     ...guardCaches(policy.writeGuard).map((c) => ({ subpath: c.path })),
     ...extra,
   ];
+}
+
+/**
+ * Свой домашний каталог CLI исполнителя (alpha.69, ревью): настройки,
+ * хуки, AGENTS.md/CLAUDE.md и конфигурация MCP пользователя — общие с
+ * ведущим, reviewer и владельцем — исполнителю на запись не открыты. Вызов
+ * получает свой каталог (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`) с копией только
+ * того, что нужно для входа; обратно ничего не копируется.
+ *
+ * - codex: `auth.json` (копия файла; конфигурацию пользователя вызов и так
+ *   не читает — `--ignore-user-config`);
+ * - claude: `.credentials.json`, если вход хранится файлом (Linux); на macOS
+ *   вход по подписке лежит в Keychain и в свой каталог не переносится —
+ *   нужен `CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`) или
+ *   `ANTHROPIC_API_KEY` в окружении исполнителя (`missing` называет это).
+ */
+export async function writerRuntimeHome(
+  runtime: 'codex' | 'claude',
+  dir: string,
+  env: Record<string, string>,
+  home = homedir(),
+): Promise<{ env: Record<string, string>; missing?: string }> {
+  const { mkdir, copyFile, writeFile } = await import('node:fs/promises');
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  const copy = async (from: string, to: string) => {
+    try {
+      await copyFile(from, to);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (runtime === 'codex') {
+    const codexHome = env.CODEX_HOME ?? join(home, '.codex');
+    const ok = await copy(join(codexHome, 'auth.json'), join(dir, 'auth.json'));
+    return {
+      env: { CODEX_HOME: dir },
+      ...(ok || env.OPENAI_API_KEY || env.CODEX_API_KEY
+        ? {}
+        : { missing: `нет ${join(codexHome, 'auth.json')}: выполните codex login` }),
+    };
+  }
+  const claudeHome = env.CLAUDE_CONFIG_DIR ?? join(home, '.claude');
+  const file = await copy(join(claudeHome, '.credentials.json'), join(dir, '.credentials.json'));
+  // Без файла настроек claude спрашивает начальную настройку: отвечено.
+  await writeFile(join(dir, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true }));
+  return {
+    env: { CLAUDE_CONFIG_DIR: dir },
+    ...(file || env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY
+      ? {}
+      : {
+          missing:
+            'вход claude по подписке хранится в Keychain и в свой каталог исполнителя не переносится: выполните claude setup-token и передайте CLAUDE_CODE_OAUTH_TOKEN исполнителю (environment.inherit), или задайте ANTHROPIC_API_KEY',
+        }),
+  };
 }

@@ -51,16 +51,27 @@ export type WriteGuardPolicy = z.infer<typeof writeGuardSchema>;
  * — каталоги пользователя macOS (`getconf`), на других системах пропускаются.
  */
 export const DEFAULT_WRITE_GUARD_CACHES: readonly { id: string; path: string; why: string }[] = [
-  { id: 'npm', path: '~/.npm', why: 'кеш npm' },
+  // Только каталоги кешей: без исполняемых каталогов (npx, corepack,
+  // глобальные пакеты, дистрибутивы gradle-wrapper) — их подмена
+  // исполнялась бы потом вне попытки.
+  { id: 'npm-cache', path: '~/.npm/_cacache', why: 'кеш пакетов npm' },
+  { id: 'npm-logs', path: '~/.npm/_logs', why: 'журналы npm' },
   { id: 'pnpm-store', path: '~/.pnpm-store', why: 'хранилище pnpm' },
-  { id: 'pnpm-mac', path: '~/Library/pnpm', why: 'хранилище и кеш pnpm на macOS' },
-  { id: 'pnpm-xdg', path: '~/.local/share/pnpm', why: 'хранилище pnpm на Linux' },
-  { id: 'yarn', path: '~/.yarn', why: 'кеш yarn' },
+  { id: 'pnpm-store-mac', path: '~/Library/pnpm/store', why: 'хранилище pnpm на macOS' },
+  { id: 'pnpm-store-xdg', path: '~/.local/share/pnpm/store', why: 'хранилище pnpm на Linux' },
+  { id: 'pnpm-cache-mac', path: '~/Library/Caches/pnpm', why: 'кеш метаданных pnpm на macOS' },
+  { id: 'pnpm-cache-xdg', path: '~/.cache/pnpm', why: 'кеш метаданных pnpm на Linux' },
+  { id: 'yarn-cache', path: '~/.yarn/berry/cache', why: 'кеш yarn berry' },
+  { id: 'yarn-cache-mac', path: '~/Library/Caches/Yarn', why: 'кеш yarn на macOS' },
   { id: 'bun', path: '~/.bun/install/cache', why: 'кеш bun' },
-  { id: 'xdg-cache', path: '~/.cache', why: 'XDG-кеши: corepack, ms-playwright, turbo, pnpm' },
-  { id: 'mac-caches', path: '~/Library/Caches', why: 'кеши macOS: ms-playwright, turbo, CLI' },
+  { id: 'playwright-mac', path: '~/Library/Caches/ms-playwright', why: 'браузеры Playwright' },
+  { id: 'playwright-xdg', path: '~/.cache/ms-playwright', why: 'браузеры Playwright на Linux' },
+  { id: 'turbo-mac', path: '~/Library/Caches/turbo', why: 'кеш turbo' },
+  { id: 'turbo-xdg', path: '~/.cache/turbo', why: 'кеш turbo на Linux' },
+  { id: 'node-gyp-mac', path: '~/Library/Caches/node-gyp', why: 'заголовки node-gyp' },
+  { id: 'node-gyp-xdg', path: '~/.cache/node-gyp', why: 'заголовки node-gyp на Linux' },
+  { id: 'prisma', path: '~/.cache/prisma', why: 'движки Prisma' },
   { id: 'docker-buildx', path: '~/.docker/buildx', why: 'состояние buildx у docker compose build' },
-  { id: 'maestro', path: '~/.maestro', why: 'журналы и результаты Maestro' },
   {
     id: 'core-simulator',
     path: '~/Library/Developer/CoreSimulator',
@@ -72,8 +83,9 @@ export const DEFAULT_WRITE_GUARD_CACHES: readonly { id: string; path: string; wh
     path: '~/Library/Developer/Xcode/DerivedData',
     why: 'сборка приложения iOS',
   },
-  { id: 'android', path: '~/.android', why: 'ключи adb и AVD эмулятора Android' },
-  { id: 'gradle', path: '~/.gradle', why: 'кеш Gradle (сборка Android)' },
+  { id: 'android-avd', path: '~/.android/avd', why: 'AVD эмулятора Android' },
+  { id: 'android-cache', path: '~/.android/cache', why: 'кеш инструментов Android' },
+  { id: 'gradle-caches', path: '~/.gradle/caches', why: 'кеш Gradle (сборка Android)' },
   {
     id: 'darwin-user-cache',
     path: '$DARWIN_USER_CACHE_DIR',

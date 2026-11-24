@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { controllerTemp } from '../environment/controller-temp.ts';
 import { randomUUID } from 'node:crypto';
 import { closeSync, fsyncSync, mkdirSync, openSync, writeSync } from 'node:fs';
 import {
@@ -12,7 +13,6 @@ import {
   rm,
   writeFile,
 } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
@@ -715,7 +715,7 @@ export class ReviewProbes {
     const logPath = join(runDir, `${gate.id}.log`);
     let scratch: string;
     try {
-      scratch = await realpath(await mkdtemp(join(tmpdir(), 'dc-probe-report-')));
+      scratch = await realpath(await mkdtemp(join(controllerTemp.dir(), 'dc-probe-report-')));
       if (within(scratch, root) || this.spec.controller.some((c) => within(scratch, c)))
         throw new Error('scratch отчёта внутри проверяемого дерева или каталога controller');
     } catch (error) {
