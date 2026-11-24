@@ -87,6 +87,8 @@ const laterCommands: readonly string[] = [
   'diagnose',
   // План выпуска ведущего (0.1.0-alpha.68).
   'lead-outline',
+  // Ревью выпуска перед release done (0.1.0-alpha.69).
+  'review-release',
 ];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [

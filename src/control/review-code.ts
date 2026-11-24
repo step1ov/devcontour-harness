@@ -37,7 +37,7 @@ import { measuredInvoke } from '../engine/measured.ts';
 import { GATES_RESULT_FILE } from './gates-check.ts';
 
 /** Git без обрезки вывода: stdout целиком (Buffer), предел — `maxBuffer`. */
-const rawGit = (cwd: string, args: string[], options: { maxBuffer?: number } = {}) =>
+export const rawGit = (cwd: string, args: string[], options: { maxBuffer?: number } = {}) =>
   new Promise<Buffer>((resolveOut, reject) => {
     execFile(
       'git',
@@ -104,6 +104,31 @@ const rev = async (path: string, ref: string, flag: string, repositoryId: string
   }
 };
 
+/** Репозиторий обзора: названный или единственный в политике; иначе отказ. */
+export function reviewRepository(policy: ExecutionPolicy, repositoryId: string | undefined) {
+  const repo = repositoryId
+    ? policy.repositories.find((r) => r.id === repositoryId)
+    : policy.repositories.length === 1
+      ? policy.repositories[0]
+      : undefined;
+  if (!repo)
+    throw new HarnessError(
+      repositoryId ? 'NOT_FOUND' : 'INVALID_INPUT',
+      repositoryId
+        ? 'Репозиторий не объявлен в политике: ' + repositoryId
+        : `В политике несколько репозиториев (${policy.repositories.map((r) => r.id).join(', ')}): назовите --repository`,
+    );
+  return repo;
+}
+
+/**
+ * Ревью выпуска поверх обзора ветки (`harness review-release`): договор
+ * выпуска, прочитанный на проверяемом head, — разделы запроса reviewer.
+ */
+export interface ReleaseContract {
+  contract(at: { path: string; head: string }): Promise<string>;
+}
+
 /** Роли, применимые к репозиторию: общие и свои роли репозитория. */
 const rolesOf = (policy: ExecutionPolicy, repositoryId: string) => [
   ...new Set([
@@ -165,29 +190,34 @@ export async function gatesEvidenceFor(
  * `code-reviews` каталога состояния; поручения, попытки и target ref не
  * меняются: это не приёмка.
  */
-export async function reviewCode(
+export function reviewCode(
   ctx: CodeReviewContext,
   input: CodeReviewInput,
 ): Promise<CodeReviewRecord> {
+  return reviewBranch(ctx, input);
+}
+
+/**
+ * Общий ход обзора ветки и ревью выпуска (`release`): выбор reviewer,
+ * diff, раунды предмета с переходами прежних находок, запись в `code-reviews`.
+ * Ревью выпуска отличается предметом (репозиторий, роль, SHA базы — head
+ * выпуска движется с каждой принятой работой), вступлением запроса и
+ * договором выпуска в нём.
+ */
+export async function reviewBranch(
+  ctx: CodeReviewContext,
+  input: CodeReviewInput,
+  release?: ReleaseContract,
+): Promise<CodeReviewRecord> {
   const { engine, policy } = ctx;
-  const repo = input.repositoryId
-    ? policy.repositories.find((r) => r.id === input.repositoryId)
-    : policy.repositories.length === 1
-      ? policy.repositories[0]
-      : undefined;
-  if (!repo)
-    throw new HarnessError(
-      input.repositoryId ? 'NOT_FOUND' : 'INVALID_INPUT',
-      input.repositoryId
-        ? 'Репозиторий не объявлен в политике: ' + input.repositoryId
-        : `В политике несколько репозиториев (${policy.repositories.map((r) => r.id).join(', ')}): назовите --repository`,
-    );
+  const label = release ? 'review-release' : 'review-code';
+  const repo = reviewRepository(policy, input.repositoryId);
   const roles = rolesOf(policy, repo.id);
   const role = input.role ?? (roles.length === 1 ? roles[0] : undefined);
   if (!role)
     throw new HarnessError(
       'INVALID_INPUT',
-      `review-code: у репозитория ${repo.id} несколько ролей (${roles.join(', ')}): назовите --role`,
+      `${label}: у репозитория ${repo.id} несколько ролей (${roles.join(', ')}): назовите --role`,
       [{ path: ['--role'], message: roles.join(', ') }],
     );
   const binding = roleBinding(policy, role, repo.id);
@@ -226,7 +256,7 @@ export async function reviewCode(
   if (!names.length)
     throw new HarnessError(
       'INVALID_INPUT',
-      `review-code: между merge-base(${input.base}, ${input.head}) и ${input.head} нет изменений`,
+      `${label}: между merge-base(${input.base}, ${input.head}) и ${input.head} нет изменений`,
       [{ path: ['--head'], message: input.head }],
     );
   let diff: string;
@@ -240,18 +270,22 @@ export async function reviewCode(
     if ((error as { code?: string }).code !== 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') throw error;
     throw new HarnessError(
       'INVALID_INPUT',
-      `review-code: diff больше предела ${REVIEW_CODE_DIFF_LIMIT} байт; сузьте диапазон`,
+      `${label}: diff больше предела ${REVIEW_CODE_DIFF_LIMIT} байт; сузьте диапазон`,
       [{ path: ['--base'], message: input.base }],
     );
   }
   const commits = Number(await git(path, 'rev-list', '--count', `${mergeBase}..${head}`));
-  const subject = digestOf({
-    kind: 'code-review',
-    repositoryId: repo.id,
-    role,
-    base: input.base,
-    head: input.head,
-  });
+  const subject = release
+    ? digestOf({ kind: 'release-review', repositoryId: repo.id, role, base })
+    : digestOf({
+        kind: 'code-review',
+        repositoryId: repo.id,
+        role,
+        base: input.base,
+        head: input.head,
+      });
+  const contract = release ? await release.contract({ path, head }) : undefined;
+  const contextDigest = contract === undefined ? undefined : digestOf(contract);
 
   const rounds = engine.read((v) =>
     v
@@ -271,7 +305,8 @@ export async function reviewCode(
     last.mergeBase === mergeBase &&
     last.authorRuntime === author &&
     last.reviewerBinding === reviewerBinding &&
-    last.gates?.id === gates?.id
+    last.gates?.id === gates?.id &&
+    last.contextDigest === contextDigest
   )
     return last;
   const before = last?.round ?? 0;
@@ -317,9 +352,9 @@ export async function reviewCode(
     );
   }
 
-  const id = `RC-${randomUUID()}`;
+  const id = `${release ? 'RR' : 'RC'}-${randomUUID()}`;
   const stateDir = resolve(ctx.stateDir);
-  const dir = join(stateDir, 'review-code', id);
+  const dir = join(stateDir, label, id);
   await mkdir(dir, { recursive: true });
   const repos = policy.repositories.map((r) => ctx.repoPath(r.path));
   const hidden = [...new Set([stateDir, ...repos])];
@@ -330,12 +365,14 @@ export async function reviewCode(
     hidden: [...hidden, ...credentialPaths()],
     ...(ctx.checkoutRoot ? { configured: ctx.checkoutRoot } : {}),
   });
-  const trees = checkoutPath(placement, dir, repo.id, 'review-code', id);
+  const trees = checkoutPath(placement, dir, repo.id, label, id);
   const cwd = join(trees, 'worktree');
   await mkdir(dirname(cwd), { recursive: true });
 
   const prompt = [
-    'You independently review an already written branch: code written outside the harness. Do not edit files. This is a technical review, not acceptance. Reject missing tests, weakened tests or checks, policy changes and unsafe changes. Report concrete findings with path, line, rule, consequence and evidence.',
+    release
+      ? 'You independently review a release before it is declared done: the accepted target of all works of this release. Do not edit files. Every work already passed its own gates and per-attempt review; your job is the release as a whole against the RELEASE CONTRACT below: the orders and their acceptance criteria, the owner answers and the deploy topology. Check that what the tests exercised is what production will run: production routing and environment (gateway/proxy configs, production env files, public URLs of media, uploads and API) must route every user-visible path the works added, not only the API port the tests called directly. A missing or inconsistent production route, env value or deploy step is a blocking finding. Report concrete findings with path, line, rule, consequence and evidence.'
+      : 'You independently review an already written branch: code written outside the harness. Do not edit files. This is a technical review, not acceptance. Reject missing tests, weakened tests or checks, policy changes and unsafe changes. Report concrete findings with path, line, rule, consequence and evidence.',
     `Role: ${role}. Repository: ${repo.id}. Author: ${author}. Review subject round ${round}.`,
     `Base ${input.base} (${base}); merge base ${mergeBase}; head ${input.head} (${head}); ${commits} commits, ${names.length} files. The working directory is a detached checkout of head.`,
     gates
@@ -346,6 +383,7 @@ export async function reviewCode(
       ? 'Previous open findings. For each, report its state in `previous` (closed, open or withdrawn) with a concrete basis: ' +
         JSON.stringify(open.map((f) => ({ id: f.id, severity: f.severity, message: f.message })))
       : '',
+    contract ?? '',
     'Report execution.commands or an empty list with execution.noCommandsReason. Findings need a message; use null where a field does not apply.',
     'Exact diff to review:\n' + diff,
     'No secrets in output. Explain actions and evidence, not private reasoning.',
@@ -465,7 +503,7 @@ export async function reviewCode(
   ];
   const record: CodeReviewRecord = codeReviewRecordSchema.parse({
     id,
-    kind: 'code',
+    kind: release ? 'release' : 'code',
     acceptance: false,
     subject,
     repositoryId: repo.id,
@@ -483,6 +521,7 @@ export async function reviewCode(
     filesTotal: names.length,
     commits,
     diffDigest: digestOf(diff),
+    ...(contextDigest ? { contextDigest } : {}),
     round,
     at: new Date().toISOString(),
     // Одобрение — и по итоговым находкам: повторно открытая блокирующая

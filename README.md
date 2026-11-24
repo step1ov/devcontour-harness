@@ -124,6 +124,7 @@ git rev-parse refs/heads/harness/accepted   # совпадает с data.result.
 | `handoff --state D [--format md] [--intent T]…` | Пакет передачи контекста новой сессии агента       |
 | `input-list / input-show / input-answer …`      | Вопрос исполнителя: ответ, снимок, применение      |
 | `review-code --state D --base A --head B`       | Обзор написанной ветки: ревью, не приёмка          |
+| `review-release --state D [--base A]`           | Ревью выпуска перед `release done`                 |
 | `smoke --state D --sha HEAD [--human]`          | Окружение на коммите без gates и моделей           |
 | `smoke … --writer-probe`                        | Команды исполнителя в его изоляции, без модели     |
 | `update --state D --check/--apply/--rollback`   | Обновления harness и панели: проверка, откат       |

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { idSchema, isoTimeSchema } from './primitives.ts';
+import { gitShaSchema, idSchema, isoTimeSchema } from './primitives.ts';
 
 /**
  * Журнал ведущего (0.1.0-alpha.66, P4-10): что ведущий делает сам — своими
@@ -90,5 +90,25 @@ export const leadDataSchema = z.strictObject({
       lineEn: z.string().min(1).max(1000),
     })
     .optional(),
+  /**
+   * `release done` (0.1.0-alpha.69, P7-6): ревью выпуска (`harness
+   * review-release`) против текущей принятой цели. `required` — без
+   * одобренного ревью на ней `release done` отказывает (`NOT_READY`);
+   * `advisory` — выпуск закрыт, `warning` называет недостающее ревью.
+   * `notes` — открытые неблокирующие находки одобренного ревью.
+   */
+  releaseReview: z
+    .strictObject({
+      required: z.boolean(),
+      status: z.enum(['not-run', 'stale', 'findings', 'approved']),
+      head: gitShaSchema.optional(),
+      target: gitShaSchema.optional(),
+      round: z.number().int().positive().optional(),
+      open: z.number().int().min(0).optional(),
+      blocking: z.number().int().min(0).optional(),
+      notes: z.array(z.string().min(1).max(300)).max(50).optional(),
+    })
+    .optional(),
+  warning: z.string().min(1).max(1000).optional(),
 });
 export type LeadData = z.infer<typeof leadDataSchema>;

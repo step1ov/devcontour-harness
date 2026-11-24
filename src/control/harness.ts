@@ -57,6 +57,8 @@ import {
 import { acceptedTargets } from './target.ts';
 import { planRoundEpoch, reviewRoundCap, technicalReview } from './review.ts';
 import { reviewCode, type CodeReviewInput } from './review-code.ts';
+import { reviewRelease, type ReleaseReviewInput } from './review-release.ts';
+import { releaseReviewState } from './release-review-state.ts';
 import { lifecyclePreflight } from './preflight.ts';
 import { policySourceChanged, type PolicySource } from './provenance.ts';
 import { JointRunner } from '../engine/joint-runner.ts';
@@ -431,6 +433,48 @@ export class Harness {
       },
       input,
     );
+  }
+
+  /**
+   * Ревью выпуска (`harness review-release`, alpha.69): принятая цель против
+   * договора выпуска; запись `code-reviews` с `kind: release`.
+   */
+  reviewRelease(input: ReleaseReviewInput) {
+    this.engine.assertNotUpdating();
+    return reviewRelease(
+      {
+        engine: this.engine,
+        policy: this.policy,
+        adapters: this.adapters,
+        stateDir: this.options.stateDir,
+        repoPath: (path) => this.repoPath(path),
+        ...(this.options.checkoutRoot ? { checkoutRoot: this.options.checkoutRoot } : {}),
+        ...(this.options.environment ? { environment: this.options.environment } : {}),
+      },
+      input,
+    );
+  }
+
+  /** SHA target ref каждого репозитория политики; недоступный — без записи. */
+  async targetHeads(): Promise<Record<string, string>> {
+    const heads: Record<string, string> = {};
+    for (const repo of this.policy.repositories) {
+      const head = await git(
+        this.repoPath(repo.path),
+        'rev-parse',
+        '--verify',
+        '--end-of-options',
+        `${repo.targetRef}^{commit}`,
+      ).catch(() => undefined);
+      if (head) heads[repo.id] = head;
+    }
+    return heads;
+  }
+
+  /** Состояние ревью выпуска против текущих target ref (для status и view). */
+  async releaseReview() {
+    const heads = await this.targetHeads();
+    return this.engine.read((v) => releaseReviewState(v, this.policy, heads));
   }
 
   /**
