@@ -174,3 +174,41 @@ test('ревью 3: commitCandidate — ветка попытки двигает
   // Index дерева совпадает с записанным кандидатом.
   assert.equal(execFileSync('git', ['-C', dir, 'status', '--porcelain'], { encoding: 'utf8' }), '');
 });
+
+test('ревью 5: gate видит чистый index после записи кандидата и после интеграции (добавленный файл)', async () => {
+  const check = `
+const { execSync, spawnSync } = require('child_process');
+const fs = require('fs');
+const status = execSync('git status --porcelain', { encoding: 'utf8' });
+const diff = spawnSync('git', ['diff', '--exit-code', 'HEAD']).status;
+const ok = status === '' && diff === 0 && fs.existsSync('src/greet.js');
+fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH, '<testsuite><testcase classname="index" name="clean">' + (ok ? '' : '<failure message="status=' + JSON.stringify(status).replace(/[<&"]/g, '') + ' diff=' + diff + '"/>') + '</testcase></testsuite>');
+process.exit(ok ? 0 : 1);
+`;
+  const ctx = setup({
+    scenario: {
+      // greet.js — новый файл кандидата.
+      writer: [
+        {
+          files: { 'src/greet.js': greet },
+          result: { completed: true, summary: 'ok', discoveries: [] },
+        },
+      ],
+      reviewer: approve(),
+    },
+    files: { 'test/index.js': check },
+    policy: (p: any) => {
+      p.repositories[0].gates[0].command = [process.execPath, 'test/index.js'];
+    },
+  });
+  await runAll(ctx);
+  const a = ctx.engine.read((v) => v.attempts(WORK)[0]!);
+  assert.equal(a.status, 'succeeded', a.error);
+  assert.deepEqual(
+    a.evidence.filter((e) => e.kind === 'test').map((e) => [e.phase, e.passed]),
+    [
+      ['candidate', true],
+      ['integration', true],
+    ],
+  );
+});

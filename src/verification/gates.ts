@@ -1743,14 +1743,27 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
             partialNotes.map((n) => '; ' + n).join(''),
         );
       }
-      // Gate меняет состояние git под границей записи (P8-1, ревью 4):
-      // совет; на базе так же — определение gate, удержание для ведущего.
-      if (
+      // Gate меняет состояние git под границей записи (P8-1, ревью 4–5).
+      // Только когда отказ git — единственное объяснение (нет упавших тестов,
+      // утверждения не про git, сигнала): совет и отметка `gitWrite`; на базе
+      // так же — определение gate, удержание для ведущего. Иначе — обычный
+      // засчитанный провал, совет — дополнением.
+      const gitDenied =
         writeGuardActive(run.policy) &&
         !property &&
         !reaped &&
-        GUARDED_GIT_DENIAL.test(result.stderr + '\n' + result.stdout)
-      ) {
+        GUARDED_GIT_DENIAL.test(result.stderr + '\n' + result.stdout);
+      const independent =
+        !!counts?.failures ||
+        !!failureSummary.tests?.length ||
+        !!result.diagnostics?.signal ||
+        // Утверждение — независимое, только если оно не про сам git (строка
+        // ошибки команды git попадает в выжимку утверждением).
+        (!!failureSummary.assertion &&
+          !GUARDED_GIT_DENIAL.test(failureSummary.assertion) &&
+          !/\bgit\b/i.test(failureSummary.assertion));
+      if (gitDenied && !independent) {
+        failureSummary = { ...failureSummary, gitWrite: true };
         if (run.gitWriteOnBase?.(gate.id)) {
           kind = 'environment';
           cause = 'gate-definition';
@@ -1783,7 +1796,8 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
           .filter(Boolean)
           .join(': ') +
           partialNotes.map((n) => '; ' + n).join('') +
-          (failureSummary.withheld ? `; ${WITHHELD_NOTE}` : ''),
+          (failureSummary.withheld ? `; ${WITHHELD_NOTE}` : '') +
+          (gitDenied ? `; кроме того, ${GATE_GIT_WRITE}: ${GUARDED_GIT_ADVICE}` : ''),
       );
     }
     if (reportPath) {

@@ -4669,6 +4669,10 @@
                     "withheld": {
                       "type": "boolean",
                       "const": true
+                    },
+                    "gitWrite": {
+                      "type": "boolean",
+                      "const": true
                     }
                   },
                   "additionalProperties": false

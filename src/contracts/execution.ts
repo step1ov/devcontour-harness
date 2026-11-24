@@ -406,6 +406,13 @@ export const gateFailureSummarySchema = z.strictObject({
   /** Откуда имена тестов: отчёт gate, вывод команды или её собственный отчёт. */
   source: z.enum(['junit', 'output', 'command-report']).optional(),
   withheld: z.literal(true).optional(),
+  /**
+   * Провал объяснён только тем, что gate менял состояние git под границей
+   * записи (`GATE_GIT_WRITE`, 0.1.0-alpha.70): других признаков провала
+   * (упавших тестов, утверждения, сигнала) нет. По этой отметке, а не по
+   * тексту, итог на базе удерживает gate.
+   */
+  gitWrite: z.literal(true).optional(),
 });
 export type GateFailureSummary = z.infer<typeof gateFailureSummarySchema>;
 

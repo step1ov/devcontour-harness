@@ -143,7 +143,6 @@ import {
   type ProbeSpec,
 } from '../agents/review-probe.ts';
 import {
-  GATE_GIT_WRITE,
   GateTimeout,
   prepareWriterDependencies,
   ReapedGate,
@@ -998,19 +997,17 @@ export class Runner {
             ? {
                 light: writeGuardActive(this.policy)
                   ? (() => {
-                      // Дерево попытки и его каталог git (P8-1).
+                      // Дерево попытки; stash владельца закрыт и на чтение.
                       const entries = guardEntries(
                         this.policy,
                         [input.cwd, ...(scratch ? [scratch] : [])],
                         gitGuard?.entries ?? [],
                       );
-                      const pick = <K extends 'subpath' | 'prefix' | 'denyRead'>(k: K) =>
+                      const pick = <K extends 'subpath' | 'denyRead'>(k: K) =>
                         entries.flatMap((e) => (k in e ? [(e as Record<K, string>)[k]] : []));
-                      const prefixes = pick('prefix');
                       const denyRead = pick('denyRead');
                       return {
                         guard: pick('subpath'),
-                        ...(prefixes.length ? { guardPrefixes: prefixes } : {}),
                         ...(denyRead.length ? { guardDenyRead: denyRead } : {}),
                       };
                     })()
@@ -3317,7 +3314,7 @@ export class Runner {
                 attempt.baseSha!,
                 id,
                 gateDigest(gate),
-                [GATE_GIT_WRITE],
+                'git-write',
               ),
           }
         : {}),

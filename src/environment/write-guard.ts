@@ -248,13 +248,17 @@ export function gitWorktreeGuard(cwd: string): GitWorktreeGuard | undefined {
   };
 }
 
-/** Признаки отказа git под границей записи: запись в общий `.git` закрыта. */
+/**
+ * Признаки отказа git под границей записи (ревью 5): отказ в правах на путь
+ * внутри `.git` в одной строке. `index.lock: File exists` и общий отказ
+ * временного файла без пути `.git` не считаются.
+ */
 export const GUARDED_GIT_DENIAL =
-  /(?:unable to (?:create|write)|cannot lock ref|insufficient permission|Operation not permitted|Permission denied|Read-only file system)[^\n]*(?:\.git\/(?:objects|refs|logs\/refs)|refs\/stash|index\.lock)|unable to create temporary file: (?:Operation not permitted|Permission denied|Read-only file system)/i;
+  /(?:Operation not permitted|Permission denied|Read-only file system|insufficient permission)[^\n]*\.git\/|\.git\/[^\n]*(?:Operation not permitted|Permission denied|Read-only file system|insufficient permission)/i;
 
 /** Совет к провалу gate, в выводе которого git упёрся в границу записи. */
 export const GUARDED_GIT_ADVICE =
-  'gate меняет состояние git, а под границей записи облегчённого режима .git закрыт: работают только команды для чтения (git status, git diff, git diff --exit-code, git log, git show); git add, commit, stash, checkout -- ., reset отказывают. Gate не меняет состояние git: сгенерированные файлы убирайте файловыми операциями, проверяйте git diff --exit-code и git clean -n или генерируйте во временный каталог и сравнивайте (docs/light-mode.md)';
+  'gate меняет состояние git, а под границей записи облегчённого режима .git закрыт: работают только команды для чтения (git status, git diff, git diff --exit-code, git log, git show); git add, commit, checkout -- ., reset отказывают, git stash — молча (код 1). Gate не меняет состояние git (и не делает stash): сгенерированные файлы убирайте файловыми операциями, проверяйте git diff --exit-code и git clean -n или генерируйте во временный каталог и сравнивайте (docs/light-mode.md)';
 
 /** Записываемые пути gate или исполнителя: свои каталоги + кеши политики. */
 export function guardEntries(

@@ -240,11 +240,6 @@ export interface SandboxSpec {
    */
   light?: {
     guard?: string[];
-    /**
-     * Файлы с префиксом пути, открытые на запись (0.1.0-alpha.70, P8-1):
-     * ссылки git дерева попытки в общем каталоге репозитория и их `.lock`.
-     */
-    guardPrefixes?: string[];
     /** Закрыто на чтение (ревью 3: общий stash владельца). */
     guardDenyRead?: string[];
   };

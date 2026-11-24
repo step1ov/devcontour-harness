@@ -91,6 +91,7 @@ test(
               gate: 'unit',
               status: 'failed',
               message: 'GATE_GIT_WRITE: gate меняет состояние git',
+              failureSummary: { gitWrite: true },
               definition: gateDigest(ctx.policy.repositories[0]!.gates[0]!),
             },
           ],
@@ -104,5 +105,80 @@ test(
     const w = ctx.engine.read((v) => v.work(WORK)!);
     assert.equal(w.attempt, 0, 'не засчитано');
     assert.equal(w.environmentHold?.cause, 'gate-definition');
+  },
+);
+
+const baseRun = (ctx: ReturnType<typeof setup>, entry: Record<string, unknown>) => {
+  const dir = join(ctx.state, 'gates-at', 'base-run');
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(
+    join(dir, 'result.json'),
+    JSON.stringify({
+      at: new Date().toISOString(),
+      data: {
+        repositoryId: ctx.policy.repositories[0]!.id,
+        sha: ctx.repo.git('rev-parse', 'HEAD'),
+        gates: [
+          {
+            gate: 'unit',
+            status: 'failed',
+            definition: gateDigest(ctx.policy.repositories[0]!.gates[0]!),
+            ...entry,
+          },
+        ],
+      },
+    }),
+  );
+};
+
+test(
+  'ревью 5: настоящий провал теста вместе с тем же отказом git — засчитанный провал исполнителя, не удержание',
+  { skip: !supported },
+  async () => {
+    // Gate: упавший testcase в отчёте и уборка через git.
+    const mixed = `
+const fs = require('fs');
+fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH, '<testsuite><testcase classname="greet" name="greets"><failure message="expected Hello"/></testcase></testsuite>');
+require('child_process').execSync('git checkout -- .', { stdio: 'inherit' });
+`;
+    const ctx = setup({
+      scenario: { writer: implement(), reviewer: approve() },
+      files: { 'test/clean.js': mixed },
+      runner: adapters(),
+      policy: guarded,
+    });
+    baseRun(ctx, { failureSummary: { gitWrite: true } });
+    await runAll(ctx);
+    const a = ctx.engine.read((v) => v.attempts(WORK)[0]!);
+    assert.equal(a.failureKind, 'gate', a.error);
+    assert.match(a.error ?? '', /greet\.greets/);
+    assert.match(a.error ?? '', /кроме того, GATE_GIT_WRITE/);
+    const w = ctx.engine.read((v) => v.work(WORK)!);
+    assert.equal(w.attempt, 1, 'засчитано');
+    assert.equal(w.environmentHold, undefined);
+  },
+);
+
+test(
+  'ревью 5: на базе — только текст GATE_GIT_WRITE без структурной отметки — не удержание',
+  { skip: !supported },
+  async () => {
+    const ctx = setup({
+      scenario: { writer: implement(), reviewer: approve() },
+      files: { 'test/clean.js': gate },
+      runner: adapters(),
+      policy: guarded,
+    });
+    baseRun(ctx, { message: 'упал тест «GATE_GIT_WRITE classification»' });
+    await runAll(ctx);
+    const a = ctx.engine.read((v) => v.attempts(WORK)[0]!);
+    assert.equal(a.failureKind, 'gate', a.error);
+    assert.equal(
+      ctx.engine.read((v) => v.work(WORK)!.environmentHold),
+      undefined,
+    );
+    // Своя отметка у провала с одним только отказом git.
+    const evidence = a.evidence.find((e) => e.kind === 'test')!;
+    assert.equal(evidence.failureSummary?.gitWrite, true);
   },
 );

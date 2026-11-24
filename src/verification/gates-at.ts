@@ -585,8 +585,12 @@ export function silentGateOnSha(
   sha: string,
   gateId: string,
   definition: string,
-  /** Признаки провала в итоге (по умолчанию — молчаливый провал). */
-  markers: readonly string[] = [GATE_SILENT_FAILURE, 'GATE_DEFINITION_NO_CAUSE'],
+  /**
+   * Какой провал ищется: по умолчанию молчаливый (по коду в итоге, как в
+   * alpha.69); `git-write` — по структурной отметке `failureSummary.gitWrite`
+   * (ревью 5), не по тексту.
+   */
+  kind: 'silent' | 'git-write' = 'silent',
 ): boolean {
   const root = join(stateDir, 'gates-at');
   let names: string[];
@@ -598,7 +602,13 @@ export function silentGateOnSha(
   let newest:
     | {
         at: number;
-        gate: { status?: string; summary?: string; message?: string; definition?: string };
+        gate: {
+          status?: string;
+          summary?: string;
+          message?: string;
+          definition?: string;
+          failureSummary?: { gitWrite?: boolean };
+        };
       }
     | undefined;
   for (const name of names) {
@@ -614,6 +624,7 @@ export function silentGateOnSha(
             summary?: string;
             message?: string;
             definition?: string;
+            failureSummary?: { gitWrite?: boolean };
           }[];
         };
       };
@@ -633,6 +644,12 @@ export function silentGateOnSha(
     !!g &&
     g.status === 'failed' &&
     g.definition === definition &&
-    [g.summary, g.message].some((t) => typeof t === 'string' && markers.some((m) => t.includes(m)))
+    (kind === 'git-write'
+      ? g.failureSummary?.gitWrite === true
+      : [g.summary, g.message].some(
+          (t) =>
+            typeof t === 'string' &&
+            (t.includes(GATE_SILENT_FAILURE) || t.includes('GATE_DEFINITION_NO_CAUSE')),
+        ))
   );
 }

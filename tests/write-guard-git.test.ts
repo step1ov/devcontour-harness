@@ -93,6 +93,8 @@ test(
       ok('add', 'git add -A'),
       ok('commit', 'git -c user.name=t -c user.email=t@t commit -qam gate'),
       ok('stash', 'git stash'),
+      // Как отказывает stash под границей: код и вывод (ревью 5).
+      'git stash > "$TMPDIR/stash.out" 2>&1; echo stashcode=$?; [ -s "$TMPDIR/stash.out" ] && echo stashout=text || echo stashout=empty',
       ok('restore', 'git checkout -- .'),
       ok('reset', 'git reset --hard'),
       ok('switch', 'git checkout -q other'),
@@ -117,6 +119,10 @@ test(
     });
     assert.equal(result.code, 0, result.stdout + '|' + result.stderr);
     // Git для чтения: необязательное обновление index без блокировки пропускается.
+    // `git stash` под границей отказывает молча: код 1, без вывода — совет
+    // GATE_GIT_WRITE по нему не узнать (docs/light-mode.md).
+    assert.match(result.stdout, /stashcode=1/, result.stdout);
+    assert.match(result.stdout, /stashout=empty/, result.stdout);
     for (const line of ['status=ok', 'seen=yes', 'diff=ok', 'diffexit=fail', 'log=ok', 'show=ok'])
       assert.match(result.stdout, new RegExp(line), result.stdout);
     for (const name of [
@@ -153,6 +159,19 @@ test(
     assert.deepEqual(packs(common), before.packs);
     assert.match(
       "fatal: Unable to create '/r/.git/worktrees/w/index.lock': Operation not permitted",
+      GUARDED_GIT_DENIAL,
+    );
+    assert.match(
+      'error: insufficient permission for adding an object to repository database /r/.git/objects',
+      GUARDED_GIT_DENIAL,
+    );
+    // Не признаки границы: занятый index.lock и общий отказ временного файла.
+    assert.doesNotMatch(
+      "fatal: Unable to create '/r/.git/index.lock': File exists.",
+      GUARDED_GIT_DENIAL,
+    );
+    assert.doesNotMatch(
+      'error: unable to create temporary file: Operation not permitted',
       GUARDED_GIT_DENIAL,
     );
   },
