@@ -85,6 +85,8 @@ import { acceptedTargets } from './target.ts';
 import { WorkflowQueue } from './workflow.ts';
 import { reviewRoundCap, strictReviewRoundCap } from './review.ts';
 import { releaseReviewState } from './release-review-state.ts';
+import { releaseDocsLine, releaseDocsState } from './release-docs.ts';
+import { costBreakdown } from '../projections/costs.ts';
 import { LIGHT_ROUNDS_EN, reviewSubjectSummary, subjectRoundBudget } from './review-summary.ts';
 import { stageOfStep } from './stage.ts';
 import { setupProgress } from './setup-progress.ts';
@@ -1016,6 +1018,19 @@ export function attemptReviewsOf(
         notes: findings.filter((f) => f.severity !== 'blocking').length,
         at: e.createdAt,
         ...(earlier.has(a.id) ? { earlier: true as const } : {}),
+        // Второй проход (alpha.70): только прошедший или упавший.
+        ...((p) =>
+          p && p.status !== 'skipped' && p.mode !== 'off'
+            ? {
+                secondPass: {
+                  mode: p.mode,
+                  status: p.status,
+                  refuted: p.refuted.length,
+                  missed: p.missed,
+                  ...(p.overturned ? { overturned: true as const } : {}),
+                },
+              }
+            : {})(applied.length ? e.reviewPasses : undefined),
       });
     }
   return out;
@@ -1266,6 +1281,17 @@ export function collectOperatorViewInput(
         ...((rows) => (rows.length ? { attemptReviews: rows } : {}))(
           attemptReviewsOf(own, earlier),
         ),
+        ...(w.proposals?.length
+          ? {
+              proposals: w.proposals.map((p) => ({
+                id: p.id,
+                kind: p.kind,
+                status: p.status,
+                attempt: p.attempt,
+                title: p.title,
+              })),
+            }
+          : {}),
         rechecks: own.reduce((n, a) => n + a.evidence.filter((e) => e.recheck).length, 0),
         ...(sw.liveness ? { liveness: sw.liveness } : {}),
         ...(active?.status === 'active'
@@ -1484,6 +1510,31 @@ export function collectOperatorViewInput(
               },
             }
           : {})(releaseReviewState(v, policy)),
+      // Шаг документации выпуска (ревизия 10): только когда есть работы.
+      ...((d) =>
+        d.status === 'off' || d.status === 'no-works'
+          ? {}
+          : {
+              releaseDocs: {
+                mode: d.mode,
+                status: d.status,
+                works: d.works.slice(0, 20),
+                ...(d.missingRoots ? { missingRoots: d.missingRoots.slice(0, 50) } : {}),
+                ...((line) => (line ? { line: line.slice(0, 300) } : {}))(releaseDocsLine(d)),
+              },
+            })(releaseDocsState(v, policy)),
+      // Расход по работам, попыткам, ролям и моделям (ревизия 10).
+      ...((records) =>
+        records.length
+          ? {
+              costs: costBreakdown(records, {
+                attemptOf: (runId) => v.attempt(runId)?.attempt,
+                ...((at) => (at ? { releaseSince: at } : {}))(
+                  v.local('lead', WORKSPACE_OWNER, 'log')?.release?.doneAt,
+                ),
+              }),
+            }
+          : {})(callRecords(v)),
       ...((r) => (r ? { resources: r } : {}))(
         resourcesInputOf(policy, h.stateDir, view.baseDir, {
           // Попытка закончилась по снимку хранилища: квитанция окружения

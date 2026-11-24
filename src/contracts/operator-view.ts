@@ -373,6 +373,8 @@ export const workViewSchema = z.strictObject({
          */
         kind: token(40).optional(),
         counted: z.boolean().optional(),
+        /** Ревизия 10: справочник причин (`docs/failure-causes.md#…`). */
+        reference: z.string().min(1).max(200).optional(),
       })
       .optional(),
   }),
@@ -506,9 +508,38 @@ export const workViewSchema = z.strictObject({
         notes: count,
         at: isoTimeSchema,
         earlier: z.literal(true).optional(),
+        /**
+         * Ревизия 10: второй проход ревью (alpha.70): итог, снятые
+         * находки, пропущенные первым, снят ли отказ первого прохода.
+         */
+        secondPass: z
+          .strictObject({
+            mode: z.enum(['on-reject', 'always']),
+            status: z.enum(['ran', 'failed']),
+            refuted: count,
+            missed: count,
+            overturned: z.literal(true).optional(),
+          })
+          .optional(),
       }),
     )
     .max(L.attemptReviews)
+    .optional(),
+  /**
+   * Ревизия 10: предложения исполнителей ведущему (alpha.70): задачи-продолжения
+   * и разделения; решает ведущий (`harness proposal`).
+   */
+  proposals: z
+    .array(
+      z.strictObject({
+        id: token(20),
+        kind: z.enum(['follow-up', 'split']),
+        status: z.enum(['proposed', 'accepted', 'rejected']),
+        attempt: z.number().int().positive(),
+        title: freeText(T.title).optional(),
+      }),
+    )
+    .max(20)
     .optional(),
 });
 
@@ -854,6 +885,19 @@ const forecastSchema = z.strictObject({
             line: z.string().min(1).max(300),
           })
           .optional(),
+        /**
+         * Ревизия 10: шаг документации выпуска (alpha.70, `release.docs`):
+         * работа с меткой docs после корневых работ, до приёмки выпуска.
+         */
+        docs: z
+          .strictObject({
+            mode: z.enum(['required', 'advisory', 'off']),
+            status: z.enum(['off', 'no-works', 'missing', 'not-after-roots', 'pending', 'done']),
+            works: z.array(id).max(20),
+            missingRoots: z.array(id).max(50).optional(),
+            line: z.string().min(1).max(300).optional(),
+          })
+          .optional(),
       })
       .optional(),
   }),
@@ -928,6 +972,51 @@ const sourceSchema = z.strictObject({
 
 const truncatedCount = z.number().int().positive();
 
+const costAmount = {
+  usd: z.number().min(0),
+  bound: z.enum(['exact', 'lower']),
+  calls: count,
+};
+export const costsViewSchema = z.strictObject({
+  total: z.strictObject(costAmount),
+  release: z.strictObject({ ...costAmount, since: isoTimeSchema.optional() }),
+  byRole: z
+    .array(
+      z.strictObject({
+        role: z.enum(['writer', 'reviewer', 'planner', 'lead', 'other']),
+        ...costAmount,
+      }),
+    )
+    .max(10),
+  byModel: z
+    .array(
+      z.strictObject({
+        runtime: token(40),
+        vendor: token(40),
+        model: z.string().min(1).max(T.model),
+        ...costAmount,
+      }),
+    )
+    .max(50),
+  byWork: z
+    .array(
+      z.strictObject({
+        workId: id,
+        ...costAmount,
+        attempts: z
+          .array(
+            z.strictObject({
+              runId: token(200),
+              attempt: z.number().int().positive().optional(),
+              ...costAmount,
+            }),
+          )
+          .max(20),
+      }),
+    )
+    .max(L.works),
+});
+
 export const operatorViewSchema = z.strictObject({
   viewVersion: z.literal(OPERATOR_VIEW_VERSION),
   viewRevision: count,
@@ -939,6 +1028,12 @@ export const operatorViewSchema = z.strictObject({
   questions: z.array(operatorQuestionSchema).max(L.questions),
   escalations: z.array(escalationSchema).max(L.escalations),
   drift: z.array(driftViewSchema).max(L.drift),
+  /**
+   * Ревизия 10: расход по работам, попыткам, ролям и моделям (alpha.70,
+   * `costBreakdown`); итог установки и текущего выпуска. `bound: lower` —
+   * есть вызовы без цены.
+   */
+  costs: costsViewSchema.optional(),
   progress: z.strictObject({
     total: count,
     byStage: z.record(token(40), count),

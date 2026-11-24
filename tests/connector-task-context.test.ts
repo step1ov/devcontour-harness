@@ -425,7 +425,7 @@ test('alpha.60: вопросы владельцу из Relay и весь сре�
       typeof operatorView
     >;
     operatorViewSchema.parse(view);
-    assert.equal(view.viewRevision, 9);
+    assert.equal(view.viewRevision, 10);
     assert.deepEqual(
       view.scope?.tasks.map((t) => [t.key, t.state, t.workId]),
       [[s.task.key, 'in-harness', s.workId]],

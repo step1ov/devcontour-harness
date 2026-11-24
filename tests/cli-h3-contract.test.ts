@@ -556,6 +556,8 @@ test('H3-01: прежние команды и схемы их данных не 
       }
       if ('code' in o && 'plan' in o && 'contract' in o) delete o.passes;
       if ('line' in o && 'lineEn' in o && 'writeGuard' in o) delete o.securityTier;
+      if ('plainEn' in o && 'bucket' in o && 'runId' in o) delete o.reference;
+      if ('retryPlanned' in o && 'evidence' in o && 'phase' in o) delete o.reference;
       if (Object.keys(o).length !== before) v = o;
     }
     // alpha.68: кем исполнен повтор и откуда актёр (`retry`: `by`, `bySource`).

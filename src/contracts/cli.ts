@@ -2121,6 +2121,8 @@ export const attemptSummarySchema = z.strictObject({
       at: isoTimeSchema.optional(),
       plain: z.string().min(1).max(300),
       plainEn: z.string().min(1).max(300),
+      /** Справочник причин (0.1.0-alpha.70): `docs/failure-causes.md#…`. */
+      reference: z.string().min(1).max(200).optional(),
     })
     .optional(),
   /**

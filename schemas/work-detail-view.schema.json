@@ -296,6 +296,11 @@
                 },
                 "counted": {
                   "type": "boolean"
+                },
+                "reference": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 200
                 }
               },
               "required": [
@@ -709,6 +714,46 @@
               "earlier": {
                 "type": "boolean",
                 "const": true
+              },
+              "secondPass": {
+                "type": "object",
+                "properties": {
+                  "mode": {
+                    "type": "string",
+                    "enum": [
+                      "on-reject",
+                      "always"
+                    ]
+                  },
+                  "status": {
+                    "type": "string",
+                    "enum": [
+                      "ran",
+                      "failed"
+                    ]
+                  },
+                  "refuted": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "missed": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "maximum": 9007199254740991
+                  },
+                  "overturned": {
+                    "type": "boolean",
+                    "const": true
+                  }
+                },
+                "required": [
+                  "mode",
+                  "status",
+                  "refuted",
+                  "missed"
+                ],
+                "additionalProperties": false
               }
             },
             "required": [
@@ -718,6 +763,51 @@
               "findings",
               "notes",
               "at"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "proposals": {
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 20
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "follow-up",
+                  "split"
+                ]
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "proposed",
+                  "accepted",
+                  "rejected"
+                ]
+              },
+              "attempt": {
+                "type": "integer",
+                "exclusiveMinimum": 0,
+                "maximum": 9007199254740991
+              },
+              "title": {
+                "type": "string",
+                "maxLength": 120
+              }
+            },
+            "required": [
+              "id",
+              "kind",
+              "status",
+              "attempt"
             ],
             "additionalProperties": false
           }
