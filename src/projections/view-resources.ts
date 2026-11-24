@@ -136,7 +136,12 @@ export interface ResourcesView {
     workspace: number;
     repositories: { repositoryId: string; count: number }[];
     line: string;
-    held?: { repositoryId: string; gate: string; workId: string }[];
+    held?: {
+      repositoryId: string;
+      gate: string;
+      workId: string;
+      cause?: 'sandbox-process-list' | 'sandbox-signal' | 'sandbox-browser' | 'gate-definition';
+    }[];
     heldLine?: string;
   };
   lines: string[];
