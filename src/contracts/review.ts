@@ -383,6 +383,24 @@ export function unapprovedSinceApproved(
   return sorted.length - (sorted.findLastIndex((r) => r.approved) + 1);
 }
 
+/**
+ * Неодобренных раундов подряд при неизменённом плане (с конца истории):
+ * одобренный раунд или настоящее изменение плана (засчитанный раунд)
+ * обнуляют серию (решение владельца 2026-11-24).
+ */
+export function unchangedUnapprovedStreak(
+  records: readonly Pick<ReviewRecord, 'round' | 'approved' | 'counted'>[],
+) {
+  const sorted = [...records].sort((a, b) => a.round - b.round);
+  let n = 0;
+  for (let i = sorted.length - 1; i >= 0; i--) {
+    const r = sorted[i]!;
+    if (r.approved || r.counted !== false) break;
+    n++;
+  }
+  return n;
+}
+
 export function freeRoundsSinceApproved(
   records: readonly Pick<ReviewRecord, 'round' | 'approved' | 'counted'>[],
 ) {

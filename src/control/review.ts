@@ -14,6 +14,7 @@ import {
   freeRoundsSinceApproved,
   planStatementDigest,
   LIGHT_REVIEW_LOOP_ROUNDS,
+  unchangedUnapprovedStreak,
   unapprovedSinceApproved,
   harnessModeOf,
   planOrderChanges,
@@ -276,7 +277,7 @@ export async function technicalReview(
     if (
       !plan.real &&
       !input.dispositions?.length &&
-      freeRoundsSinceApproved(rounds) >= LIGHT_REVIEW_LOOP_ROUNDS
+      unchangedUnapprovedStreak(rounds) >= LIGHT_REVIEW_LOOP_ROUNDS
     )
       throw new HarnessError(
         'NOT_READY',

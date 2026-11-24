@@ -507,7 +507,12 @@ test('A69-2: облегчённый режим — круг без одобре�
     roundOf(engine, adapters, dir, graph, snap(source('doc', 'again'))),
     refused('NOT_READY', /Круг ревью.*ход ведущего/),
   );
-  // Ход ведущего — изменить план: раунды идут, пока неодобренных не вдвое больше.
+  // Ход ведущего — изменить план: серия обнуляется, и следующий раунд того
+  // же (изменённого) плана снова идёт (решение владельца 2026-11-24).
+  graph = revision(graph, 'r1', (g) => (g.orders[0]!.title = 'План после находок'));
+  await roundOf(engine, adapters, dir, graph);
+  await roundOf(engine, adapters, dir, graph, snap(source('doc', 'after-change')));
+  // Раунды идут, пока неодобренных подряд не вдвое больше (12 — владелец).
   let n = 0;
   for (;;) {
     graph = revision(graph, String(++n), (g) => (g.orders[0]!.title = `План ${n}`));
