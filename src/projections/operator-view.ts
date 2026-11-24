@@ -102,6 +102,11 @@ export interface ViewSettings {
   defaulted: string[];
   /** Ревизия 6: настройки решений с объяснением и итог одной фразой. */
   decisions?: { items: DecisionSetting[]; summary: Bilingual; warning?: Bilingual };
+  /**
+   * Ревизия 9: режим harness (alpha.69) — `light` по умолчанию или `strict`;
+   * `default` — поля в политике нет; `writeGuard` — граница записи действует.
+   */
+  harnessMode?: { mode: 'light' | 'strict'; default: boolean; writeGuard: boolean };
 }
 
 export interface FindingView {
@@ -1368,7 +1373,8 @@ export interface OperatorViewInput {
     | 'runTimeoutMs'
     | 'leaseMs'
     | 'gateTimeoutFloorMs'
-  >;
+  > &
+    Partial<Pick<ExecutionPolicy, 'harnessMode' | 'writeGuard' | 'isolation'>>;
   policyDigest: string;
   /** Действующие значения без умолчаний в политике: вопросы, обход зависших, предел раундов. */
   effective: {
@@ -1830,6 +1836,14 @@ function settingsOf(i: OperatorViewInput, truncated: Record<string, number>): Vi
             : 'off',
     },
     defaulted: [...new Set(i.defaulted)].sort(),
+    harnessMode: {
+      mode: p.harnessMode ?? 'light',
+      default: p.harnessMode === undefined,
+      writeGuard:
+        (p.harnessMode ?? 'light') === 'light' &&
+        p.isolation?.mode !== 'none' &&
+        !p.writeGuard?.off,
+    },
     decisions: decisionSettingsView(
       p,
       i.defaulted.flatMap((d) =>

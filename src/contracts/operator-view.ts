@@ -108,6 +108,14 @@ export const viewSettingsSchema = z.strictObject({
    * у doctor и status (docs/principles.md «Кто принимает решения»).
    */
   decisions: decisionSettingsSchema.optional(),
+  /** Ревизия 9: режим harness (alpha.69) и действует ли граница записи. */
+  harnessMode: z
+    .strictObject({
+      mode: z.enum(['light', 'strict']),
+      default: z.boolean(),
+      writeGuard: z.boolean(),
+    })
+    .optional(),
 });
 
 const findingSchema = z.strictObject({

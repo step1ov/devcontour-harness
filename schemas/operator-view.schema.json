@@ -525,6 +525,30 @@
             "summary"
           ],
           "additionalProperties": false
+        },
+        "harnessMode": {
+          "type": "object",
+          "properties": {
+            "mode": {
+              "type": "string",
+              "enum": [
+                "light",
+                "strict"
+              ]
+            },
+            "default": {
+              "type": "boolean"
+            },
+            "writeGuard": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "mode",
+            "default",
+            "writeGuard"
+          ],
+          "additionalProperties": false
         }
       },
       "required": [
