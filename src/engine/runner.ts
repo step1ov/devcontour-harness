@@ -1,4 +1,5 @@
 import { freshDiagnosis } from '../projections/lead-recovery.ts';
+import { silentGateOnSha } from '../verification/gates-at.ts';
 import { controllerTemp } from '../environment/controller-temp.ts';
 import type { LeadDiagnosis } from '../contracts/execution.ts';
 import { execFileSync } from 'node:child_process';
@@ -3095,6 +3096,14 @@ export class Runner {
       ...(recheck ? { recheck } : {}),
       // Дерево потребителя — не база попытки: его входы установки не сверить.
       ...(!consumer && attempt.baseSha ? { trustedBase: attempt.baseSha } : {}),
+      // Молчаливый провал — определение gate, только если так же падает база
+      // (`harness gates --sha <база>`, alpha.69).
+      ...(!consumer && attempt.baseSha
+        ? {
+            silentOnBase: (id: string) =>
+              silentGateOnSha(this.options.stateDir, attempt.repositoryId, attempt.baseSha!, id),
+          }
+        : {}),
       signal,
       execution,
       boundary: this.boundary(consumer?.dependencies ?? attempt.dependencies),

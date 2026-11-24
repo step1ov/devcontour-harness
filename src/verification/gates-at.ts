@@ -1,3 +1,4 @@
+import { readFileSync, readdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { mkdir, rm, rmdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -29,7 +30,7 @@ import {
 } from '../environment/lifecycle.ts';
 import { defaultResourceDatabase, withResources } from '../environment/resources.ts';
 import { removeSnapshots, snapshotDependencies, type DependencySnapshot } from './dependencies.ts';
-import { reapedFailure, runGate, type Boundary } from './gates.ts';
+import { GATE_SILENT_FAILURE, reapedFailure, runGate, type Boundary } from './gates.ts';
 import { checkoutPath, chooseCheckoutRoot } from '../environment/checkout-root.ts';
 import {
   dependencyStoreRoot,
@@ -569,4 +570,53 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
     ...(interrupted ? { interrupted } : {}),
     ...(warnings.length ? { warnings } : {}),
   };
+}
+
+/**
+ * Молчал ли тот же gate на этом коммите в прогоне `harness gates --sha`
+ * (alpha.69, ревью): итог в `<state>/gates-at/<id>/result.json` с провалом
+ * gate и меткой молчаливого провала. Основание удержания `gate-definition`.
+ */
+export function silentGateOnSha(
+  stateDir: string,
+  repositoryId: string,
+  sha: string,
+  gateId: string,
+): boolean {
+  const root = join(stateDir, 'gates-at');
+  let names: string[];
+  try {
+    names = readdirSync(root);
+  } catch {
+    return false;
+  }
+  for (const name of names) {
+    try {
+      const raw = JSON.parse(readFileSync(join(root, name, 'result.json'), 'utf8')) as {
+        data?: {
+          repositoryId?: string;
+          sha?: string;
+          gates?: { gate?: string; status?: string; summary?: string; message?: string }[];
+        };
+      };
+      const d = raw.data;
+      if (d?.repositoryId !== repositoryId || d.sha !== sha) continue;
+      if (
+        d.gates?.some(
+          (g) =>
+            g.gate === gateId &&
+            g.status === 'failed' &&
+            [g.summary, g.message].some(
+              (t) =>
+                typeof t === 'string' &&
+                (t.includes(GATE_SILENT_FAILURE) || t.includes('GATE_DEFINITION_NO_CAUSE')),
+            ),
+        )
+      )
+        return true;
+    } catch {
+      /* чужой или неполный итог */
+    }
+  }
+  return false;
 }

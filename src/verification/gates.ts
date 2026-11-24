@@ -95,6 +95,9 @@ import {
 } from './failure-summary.ts';
 import { sameNode, toolchainFacts, toolchainText, usesPnpm } from '../environment/toolchain-pin.ts';
 
+/** Метка молчаливого провала gate в тексте провала и итоге `harness gates` (alpha.69). */
+export const GATE_SILENT_FAILURE = 'GATE_SILENT_FAILURE';
+
 /** Длинное имя testcase заменяется хешем, а не обрезается: обрезка дала бы ложные совпадения. */
 export const TEST_ID_LIMIT = 1000;
 export function portableTest<T extends { id: string; opaque?: true }>(test: T): T {
@@ -1282,6 +1285,12 @@ export interface GateRun {
    */
   trustedBase?: string;
   /**
+   * Тот же gate молча падал и на базе (`harness gates --sha <база>`,
+   * alpha.69, ревью): только тогда молчаливый провал — определение gate
+   * (удержание для ведущего), а не провал кода исполнителя.
+   */
+  silentOnBase?: (gateId: string) => boolean;
+  /**
    * Генеративный gate (`gate.property`): попытка, от которой seed, и
    * ожидаемая проверка поручения. Без `expected` — прежний уровень (отчёт
    * сверяется сам с собой и с JUnit).
@@ -1686,16 +1695,28 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
       // (`gate-definition`, как отказ окружения без повтора). У проверки
       // свойств причину называет её отчёт — она судится им.
       // Неостановленные потомки (`process-reap`) — своя причина среды: она важнее.
+      // Решение ведущего (ревью alpha.69): молчаливый провал засчитан
+      // исполнителю (сигнал — всегда), кроме случая, когда тот же gate так же
+      // молча падает и на базе — тогда это определение gate, удержание.
       if (
         failureSummary.withheld &&
         causeWithheld(result.stdout, result.stderr) &&
         !property &&
         !reaped
       ) {
-        kind = 'environment';
-        cause = 'gate-definition';
+        const crashed = result.diagnostics?.signal;
+        if (!crashed && run.silentOnBase?.(gate.id)) {
+          kind = 'environment';
+          cause = 'gate-definition';
+          throw new Error(
+            `${NO_RETRY_GATE_CODES['gate-definition']}: ${WITHHELD_NOTE}; так же молча падает и на базе. ` +
+              `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}` +
+              partialNotes.map((n) => '; ' + n).join(''),
+          );
+        }
         throw new Error(
-          `${NO_RETRY_GATE_CODES['gate-definition']}: ${WITHHELD_NOTE}. ` +
+          `${GATE_SILENT_FAILURE}: ${crashed ? `проверка прервана сигналом ${crashed}` : 'проверка упала, ничего не напечатав'} — провал засчитан исполнителю. ` +
+            `Если так же падает и база, ведущий проверяет gate: harness gates --sha <база> --gate ${gate.id}. ` +
             `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}` +
             partialNotes.map((n) => '; ' + n).join(''),
         );

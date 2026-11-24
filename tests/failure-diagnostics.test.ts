@@ -108,7 +108,12 @@ test('выжимка: скрытый вывод — withheld; spec-вывод р
   assert.doesNotMatch(JSON.stringify(masked), new RegExp(SECRET));
 });
 
-async function gate(r: ReturnType<typeof repo>, command: string[], report?: string) {
+async function gate(
+  r: ReturnType<typeof repo>,
+  command: string[],
+  report?: string,
+  silentOnBase?: (id: string) => boolean,
+) {
   const recorded: Omit<EvidenceRecord, 'id' | 'runId' | 'createdAt'>[] = [];
   let failure: TaskFailure | undefined;
   try {
@@ -132,6 +137,7 @@ async function gate(r: ReturnType<typeof repo>, command: string[], report?: stri
       signal: new AbortController().signal,
       execution: { env: { ...process.env, DIAG_SECRET: SECRET }, redact },
       boundary: { hidden: [], readable: [] },
+      ...(silentOnBase ? { silentOnBase } : {}),
     });
   } catch (error) {
     if (!(error instanceof TaskFailure)) throw error;
@@ -169,10 +175,17 @@ test('gate со скрытым выводом: имена из JUnit, котор
   assert.match(named.evidence.summary, /^Код выхода 1: упали admin sees photo: /);
   assert.doesNotMatch(JSON.stringify(named.evidence), new RegExp(SECRET), 'секрет замаскирован');
   const r2 = repo();
-  const hidden = await gate(r2, hidingGate(false));
-  // С 0.1.0-alpha.69 скрытый вывод — причина в определении gate: не
-  // засчитанный провал исполнителя, а отказ без повтора `gate-definition`.
-  assert.equal(hidden.failure?.kind, 'environment', 'скрытый вывод — не провал кода задачи');
+  // Ревью alpha.69: молчаливый провал засчитан исполнителю, пока тот же
+  // gate не падает так же на базе.
+  const counted = await gate(r2, hidingGate(false));
+  assert.equal(counted.failure?.kind, 'gate');
+  assert.match(
+    counted.evidence.summary,
+    /GATE_SILENT_FAILURE: проверка упала, ничего не напечатав/,
+  );
+  // Так же молчит и база — определение gate: отказ без повтора `gate-definition`.
+  const hidden = await gate(r2, hidingGate(false), undefined, (id) => id === 'ui-e2e');
+  assert.equal(hidden.failure?.kind, 'environment', 'база падает так же — не провал кода задачи');
   assert.equal(hidden.failure?.diagnosis, 'gate-definition');
   assert.equal(hidden.evidence.failureSummary?.withheld, true);
   assert.ok(hidden.evidence.summary.includes(WITHHELD_NOTE), hidden.evidence.summary);
