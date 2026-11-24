@@ -67,9 +67,14 @@ strict`) для чужого кода или секретов production. Стр
 - кеши инструментов (`DEFAULT_WRITE_GUARD_CACHES`).
 
 **Настройки CLI пользователя закрыты.** Каждый вызов исполнителя получает
-свой каталог настроек (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`) с копией только
-входа: у codex — `auth.json`, у claude — `.credentials.json`, если вход
-хранится файлом. Обратно ничего не копируется; `~/.codex`, `~/.claude` и
+свой каталог настроек (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`) со ссылкой
+только на настоящий файл входа: у codex — `auth.json`, у claude —
+`.credentials.json`, если вход хранится файлом. Граница записи открывает
+ровно этот файл: обновлённый токен попадает в настоящий файл (копия
+обновила бы токен только у себя и разлогинила бы пользователя). Каталог
+вызова с журналом и итогом controller исполнителю не открыт; файл ответа
+codex исполнитель пишет в отдельный каталог, controller читает его без
+ссылок и с пределом. `~/.codex`, `~/.claude` и
 `~/.claude.json` (настройки, хуки, MCP, общие с ведущим, reviewer и
 владельцем) исполнителю на запись не открыты. Вход claude по подписке на
 macOS хранится в Keychain и в свой каталог не переносится: выполните
@@ -77,23 +82,28 @@ macOS хранится в Keychain и в свой каталог не перен
 (`environment.inherit`), или задайте `ANTHROPIC_API_KEY`; без этого отказ
 runtime называет, что сделать.
 
-Кеши по умолчанию — только каталоги кешей, без исполняемых каталогов (npx,
-corepack, глобальные пакеты, дистрибутивы gradle-wrapper): кеш npm
-(`~/.npm/_cacache`, журналы `~/.npm/_logs`), хранилища pnpm
-(`~/.pnpm-store`, `~/Library/pnpm/store`, `~/.local/share/pnpm/store`) и
-его кеши, кеши yarn и bun, браузеры Playwright (`~/Library/Caches/ms-playwright`,
-`~/.cache/ms-playwright`), кеши turbo, node-gyp и Prisma,
-`~/.docker/buildx`, симулятор iOS (`~/Library/Developer/CoreSimulator`,
-`~/Library/Logs/CoreSimulator`, `~/Library/Developer/Xcode/DerivedData`),
-`~/.android/avd`, `~/.android/cache`, `~/.gradle/caches`, каталоги
-пользователя macOS `$DARWIN_USER_CACHE_DIR` и `$DARWIN_USER_TEMP_DIR`
-(Chrome создаёт во временном каталоге пользователя сокет профиля). Значит,
-общий временный каталог пользователя macOS (системный `$TMPDIR`) открыт на
-запись — это принятая цена облегчённого режима; убрать его —
+Кеши по умолчанию — каталоги кешей и то, что инструменты обязаны писать:
+кеш npm (`~/.npm/_cacache`, журналы `~/.npm/_logs`), хранилища pnpm
+(`~/.pnpm-store`, `~/Library/pnpm/store`, `~/.local/share/pnpm/store`), его
+кеши и версии (`.tools`), кеш corepack, кеши yarn и bun, браузеры Playwright
+(`~/Library/Caches/ms-playwright`, `~/.cache/ms-playwright`), кеши turbo,
+node-gyp и Prisma, `~/.docker/buildx`, `~/.maestro`, симулятор iOS
+(`~/Library/Developer/CoreSimulator`, `~/Library/Logs/CoreSimulator`,
+`~/Library/Developer/Xcode/DerivedData`), `~/.android/avd`,
+`~/.android/cache`, Gradle (`~/.gradle/caches`, `daemon`, `native`, `.tmp`,
+`wrapper/dists`), каталоги пользователя macOS `$DARWIN_USER_CACHE_DIR` и
+`$DARWIN_USER_TEMP_DIR` (Chrome создаёт во временном каталоге пользователя
+сокет профиля).
+
+Цена: исполняемые каталоги npx и глобальные пакеты закрыты, а дистрибутивы
+gradle-wrapper, версии pnpm (`.tools`) и corepack открыты — без них сборка
+не идёт, и их подмена исполнится потом вне попытки. Общий временный каталог
+пользователя macOS (системный `$TMPDIR`) открыт на запись; убрать его —
 `writeGuard.replace` без `$DARWIN_USER_TEMP_DIR` (тогда системный Chrome не
-стартует, Playwright — стартует). Временные файлы самого harness (каталоги
-проверок, метки старта, отчёты проб) поэтому лежат под каталогом состояния
-(`<state>/tmp`), а не в системном временном каталоге.
+стартует, Playwright — стартует). Поэтому временные файлы самого harness
+(каталоги проверок, метки старта, отчёты проб, домашние каталоги CLI
+исполнителя) лежат в своём каталоге `/tmp/hx-<хеш каталога состояния>-<uid>`
+(0700, короткий путь — сокеты unix помещаются), куда исполнитель не пишет.
 
 ```json
 "writeGuard": { "add": ["~/.cache/my-tool"] }

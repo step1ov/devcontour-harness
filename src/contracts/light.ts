@@ -51,9 +51,11 @@ export type WriteGuardPolicy = z.infer<typeof writeGuardSchema>;
  * — каталоги пользователя macOS (`getconf`), на других системах пропускаются.
  */
 export const DEFAULT_WRITE_GUARD_CACHES: readonly { id: string; path: string; why: string }[] = [
-  // Только каталоги кешей: без исполняемых каталогов (npx, corepack,
-  // глобальные пакеты, дистрибутивы gradle-wrapper) — их подмена
-  // исполнялась бы потом вне попытки.
+  // Каталоги кешей и то, что инструменты обязаны писать. Исполняемые
+  // каталоги (npx, глобальные пакеты) закрыты; дистрибутивы gradle-wrapper,
+  // corepack и `.tools` pnpm открыты, потому что без них сборка не идёт —
+  // это осознанная цена: их подмена исполнится потом вне попытки
+  // (docs/light-mode.md, «Граница записи»).
   { id: 'npm-cache', path: '~/.npm/_cacache', why: 'кеш пакетов npm' },
   { id: 'npm-logs', path: '~/.npm/_logs', why: 'журналы npm' },
   { id: 'pnpm-store', path: '~/.pnpm-store', why: 'хранилище pnpm' },
@@ -61,6 +63,10 @@ export const DEFAULT_WRITE_GUARD_CACHES: readonly { id: string; path: string; wh
   { id: 'pnpm-store-xdg', path: '~/.local/share/pnpm/store', why: 'хранилище pnpm на Linux' },
   { id: 'pnpm-cache-mac', path: '~/Library/Caches/pnpm', why: 'кеш метаданных pnpm на macOS' },
   { id: 'pnpm-cache-xdg', path: '~/.cache/pnpm', why: 'кеш метаданных pnpm на Linux' },
+  { id: 'pnpm-tools-mac', path: '~/Library/pnpm/.tools', why: 'версии pnpm (packageManager)' },
+  { id: 'pnpm-tools-xdg', path: '~/.local/share/pnpm/.tools', why: 'версии pnpm на Linux' },
+  { id: 'corepack-mac', path: '~/Library/Caches/node/corepack', why: 'кеш corepack' },
+  { id: 'corepack-xdg', path: '~/.cache/node/corepack', why: 'кеш corepack на Linux' },
   { id: 'yarn-cache', path: '~/.yarn/berry/cache', why: 'кеш yarn berry' },
   { id: 'yarn-cache-mac', path: '~/Library/Caches/Yarn', why: 'кеш yarn на macOS' },
   { id: 'bun', path: '~/.bun/install/cache', why: 'кеш bun' },
@@ -86,6 +92,15 @@ export const DEFAULT_WRITE_GUARD_CACHES: readonly { id: string; path: string; wh
   { id: 'android-avd', path: '~/.android/avd', why: 'AVD эмулятора Android' },
   { id: 'android-cache', path: '~/.android/cache', why: 'кеш инструментов Android' },
   { id: 'gradle-caches', path: '~/.gradle/caches', why: 'кеш Gradle (сборка Android)' },
+  { id: 'gradle-daemon', path: '~/.gradle/daemon', why: 'демон Gradle' },
+  { id: 'gradle-native', path: '~/.gradle/native', why: 'нативные библиотеки Gradle' },
+  { id: 'gradle-tmp', path: '~/.gradle/.tmp', why: 'временные файлы Gradle' },
+  { id: 'gradle-wrapper', path: '~/.gradle/wrapper/dists', why: 'дистрибутивы gradle-wrapper' },
+  {
+    id: 'maestro',
+    path: '~/.maestro',
+    why: 'Maestro вне мобильного UI gate (у UI gate — свой домашний каталог Java)',
+  },
   {
     id: 'darwin-user-cache',
     path: '$DARWIN_USER_CACHE_DIR',

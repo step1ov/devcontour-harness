@@ -89,14 +89,29 @@ test('кеши границы: умолчания, add, replace; профиль 
     'docker-buildx',
   ])
     assert.ok(defaults.includes(id), id);
-  // Настройки CLI пользователя, исполняемые каталоги npx, corepack и
-  // дистрибутивы gradle на запись не открыты (alpha.69, ревью).
-  for (const c of guardCaches(undefined, '/home/u'))
+  // Настройки CLI пользователя, исполняемые каталоги npx и глобальные
+  // пакеты, целиком ~/.cache и ~/Library/Caches на запись не открыты; то, что
+  // инструменты обязаны писать (gradle, corepack, .tools pnpm), — открыто.
+  const paths = guardCaches(undefined, '/home/u').map((c) => c.path);
+  for (const p of paths)
     assert.ok(
-      !/\/\.(codex|claude)(\.json)?$|\/\.claude\/|_npx|corepack|\/\.gradle$|\/\.gradle\/wrapper|\/Library\/Caches$|\/\.cache$/.test(
-        c.path,
+      !/\/\.(codex|claude)(\.json)?$|\/\.claude\/|_npx|\/\.gradle$|\/Library\/Caches$|\/\.cache$|\/\.npm$/.test(
+        p,
       ),
-      c.path,
+      p,
+    );
+  for (const need of [
+    '/home/u/.gradle/daemon',
+    '/home/u/.gradle/native',
+    '/home/u/.gradle/.tmp',
+    '/home/u/.gradle/wrapper/dists',
+    '/home/u/.maestro',
+    '/home/u/.cache/node/corepack',
+    '/home/u/Library/pnpm/.tools',
+  ])
+    assert.ok(
+      paths.some((p) => p.endsWith(need.slice('/home/u'.length))),
+      need,
     );
   const added = guardCaches({ add: ['~/.custom-cache'] }, '/home/u');
   assert.ok(added.some((c) => c.path.endsWith('/home/u/.custom-cache')));
