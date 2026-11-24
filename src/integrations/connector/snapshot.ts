@@ -300,7 +300,8 @@ export async function readStable(
         } catch (error) {
           throw readFailure(error, 'Контекст задачи ' + ref);
         }
-        // Контекст другой редакции задачи — раунд не согласован.
+        // Контекст другой редакции задачи или несогласованный — раунд не согласован.
+        if (outcome.status === 'inconsistent') return undefined;
         if (outcome.status === 'ok' && outcome.context.taskRevision !== read.task.revision)
           return undefined;
         read = { ...read, context: outcome };
@@ -854,7 +855,9 @@ export function buildSnapshot(input: {
           reason: `Контекст задачи ${task.key} из Relay не включён: ${reason}. Исполнитель получает задачу, критерии и документы задачи, но не описание функции и сценария`,
         });
       };
-      if (outcome.status === 'too-large') fallback(outcome.reason);
+      // Несогласованный контекст до снимка не доходит (раунд перечитывается).
+      if (outcome.status === 'too-large' || outcome.status === 'inconsistent')
+        fallback(outcome.reason);
       else {
         const pinnedDocs = new Map(
           documents

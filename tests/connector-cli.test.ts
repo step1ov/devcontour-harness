@@ -200,12 +200,19 @@ async function relayServer(projectId: string, contractVersion = 1) {
     return undefined;
   };
   const server = createServer((req, res) => {
-    const data = reply(new URL(req.url ?? '/', 'http://x').pathname);
+    const path = new URL(req.url ?? '/', 'http://x').pathname;
+    const data = reply(path);
     res.writeHead(data === undefined ? 404 : 200, { 'content-type': 'application/json' });
     res.end(
       JSON.stringify(
         data === undefined
-          ? { ok: false, error: { code: 'NOT_FOUND', message: 'нет маршрута' } }
+          ? {
+              ok: false,
+              // Паспорта продукта в проекте нет — как отвечает Relay 0.13.
+              error: path.endsWith('/entities/get')
+                ? { code: 'ENTITY_NOT_FOUND', message: 'нет записи' }
+                : { code: 'NOT_FOUND', message: 'нет маршрута' },
+            }
           : { ok: true, data },
       ),
     );

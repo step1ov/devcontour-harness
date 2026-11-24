@@ -118,7 +118,12 @@ function world() {
   return { entities, task };
 }
 
-async function relay013(w: ReturnType<typeof world>, caps: string[] = ['relay-projects-v1']) {
+async function relay013(
+  w: ReturnType<typeof world>,
+  caps: string[] = ['relay-projects-v1'],
+  /** Маршрут, которого «нет» у сервера (отказ NOT_FOUND). */
+  missingRoute?: string,
+) {
   const seen: string[] = [];
   const page = (items: unknown[]) => ({
     items,
@@ -137,6 +142,7 @@ async function relay013(w: ReturnType<typeof world>, caps: string[] = ['relay-pr
     const ok = (data: unknown) => send(200, { ok: true, data });
     const notFound = (code = 'NOT_FOUND') =>
       send(404, { ok: false, error: { code, message: code, exitCode: 3 } });
+    if (missingRoute && u.pathname === `${BASE}${missingRoute}`) return notFound();
     if (u.pathname === '/api/v1/health') return ok({ status: 'ok', contractVersion: 1 });
     if (u.pathname === `${BASE}/context`) return ok({ projectId: P, capabilities: caps });
     if (
@@ -306,5 +312,87 @@ test('сервер объявил relay-task-context-v1 — читается е�
     assert.ok(srv.seen.some((p) => p.startsWith(`${BASE}/board-tasks/WEB-1/context`)));
   } finally {
     await srv.close();
+  }
+});
+
+test('несогласованный контекст после всех повторов — inconsistent, не ok; новый документ задачи во время сборки — пересборка', async () => {
+  const w = world();
+  const srv = await relay013(w);
+  // Ревизия фичи меняется при каждом чтении: согласоваться нечему.
+  const feature = w.entities.find((e) => e.key === 'FEATURE-1')!;
+  const original = srv.seen.push.bind(srv.seen);
+  srv.seen.push = (...items: string[]) => {
+    for (const p of items)
+      if (p.startsWith(`${BASE}/entities/get`) && p.includes('Fe000001'))
+        setImmediate(() => (feature.revision += 1));
+    return original(...items);
+  };
+  try {
+    const out = await srv.transport.readTaskContext!('WEB-1', {
+      targetDocuments: false,
+      maxBytes: 1 << 20,
+    });
+    assert.equal(out.status, 'inconsistent');
+  } finally {
+    srv.seen.push = original;
+    await srv.close();
+  }
+  // Документ прикреплён к задаче во время сборки: ревизии те же, состав другой.
+  const w2 = world();
+  const srv2 = await relay013(w2);
+  let added = false;
+  const push2 = srv2.seen.push.bind(srv2.seen);
+  srv2.seen.push = (...items: string[]) => {
+    for (const p of items)
+      if (!added && p.startsWith(`${BASE}/entities/get`) && p.includes('Doc00001')) {
+        added = true;
+        setImmediate(() =>
+          w2.entities.push({
+            ref: { kind: 'document', id: 'Doc00009' },
+            key: 'DOC-9',
+            title: 'Ответ владельца',
+            summary: '',
+            revision: 1,
+            data: { kind: 'document', body: '# Ответ', name: 'Ответ' },
+            targets: ['Task0001'],
+          }),
+        );
+      }
+    return push2(...items);
+  };
+  try {
+    const out = await srv2.transport.readTaskContext!('WEB-1', {
+      targetDocuments: false,
+      maxBytes: 1 << 20,
+    });
+    assert.ok(out.status === 'ok' && out.context.records.some((r) => r.key === 'DOC-9'));
+  } finally {
+    await srv2.close();
+  }
+});
+
+test('паспорт: нет записи — раздел пуст; нет маршрута — отказ; краткое описание — в пределе', async () => {
+  const w = world();
+  const srv = await relay013(w);
+  try {
+    // Предел меньше суммы текстов с кратким описанием: too-large.
+    const passport = w.entities.find((e) => e.ref.kind === 'product')!;
+    passport.summary = 'x'.repeat(5000);
+    const small = await srv.transport.readTaskContext!('WEB-1', {
+      targetDocuments: false,
+      maxBytes: 4000,
+    });
+    assert.equal(small.status, 'too-large');
+  } finally {
+    await srv.close();
+  }
+  // Нет маршрута записи (не «нет паспорта») — отказ чтения, а не пустой раздел.
+  const broken = await relay013(world(), ['relay-projects-v1'], '/entities/get');
+  try {
+    await assert.rejects(
+      broken.transport.readTaskContext!('WEB-1', { targetDocuments: false, maxBytes: 1 << 20 }),
+    );
+  } finally {
+    await broken.close();
   }
 });

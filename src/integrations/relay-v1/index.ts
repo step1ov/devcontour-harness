@@ -1014,14 +1014,18 @@ export class RelayV1Transport implements RelayTransport {
     options: { targetDocuments: boolean; maxBytes: number },
     signal?: AbortSignal,
   ): Promise<TaskContextOutcome> {
-    let last: TaskContextOutcome | undefined;
     for (let attempt = 0; attempt <= this.maxReadRetries; attempt++) {
       const built = await this.buildTaskContextOnce(ref, options, signal);
       if (built.outcome.status === 'too-large') return built.outcome;
-      last = built.outcome;
-      if (await this.contextStable(built.task, built.revisions, signal)) return built.outcome;
+      if (await this.contextStable(built.task, built.revisions, built.memberships, signal))
+        return built.outcome;
     }
-    return last!;
+    // Не согласовалось за отведённые повторы: не «ok» с известным
+    // расхождением, а несогласованный раунд — снимок перечитает его.
+    return {
+      status: 'inconsistent',
+      reason: `контекст задачи ${ref} менялся во время чтения ${this.maxReadRetries + 1} раз подряд`,
+    };
   }
 
   private async buildTaskContextOnce(
@@ -1032,6 +1036,8 @@ export class RelayV1Transport implements RelayTransport {
     outcome: TaskContextOutcome;
     task: { id: string; revision: number };
     revisions: Map<string, { kind: string; id: string; revision: number }>;
+    /** Состав прикреплённых документов по владельцу: новый или архивный документ — другое чтение. */
+    memberships: { owner: string; ids: string[] }[];
   }> {
     const op = 'task.context';
     const task = await this.call(op, taskLinksSchema, {
@@ -1047,10 +1053,12 @@ export class RelayV1Transport implements RelayTransport {
       { section: Section; entity: Entity; reasons: { code: string; from: string | null }[] }
     >();
     let bytes = 0;
+    const memberships: { owner: string; ids: string[] }[] = [];
     const tooLarge = (reason: string) => ({
       outcome: { status: 'too-large' as const, reason },
       task: { id: task.id, revision: task.revision },
       revisions: new Map<string, { kind: string; id: string; revision: number }>(),
+      memberships,
     });
     class TooLarge extends Error {}
     const get = (r: { kind: string; id: string }) =>
@@ -1077,7 +1085,10 @@ export class RelayV1Transport implements RelayTransport {
         throw new TooLarge(`записей контекста больше предела ${TASK_CONTEXT_RECORD_LIMIT}`);
       const entity = known ?? (await get(r));
       bytes += Buffer.byteLength(
-        (entity.data.description ?? '') + (entity.data.body ?? '') + entity.title,
+        (entity.data.description ?? '') +
+          (entity.data.body ?? '') +
+          entity.title +
+          (entity.summary ?? ''),
         'utf8',
       );
       if (bytes > options.maxBytes)
@@ -1136,11 +1147,9 @@ export class RelayV1Transport implements RelayTransport {
         const passport = await get({ kind: 'product', id: 'passport' });
         await include(passport.ref, 'product', { code: 'product-passport', from: null }, passport);
       } catch (error) {
-        // Паспорта нет (ENTITY_NOT_FOUND или иной «не найдено») — раздел пуст.
-        if (!(
-          error instanceof TransportError &&
-          (error.details.code === 'ENTITY_NOT_FOUND' || error.kind === 'not-found')
-        ))
+        // Паспорта нет — только ENTITY_NOT_FOUND; нет маршрута или проекта —
+        // отказ, а не пустой раздел.
+        if (!(error instanceof TransportError && error.details.code === 'ENTITY_NOT_FOUND'))
           throw error;
       }
       // Неархивные документы, прикреплённые к задаче, и — по настройке — к целям.
@@ -1152,6 +1161,7 @@ export class RelayV1Transport implements RelayTransport {
           { kind: 'document', target: owner.id, archived: 'false' },
           signal,
         );
+        memberships.push({ owner: owner.id, ids: list.items.map((i) => i.ref.id).sort() });
         for (const item of list.items) await include(item.ref, 'document', { code, from: owner });
       };
       await attached(taskRef, 'task-document');
@@ -1211,6 +1221,7 @@ export class RelayV1Transport implements RelayTransport {
       },
       task: { id: task.id, revision: task.revision },
       revisions,
+      memberships,
     };
   }
 
@@ -1218,6 +1229,7 @@ export class RelayV1Transport implements RelayTransport {
   private async contextStable(
     task: { id: string; revision: number },
     revisions: Map<string, { kind: string; id: string; revision: number }>,
+    memberships: { owner: string; ids: string[] }[],
     signal?: AbortSignal,
   ) {
     const op = 'task.context';
@@ -1238,6 +1250,18 @@ export class RelayV1Transport implements RelayTransport {
       });
       const seen = new Map(page.items.map((x) => [`${x.ref.kind}:${x.ref.id}`, x.revision]));
       if (chunk.some((r) => seen.get(`${r.kind}:${r.id}`) !== r.revision)) return false;
+    }
+    // Состав документов: прикреплён новый или прежний ушёл в архив.
+    for (const m of memberships) {
+      const list = await this.pages(
+        op,
+        entityRevisionSchema,
+        '/entities',
+        { kind: 'document', target: m.owner, archived: 'false' },
+        signal,
+      );
+      const ids = list.items.map((i) => i.ref.id).sort();
+      if (ids.join('\0') !== m.ids.join('\0')) return false;
     }
     return true;
   }
