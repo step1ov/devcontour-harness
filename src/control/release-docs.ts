@@ -2,7 +2,12 @@
 // работа документации (метка `docs`), до приёмки выпуска. Чистая функция над
 // видом состояния: её читают `review-release`, `status` и представление.
 
-import type { ExecutionPolicy, ExecutionView, WorkState } from '../contracts/index.ts';
+import {
+  WORKSPACE_OWNER,
+  type ExecutionPolicy,
+  type ExecutionView,
+  type WorkState,
+} from '../contracts/index.ts';
 
 export const DOCS_LABEL = 'docs';
 
@@ -32,11 +37,23 @@ const isDocs = (w: WorkState) => w.order.labels?.includes(DOCS_LABEL) === true;
  * (транзитивно) зависит от каждого корня; `done` — такая работа принята.
  */
 export function releaseDocsState(
-  view: Pick<ExecutionView, 'works'>,
+  view: Pick<ExecutionView, 'works'> & Partial<Pick<ExecutionView, 'attempts' | 'local'>>,
   policy: Pick<ExecutionPolicy, 'release'>,
 ): ReleaseDocsState {
   const mode = releaseDocsMode(policy);
-  const works = view.works().filter((w) => w.status !== 'cancelled');
+  // Текущий выпуск (ревью 1): после последнего `release done` — без работ,
+  // принятых до него; их связи корнями нового выпуска не считаются.
+  const doneAt = view.local?.('lead', WORKSPACE_OWNER, 'log')?.release?.doneAt;
+  const acceptedAt = new Map<string, string>();
+  if (doneAt && view.attempts)
+    for (const a of view.attempts())
+      if (a.status === 'succeeded' && a.finishedAt) {
+        const prev = acceptedAt.get(a.workId);
+        if (!prev || a.finishedAt > prev) acceptedAt.set(a.workId, a.finishedAt);
+      }
+  const earlier = (w: WorkState) =>
+    !!doneAt && w.status === 'done' && (acceptedAt.get(w.id) ?? '') <= doneAt;
+  const works = view.works().filter((w) => w.status !== 'cancelled' && !earlier(w));
   const product = works.filter((w) => !isDocs(w));
   const docs = works.filter(isDocs);
   const dependedOn = new Set(product.flatMap((w) => w.order.dependsOn));

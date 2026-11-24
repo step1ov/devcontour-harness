@@ -312,7 +312,8 @@ test('P7-6: release done при required — отказ без ревью, с б
     releaseDone(f.engine, { summary: 'Выпуск готов', heads: f.heads() }),
   );
   assert.equal(done.release?.works, 1);
-  assert.equal(done.warning, undefined);
+  // Шаг документации по умолчанию — совет (alpha.70): предупреждение, не отказ.
+  assert.match(done.warning ?? '', /нет работы с меткой docs/);
   assert.equal(done.releaseReview?.status, 'approved');
   assert.equal(done.releaseReview?.required, true);
   assert.deepEqual(done.releaseReview?.notes, ['Стоит добавить кэш для /media']);
@@ -618,4 +619,26 @@ test('ревью 1: отказ приёмки выпуска без блокир
   assert.equal(r.approved, false);
   assert.equal(r.passes?.status, 'ran');
   assert.equal(r.passes?.overturned, false);
+});
+
+test('ревью 1: release.docs: required держит release done и при review: advisory; advisory — предупреждение; следующий выпуск — свои корни', () => {
+  const f = fixture((p) => (p.release = { review: 'advisory', docs: 'required' }));
+  ready(f.engine, graphOf({ w: [] }));
+  accept(f.engine, f.base, f.head);
+  notReady(
+    () => releaseDone(f.engine, { summary: 'готово', heads: f.heads() }),
+    /нет работы с меткой docs после корневых работ \(w\).*release\.docs: required/,
+  );
+  const g = fixture((p) => (p.release = { review: 'advisory', docs: 'advisory' }));
+  ready(g.engine, graphOf({ w: [] }));
+  accept(g.engine, g.base, g.head);
+  const done = leadDataSchema.parse(releaseDone(g.engine, { summary: 'готово', heads: g.heads() }));
+  assert.match(done.warning ?? '', /нет работы с меткой docs.*release\.docs: advisory/);
+  // Второй выпуск: принятая в первом w не корень нового выпуска.
+  const next = graphOf({ w: [], w2: [], d2: ['w2'] }, '2');
+  next.orders[2]!.labels = ['docs'];
+  ready(g.engine, next);
+  const state = g.engine.read((v) => releaseDocsState(v, { release: { docs: 'advisory' } }));
+  assert.deepEqual(state.roots, ['w2']);
+  assert.equal(state.status, 'pending');
 });
