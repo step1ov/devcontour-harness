@@ -98,12 +98,42 @@ export const DEFAULT_WRITE_GUARD_CACHES: readonly { id: string; path: string; wh
   },
 ];
 
-/** Имя переменной окружения порта попытки (не `HARNESS_*`/`DEVCONTOUR_*`). */
+/**
+ * Переменные, которые порт или шлюз попытки не перекрывают (alpha.69,
+ * ревью): окружение процесса и загрузчика, имя проекта compose попытки.
+ */
+export const RESERVED_ATTEMPT_ENV = [
+  'PATH',
+  'HOME',
+  'TMPDIR',
+  'TMP',
+  'TEMP',
+  'USER',
+  'LOGNAME',
+  'SHELL',
+  'PWD',
+  'CI',
+  'NODE_OPTIONS',
+  'NODE_PATH',
+  'LD_PRELOAD',
+  'LD_LIBRARY_PATH',
+  'COMPOSE_PROJECT_NAME',
+  'COMPOSE_FILE',
+  'DOCKER_HOST',
+  'DOCKER_CONFIG',
+  'CODEX_HOME',
+  'CLAUDE_CONFIG_DIR',
+] as const;
+/** Имя переменной окружения порта попытки (не `HARNESS_*`/`DEVCONTOUR_*`, не зарезервированное). */
 const portEnvName = z
   .string()
   .regex(
-    /^(?!HARNESS_|DEVCONTOUR_)[A-Z_][A-Z0-9_]*$/,
-    'Имя переменной порта — [A-Z_][A-Z0-9_]*, кроме HARNESS_* и DEVCONTOUR_*',
+    /^(?!HARNESS_|DEVCONTOUR_|DYLD_)[A-Z_][A-Z0-9_]*$/,
+    'Имя переменной порта — [A-Z_][A-Z0-9_]*, кроме HARNESS_*, DEVCONTOUR_* и DYLD_*',
+  )
+  .refine(
+    (v) => !(RESERVED_ATTEMPT_ENV as readonly string[]).includes(v),
+    'Переменную окружения процесса (PATH, HOME, TMPDIR, NODE_OPTIONS, COMPOSE_PROJECT_NAME…) порт или шлюз попытки не перекрывает',
   );
 
 /**

@@ -4,7 +4,15 @@
 import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -23,11 +31,12 @@ const supported = writeGuardSupport().ok;
 test('порты попытки: свои у каждой попытки, аренда в базе машины, снимается при release', async () => {
   const db = join(realpathSync(mkdtempSync(join(tmpdir(), 'ports-'))), 'resources.sqlite');
   const policy = { ports: ['API_PORT', 'WEB_PORT'], portRange: { from: 31000, to: 31010 } };
-  const a = await allocateAttemptPorts(policy, db, 'a');
-  const b = await allocateAttemptPorts(policy, db, 'b');
+  // Постоянные ресурсы-порты политики не выделяются.
+  const a = await allocateAttemptPorts(policy, db, 'a', { exclude: [31000, 31001, 31002] });
+  const b = await allocateAttemptPorts(policy, db, 'b', { exclude: [31000, 31001, 31002] });
   const all = [...Object.values(a.ports), ...Object.values(b.ports)];
   assert.equal(new Set(all).size, 4, 'порты двух попыток не пересекаются');
-  for (const p of all) assert.ok(p >= 31000 && p <= 31010);
+  for (const p of all) assert.ok(p >= 31003 && p <= 31010, String(p));
   const pool = new ResourcePool(db);
   assert.equal(pool.list().length, 4);
   a.release();
@@ -45,7 +54,11 @@ test('порты попытки: свои у каждой попытки, аре
 });
 
 test('переменные попытки: имя проекта compose, порты и шлюз с суффиксами', () => {
-  assert.equal(composeProjectName('Att_01/x'), 'hx-att_01-x');
+  // Имя — хеш попытки и репозитория: без обрезки, своё у потребителя.
+  assert.match(composeProjectName('Att_01/x', 'app'), /^hx-app-[0-9a-f]{12}$/);
+  const long = 'a'.repeat(80);
+  assert.notEqual(composeProjectName(long + '1', 'app'), composeProjectName(long + '2', 'app'));
+  assert.notEqual(composeProjectName('a1', 'app'), composeProjectName('a1', 'web'));
   const env = attemptVariables(
     'a1',
     { API_PORT: 20001, GATEWAY_PORT: 20002 },
@@ -54,15 +67,25 @@ test('переменные попытки: имя проекта compose, пор
       env: { IMAGE_PUBLIC_BASE_URL: '/media', API_URL: '' },
     },
   );
-  assert.deepEqual(env, {
+  const { HARNESS_ATTEMPT_ENV_KEYS: keys, COMPOSE_PROJECT_NAME: compose, ...rest } = env;
+  assert.match(compose!, /^hx-[0-9a-f]{12}$/);
+  assert.deepEqual(rest, {
     HARNESS_ATTEMPT_ID: 'a1',
-    COMPOSE_PROJECT_NAME: 'hx-a1',
     API_PORT: '20001',
     GATEWAY_PORT: '20002',
     HARNESS_GATEWAY_URL: 'http://127.0.0.1:20002',
     IMAGE_PUBLIC_BASE_URL: 'http://127.0.0.1:20002/media',
     API_URL: 'http://127.0.0.1:20002',
   });
+  assert.ok(keys!.split(',').includes('COMPOSE_PROJECT_NAME'));
+  // Переменные процесса порт и шлюз попытки не перекрывают.
+  for (const name of ['PATH', 'NODE_OPTIONS', 'TMPDIR', 'HOME', 'COMPOSE_PROJECT_NAME', 'DYLD_X'])
+    assert.equal(
+      executionPolicySchema.safeParse({ ...example('policy'), attemptEnv: { ports: [name] } })
+        .success,
+      false,
+      name,
+    );
 });
 
 test('политика: шлюз ссылается только на порты попытки, пул устройств — ресурсы device', async () => {
@@ -146,12 +169,31 @@ fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,
           env: { IMAGE_PUBLIC_BASE_URL: '/media' },
         };
         repo.gates[0].command = [process.execPath, 'test/light.js'];
+        // Окружение фазы: receipt хранит переменные попытки для очистки.
+        repo.lifecycle = {
+          setup: [{ id: 'up', command: ['true'] }],
+          teardown: [{ id: 'down', command: ['true'] }],
+        };
       },
     });
     await runAll(ctx);
     const a = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
     assert.equal(a.status, 'succeeded', a.error);
     assert.equal(existsSync(outside), false);
+    // Receipt окружения хранит имя проекта compose и порты попытки: очистка в
+    // новом процессе работает с тем же стеком, а не с именем из compose-файла.
+    const receipts = execFileSync('find', [ctx.state, '-name', 'environment.json'], {
+      encoding: 'utf8',
+    })
+      .trim()
+      .split('\n')
+      .filter(Boolean)
+      .map((f) => JSON.parse(readFileSync(f, 'utf8')) as { attemptEnv?: Record<string, string> });
+    assert.ok(receipts.length > 0, 'receipt есть');
+    for (const r of receipts) {
+      assert.match(r.attemptEnv?.COMPOSE_PROJECT_NAME ?? '', /^hx-app-[0-9a-f]{12}$/);
+      assert.match(r.attemptEnv?.API_PORT ?? '', /^\d+$/);
+    }
     // Аренда портов снята после попытки.
     const pool = new ResourcePool(join(ctx.state, 'resources.sqlite'));
     assert.equal(pool.list().length, 0);

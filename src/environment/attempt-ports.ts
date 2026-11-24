@@ -1,4 +1,4 @@
-import { randomInt, randomUUID } from 'node:crypto';
+import { createHash, randomInt, randomUUID } from 'node:crypto';
 import {
   DEFAULT_PORT_RANGE,
   type AttemptEnvPolicy,
@@ -31,7 +31,12 @@ export async function allocateAttemptPorts(
   policy: AttemptEnvPolicy | undefined,
   database: string,
   owner: string,
-  options: { ttlMs?: number; busy?: (port: number) => Promise<boolean> } = {},
+  options: {
+    ttlMs?: number;
+    busy?: (port: number) => Promise<boolean>;
+    /** Порты, которые не выделяются: постоянные ресурсы-порты политики. */
+    exclude?: readonly number[];
+  } = {},
 ): Promise<AttemptPorts> {
   const names = policy?.ports ?? [];
   if (!names.length) return { ports: {}, release: () => undefined };
@@ -41,7 +46,7 @@ export async function allocateAttemptPorts(
   const pool = new ResourcePool(database);
   const token = randomUUID();
   const ports: Record<string, number> = {};
-  const taken = new Set<number>();
+  const taken = new Set<number>(options.exclude ?? []);
   try {
     // Аренды умерших процессов на портах диапазона снимаются: их держатель
     // уже ничего не слушает.
@@ -97,13 +102,20 @@ export const ATTEMPT_ENV_FILE = 'attempt-env.json';
 /** Ключ аренды порта попытки (для тестов и уборки). */
 export const attemptPortKey = (port: number) => resourceKey(leaseOf(port));
 
-/** Имя проекта compose попытки: `hx-<id>`, только [a-z0-9_-], не длиннее 60. */
-export function composeProjectName(attemptId: string) {
-  const slug = attemptId
+/**
+ * Имя проекта compose попытки и репозитория: `hx-<репозиторий>-<хеш>` —
+ * хеш попытки и репозитория (без обрезки, которая сводила бы разные
+ * попытки к одному имени); у проверки потребителя своё имя, отличное от
+ * имени поставщика той же попытки. Только [a-z0-9_-].
+ */
+export function composeProjectName(attemptId: string, repositoryId = '') {
+  const slug = repositoryId
     .toLowerCase()
     .replace(/[^a-z0-9_-]+/g, '-')
-    .replace(/^-+|-+$/g, '');
-  return ('hx-' + (slug || 'attempt')).slice(0, 60);
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 20);
+  const hash = createHash('sha256').update(`${attemptId}\0${repositoryId}`).digest('hex');
+  return `hx-${slug ? slug + '-' : ''}${hash.slice(0, 12)}`;
 }
 
 /** Подставить порты попытки в шаблон `${NAME}`; неизвестное имя — ошибка. */
@@ -126,10 +138,11 @@ export function attemptVariables(
   attemptId: string,
   ports: Record<string, number>,
   gateway: GatewayPolicy | undefined,
+  repositoryId = '',
 ): Record<string, string> {
   const env: Record<string, string> = {
     HARNESS_ATTEMPT_ID: attemptId,
-    COMPOSE_PROJECT_NAME: composeProjectName(attemptId),
+    COMPOSE_PROJECT_NAME: composeProjectName(attemptId, repositoryId),
     ...Object.fromEntries(Object.entries(ports).map(([k, v]) => [k, String(v)])),
   };
   if (gateway) {
@@ -137,5 +150,11 @@ export function attemptVariables(
     env.HARNESS_GATEWAY_URL = url;
     for (const [name, suffix] of Object.entries(gateway.env)) env[name] = url + suffix;
   }
+  // Имена переменных попытки — в receipt окружения: очистка в новом
+  // процессе получает то же имя проекта compose и те же порты.
+  env[ATTEMPT_ENV_KEYS] = [...Object.keys(env), ATTEMPT_ENV_KEYS].join(',');
   return env;
 }
+
+/** Переменная со списком имён переменных попытки (для receipt и очистки). */
+export const ATTEMPT_ENV_KEYS = 'HARNESS_ATTEMPT_ENV_KEYS';

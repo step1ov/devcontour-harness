@@ -350,6 +350,11 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
             ctx.policy.attemptEnv,
             ctx.resourceDatabase ?? defaultResourceDatabase(),
             `${ctx.stateDir}:${id}`,
+            {
+              exclude: ctx.policy.resources
+                .filter((r) => r.kind === 'port')
+                .map((r) => Number(r.value)),
+            },
           );
         const execution = executionEnvironment(
           [ctx.policy.environment, repo.environment],
@@ -363,7 +368,7 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
               ...Object.fromEntries(snapshots.map((d) => [d.repositoryId, d.path])),
               [repo.id]: cwd,
             }),
-            ...(light ? attemptVariables(id, ports?.ports ?? {}, repo.gateway) : {}),
+            ...(light ? attemptVariables(id, ports?.ports ?? {}, repo.gateway, repo.id) : {}),
           },
           source,
           ctx.policy.toolchain,

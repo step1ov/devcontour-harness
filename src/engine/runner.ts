@@ -389,7 +389,7 @@ export class Runner {
   /** Когда истекает текущий предел времени попытки: от остатка считается бюджет хранилища. */
   private phaseDeadlines = new Map<string, number>();
   /** Порты попытки облегчённого режима (alpha.69, `attemptEnv.ports`). */
-  private attemptPorts = new Map<string, Record<string, number>>();
+  private attemptPorts = new Map<string, Map<string, Record<string, number>>>();
   /**
    * Текст провала gates попытки-источника для writer продолжения (по ID
    * попытки): собирается при наложении черновика, расходуется запросом.
@@ -840,8 +840,9 @@ export class Runner {
           ? {
               ...attemptVariables(
                 attempt.id,
-                this.attemptPorts.get(attempt.id) ?? {},
+                this.attemptPorts.get(attempt.id)?.get(repo.id) ?? {},
                 repo.gateway,
+                repo.id,
               ),
               HARNESS_ATTEMPT_ENV_FILE: join(
                 this.dirOf(attempt.repositoryId),
@@ -1679,21 +1680,38 @@ export class Runner {
     const worktrees: string[] = [];
     const snapshots: DependencySnapshot[] = [];
     let preserve = false;
+    const leases: AttemptPorts[] = [];
     let ports: AttemptPorts | undefined;
     try {
-      // Облегчённый режим: свои порты попытки — до любой фазы; нет
-      // свободного — отказ среды, попытка не засчитывается.
+      // Облегчённый режим: свои порты попытки — до любой фазы, у каждого
+      // репозитория попытки (её и проверяемых потребителей) свои: стеки
+      // поставщика и потребителя не делят порты. Постоянные ресурсы-порты
+      // политики не выделяются. Нет свободного — отказ среды, попытка не
+      // засчитывается.
       if (harnessModeOf(this.policy) === 'light' && this.policy.attemptEnv?.ports?.length) {
+        const byRepo = new Map<string, Record<string, number>>();
+        const exclude = this.policy.resources
+          .filter((r) => r.kind === 'port')
+          .map((r) => Number(r.value));
         try {
-          ports = await allocateAttemptPorts(
-            this.policy.attemptEnv,
-            this.options.resourceDatabase ?? defaultResourceDatabase(),
-            `${this.options.stateDir}:${attempt.id}`,
-          );
+          for (const repositoryId of new Set([
+            repo.id,
+            ...(claimed.consumers ?? []).map((c) => c.repositoryId),
+          ])) {
+            const lease = await allocateAttemptPorts(
+              this.policy.attemptEnv,
+              this.options.resourceDatabase ?? defaultResourceDatabase(),
+              `${this.options.stateDir}:${attempt.id}:${repositoryId}`,
+              { exclude: [...exclude, ...leases.flatMap((l) => Object.values(l.ports))] },
+            );
+            leases.push(lease);
+            byRepo.set(repositoryId, lease.ports);
+            if (repositoryId === repo.id) ports = lease;
+          }
         } catch (error) {
           throw new BlockedError(error instanceof Error ? error.message : String(error));
         }
-        this.attemptPorts.set(attempt.id, ports.ports);
+        this.attemptPorts.set(attempt.id, byRepo);
       }
       // Окружение попытки файлом (alpha.69, P6-11): имя проекта compose,
       // порты и шлюз — для lifecycle, gates и инструментов, которые читают
@@ -1702,8 +1720,11 @@ export class Runner {
         await mkdir(artifacts, { recursive: true });
         await writeFile(
           join(artifacts, ATTEMPT_ENV_FILE),
-          JSON.stringify(attemptVariables(attempt.id, ports?.ports ?? {}, repo.gateway), null, 2) +
-            '\n',
+          JSON.stringify(
+            attemptVariables(attempt.id, ports?.ports ?? {}, repo.gateway, repo.id),
+            null,
+            2,
+          ) + '\n',
         );
       }
       // Ресурсы поручения, gates его репозитория и выбранных проверок
@@ -2380,11 +2401,12 @@ export class Runner {
       this.selfChecks.delete(attempt.id);
       this.portWarnings.delete(attempt.id);
       this.attemptPorts.delete(attempt.id);
-      try {
-        ports?.release();
-      } catch {
-        /* аренда умершего процесса снимется при следующем выделении */
-      }
+      for (const lease of leases)
+        try {
+          lease.release();
+        } catch {
+          /* аренда умершего процесса снимется при следующем выделении */
+        }
       this.gateFeedback.delete(attempt.id);
       // Рабочие деревья попытки убираются; ветка попытки и объекты остаются —
       // по ним recovery и следующая попытка видят кандидата. Снимки

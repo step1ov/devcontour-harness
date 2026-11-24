@@ -111,7 +111,9 @@ const trustedBwrap = () => TRUSTED_BWRAP.find((p) => existsSync(p));
 
 export class WriteGuardUnavailable extends Error {}
 /** Проба механизма; тест подменяет её, чтобы проверить отказ среды. */
-export const writeGuardProbe = { support: (platform: NodeJS.Platform) => writeGuardSupport(platform) };
+export const writeGuardProbe = {
+  support: (platform: NodeJS.Platform) => writeGuardSupport(platform),
+};
 
 /** Механизм границы записи на этой машине, или почему его нет. */
 export function writeGuardSupport(

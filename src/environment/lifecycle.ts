@@ -600,6 +600,19 @@ async function phaseEnvironment<T>(
     devcontourEnv: Object.fromEntries(
       Object.entries(execution.env).filter(([key]) => key.startsWith('DEVCONTOUR_')),
     ),
+    // Переменные попытки облегчённого режима (alpha.69): имя проекта compose,
+    // порты, шлюз — очистка в новом процессе повторяет их точно.
+    ...((keys) =>
+      keys
+        ? {
+            attemptEnv: Object.fromEntries(
+              keys
+                .split(',')
+                .filter((k) => execution.env[k] !== undefined)
+                .map((k) => [k, execution.env[k]!]),
+            ),
+          }
+        : {})(execution.env.HARNESS_ATTEMPT_ENV_KEYS),
     cwd,
     lifecycle,
     policyDigest: digestOf(lifecycle),
@@ -742,6 +755,7 @@ export async function cleanupEnvironment(
     ownerPid?: number;
     runId?: string;
     devcontourEnv?: Record<string, string>;
+    attemptEnv?: Record<string, string>;
     trusted?: TrustedTree;
     containerEnv?: ContainerEnv;
     containerIdentity?: ContainerIdentityRecord;
@@ -787,6 +801,7 @@ export async function cleanupEnvironment(
     {
       ...receipt.devcontourEnv,
       ...(receipt.runId ? { DEVCONTOUR_RUN_ID: receipt.runId } : {}),
+      ...receipt.attemptEnv,
     },
     process.env,
     policy.toolchain,
