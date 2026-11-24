@@ -347,6 +347,11 @@ export async function doctor(
   const mode = policy ? modeReport(policy) : undefined;
   if (mode) {
     notes.unshift(mode.line);
+    // Облегчённый режим без границы записи — предупреждение, не заметка.
+    if (mode.mode === 'light' && !mode.writeGuard?.active)
+      warnings.push(
+        'LIGHT_NO_WRITE_BOUNDARY: облегчённый режим с isolation.mode: none или writeGuard.off — границы записи нет: исполнитель и gates пишут куда угодно',
+      );
     if (mode.writeGuard?.active && mode.writeGuard.reason) problems.push(mode.writeGuard.reason);
     if (
       mode.mode === 'strict' &&
@@ -666,11 +671,17 @@ export function modeReport(policy: ExecutionPolicy) {
   const byDefault = policy.harnessMode === undefined;
   const line =
     mode === 'light'
-      ? `режим: облегчённый${byDefault ? ' (по умолчанию)' : ''}; строгий — \`harnessMode: strict\` (решение владельца: чужой код или секреты production)`
+      ? `режим: облегчённый${byDefault ? ' (по умолчанию)' : ''}; строгий — \`harnessMode: strict\` (решение владельца: чужой код или секреты production). ` +
+        (writeGuardActive(policy)
+          ? 'Защита записи — от случайных ошибок, не граница безопасности; Docker и выбранные кеши её обходят'
+          : 'Границы записи нет (isolation.mode: none или writeGuard.off): исполнитель и gates пишут куда угодно')
       : 'режим: строгий (harnessMode: strict, заморожен — может быть убран после следующих пилотов); облегчённый — убрать поле harnessMode';
   const lineEn =
     mode === 'light'
-      ? `mode: light${byDefault ? ' (default)' : ''}; strict — \`harnessMode: strict\` (owner's decision: untrusted code or production secrets)`
+      ? `mode: light${byDefault ? ' (default)' : ''}; strict — \`harnessMode: strict\` (owner's decision: untrusted code or production secrets). ` +
+        (writeGuardActive(policy)
+          ? 'The write guard protects against accidents, it is not a security boundary; Docker and the chosen caches bypass it'
+          : 'There is no write boundary (isolation.mode: none or writeGuard.off): the writer and gates can write anywhere')
       : 'mode: strict (harnessMode: strict, frozen — may be removed after the next pilots); light — remove the harnessMode field';
   if (mode === 'strict') return { mode, default: byDefault, line, lineEn };
   const active = writeGuardActive(policy);

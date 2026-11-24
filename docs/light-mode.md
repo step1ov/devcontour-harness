@@ -51,27 +51,49 @@ strict`) для чужого кода или секретов production. Стр
 
 ## Граница записи
 
+**Защита записи — от случайных ошибок, не граница безопасности; Docker и
+выбранные кеши её обходят.** Процесс с доступом к сокету Docker может
+смонтировать любой каталог в контейнер и писать в него; кеш, открытый на
+запись, может подменить то, что потом исполнится. От злонамеренного кода
+защищает только строгий режим.
+
 Исполнитель (процесс CLI runtime и все его потомки) и каждая проверка
 (gate, генератор, установка зависимостей, проверки reviewer) пишут только
 в:
 
 - своё рабочее дерево попытки и свой временный каталог (`TMPDIR`);
-- кеши инструментов (`DEFAULT_WRITE_GUARD_CACHES`);
-- состояние своего CLI (только исполнитель: `~/.codex`, `~/.claude`,
-  `~/.claude.json`).
+- каталог своего вызова (исполнитель: файл ответа runtime и свой домашний
+  каталог CLI);
+- кеши инструментов (`DEFAULT_WRITE_GUARD_CACHES`).
 
-Кеши по умолчанию: `~/.npm`, `~/.pnpm-store`, `~/Library/pnpm`,
-`~/.local/share/pnpm`, `~/.yarn`, `~/.bun/install/cache`, `~/.cache`,
-`~/Library/Caches` (в том числе `ms-playwright`), `~/.docker/buildx`,
-`~/.maestro`, `~/Library/Developer/CoreSimulator`,
-`~/Library/Logs/CoreSimulator`, `~/Library/Developer/Xcode/DerivedData`,
-`~/.android`, `~/.gradle`, каталоги пользователя macOS
-`$DARWIN_USER_CACHE_DIR` и `$DARWIN_USER_TEMP_DIR` (Chrome создаёт во
-временном каталоге пользователя сокет профиля). Значит, общий временный
-каталог пользователя macOS (системный `$TMPDIR`) открыт на запись — это
-принятая цена облегчённого режима; убрать его — `writeGuard.replace` без
-`$DARWIN_USER_TEMP_DIR` (тогда системный Chrome не стартует, Playwright —
-стартует).
+**Настройки CLI пользователя закрыты.** Каждый вызов исполнителя получает
+свой каталог настроек (`CODEX_HOME`, `CLAUDE_CONFIG_DIR`) с копией только
+входа: у codex — `auth.json`, у claude — `.credentials.json`, если вход
+хранится файлом. Обратно ничего не копируется; `~/.codex`, `~/.claude` и
+`~/.claude.json` (настройки, хуки, MCP, общие с ведущим, reviewer и
+владельцем) исполнителю на запись не открыты. Вход claude по подписке на
+macOS хранится в Keychain и в свой каталог не переносится: выполните
+`claude setup-token` и передайте `CLAUDE_CODE_OAUTH_TOKEN` исполнителю
+(`environment.inherit`), или задайте `ANTHROPIC_API_KEY`; без этого отказ
+runtime называет, что сделать.
+
+Кеши по умолчанию — только каталоги кешей, без исполняемых каталогов (npx,
+corepack, глобальные пакеты, дистрибутивы gradle-wrapper): кеш npm
+(`~/.npm/_cacache`, журналы `~/.npm/_logs`), хранилища pnpm
+(`~/.pnpm-store`, `~/Library/pnpm/store`, `~/.local/share/pnpm/store`) и
+его кеши, кеши yarn и bun, браузеры Playwright (`~/Library/Caches/ms-playwright`,
+`~/.cache/ms-playwright`), кеши turbo, node-gyp и Prisma,
+`~/.docker/buildx`, симулятор iOS (`~/Library/Developer/CoreSimulator`,
+`~/Library/Logs/CoreSimulator`, `~/Library/Developer/Xcode/DerivedData`),
+`~/.android/avd`, `~/.android/cache`, `~/.gradle/caches`, каталоги
+пользователя macOS `$DARWIN_USER_CACHE_DIR` и `$DARWIN_USER_TEMP_DIR`
+(Chrome создаёт во временном каталоге пользователя сокет профиля). Значит,
+общий временный каталог пользователя macOS (системный `$TMPDIR`) открыт на
+запись — это принятая цена облегчённого режима; убрать его —
+`writeGuard.replace` без `$DARWIN_USER_TEMP_DIR` (тогда системный Chrome не
+стартует, Playwright — стартует). Временные файлы самого harness (каталоги
+проверок, метки старта, отчёты проб) поэтому лежат под каталогом состояния
+(`<state>/tmp`), а не в системном временном каталоге.
 
 ```json
 "writeGuard": { "add": ["~/.cache/my-tool"] }
@@ -81,14 +103,23 @@ strict`) для чужого кода или секретов production. Стр
 
 `add` дополняет умолчания, `replace` заменяет их целиком, `off: true`
 снимает границу (решение владельца; `isolation.mode: none` тоже снимает
-её). `doctor` печатает механизм и действующий список (`mode.writeGuard`).
+её — **облегчённый режим с `isolation.mode: none` — без границы записи**,
+`doctor` предупреждает `LIGHT_NO_WRITE_BOUNDARY`). `doctor` печатает
+механизм и действующий список (`mode.writeGuard`).
 
-Механизм: на macOS — Seatbelt (`sandbox-exec`) с профилем «разрешено всё,
-кроме записи вне путей»; `ps` (setuid) исполняется без песочницы — он
-ничего не пишет. На Linux — bubblewrap: корень только на чтение,
-разрешённые пути на запись, `/dev`, `/proc`, сеть, PID и IPC общие с
-хостом. Нет механизма — отказ среды до запуска (`doctor` называет его
-проблемой).
+Сеть профилей инструментов исполнителя (`toolProfiles.<id>.network`) в
+облегчённом режиме не ограничивается: исполнитель работает на хосте, его
+CLI ходит к модели. Явное `network: none` или `loopback` у профиля
+исполнителя — отказ политики с советом (убрать поле или выбрать строгий
+режим), а не молчаливое игнорирование.
+
+Механизм: на macOS — Seatbelt (`/usr/bin/sandbox-exec`) с профилем
+«разрешено всё, кроме записи вне путей»; `ps` (setuid) исполняется без
+песочницы — он ничего не пишет. На Linux — bubblewrap (`/usr/bin/bwrap`
+или `/bin/bwrap`; из PATH механизм не берётся): корень только на чтение,
+разрешённые пути на запись, `/dev`, `/proc` хоста, сеть, PID и IPC общие с
+хостом. Нет механизма — отказ среды до запуска, попытка не засчитывается
+(`doctor` называет его проблемой).
 
 Браузер под границей: Chromium Playwright запускает свою песочницу только
 по флагу (`chromiumSandbox: false` по умолчанию); Chrome запускайте с

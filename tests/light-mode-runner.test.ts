@@ -242,6 +242,30 @@ test('doctor: зеркало шлюза при объявленной топол
   );
   assert.ok(report.warnings?.some((w) => w.startsWith('GATEWAY_MIRROR_MISSING')));
   assert.match(report.notes?.[0] ?? '', /^режим: облегчённый \(по умолчанию\)/);
+  assert.match(
+    report.notes?.[0] ?? '',
+    /не граница безопасности; Docker и выбранные кеши её обходят/,
+  );
+  // Облегчённый режим без границы записи — предупреждение.
+  const none = await doctor(
+    executionPolicySchema.parse({ ...raw, isolation: { mode: 'none', domains: [] } }),
+    {},
+    undefined,
+    undefined,
+    undefined,
+    { resourceDatabase: false },
+  );
+  assert.ok(none.warnings?.some((w) => w.startsWith('LIGHT_NO_WRITE_BOUNDARY')));
+  // Явная сеть профиля исполнителя в облегчённом режиме — отказ политики.
+  const { policyIssues } = await import('../src/contracts/policy.ts');
+  const net = structuredClone(raw);
+  net.toolProfiles = { offline: { runtime: 'claude', network: 'none' } };
+  net.roles.developer.writer.toolProfile = 'offline';
+  assert.ok(
+    policyIssues(executionPolicySchema.parse(net)).some((i) =>
+      /network: none профиля исполнителя в облегчённом режиме не выполняется/.test(i.message),
+    ),
+  );
   const dir = realpathSync(mkdtempSync(join(tmpdir(), 'compose-')));
   writeFileSync(
     join(dir, 'compose.yml'),

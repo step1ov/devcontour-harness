@@ -212,7 +212,8 @@ outline with a reason when the plan grows.
 `harnessMode` is light (`<pkg>/docs/light-mode.md`): writers and gates run
 on the host with Docker, browsers, network and their own ports and compose
 project (`attemptEnv`, `COMPOSE_PROJECT_NAME`); the only guard is writes
-outside the attempt worktree, its temp dir and tool caches. Acceptance tests,
+outside the attempt worktree, its temp dir and tool caches (against
+accidents, not a security boundary: Docker and caches bypass it). Acceptance tests,
 fixtures and compose test services live with the product code inside
 product works and are reviewed as code; infra works, a separate infra phase
 and `gateChanges` below are not required. Don't split test infrastructure

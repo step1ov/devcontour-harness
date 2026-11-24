@@ -1118,6 +1118,26 @@ export function policyIssues(policy: ExecutionPolicy): Issue[] {
       ['gateTimeoutFloorMs'],
       `gateTimeoutFloorMs (${policy.gateTimeoutFloorMs} мс) больше runTimeoutMs (${policy.runTimeoutMs} мс)`,
     );
+  // Облегчённый режим (alpha.69, ревью): сеть исполнителя не ограничивается
+  // (сам CLI ходит к модели), поэтому явное `network: none|loopback` профиля
+  // исполнителя не выполняется — отказ, а не молчаливое игнорирование.
+  if (harnessModeOf(policy) === 'light') {
+    const writerProfiles = new Set(
+      [
+        ...Object.values(policy.roles),
+        ...policy.repositories.flatMap((r) => Object.values(r.roles ?? {})),
+      ].flatMap((b) => (b.writer.toolProfile ? [b.writer.toolProfile] : [])),
+    );
+    for (const id of writerProfiles) {
+      const net = policy.toolProfiles[id]?.network;
+      if (net === 'none' || net === 'loopback')
+        add(
+          'INVALID_INPUT',
+          ['toolProfiles', id, 'network'],
+          `network: ${net} профиля исполнителя в облегчённом режиме не выполняется (исполнитель работает на хосте с сетью): уберите поле или выберите harnessMode: strict (решение владельца)`,
+        );
+    }
+  }
   // Сеть профиля однозначна: `network` не спорит с `codexNetwork`, а вся сеть
   // claude задаётся доменами `isolation.domains`, не профилем.
   for (const [id, profile] of Object.entries(policy.toolProfiles)) {

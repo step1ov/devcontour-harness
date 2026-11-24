@@ -35,6 +35,15 @@ one guard: writes only into the attempt worktree, its temp dir and tool
 caches (`writeGuard`). Attempts are separated by their worktree, their
 `COMPOSE_PROJECT_NAME` and their own ports (`attemptEnv.ports`).
 
+The write guard protects against accidents; it is not a security boundary:
+Docker and the chosen caches bypass it, and reads and network are open. Each
+writer call gets its own CLI config dir with a copy of the login only; a
+`claude` writer on macOS with a subscription login needs
+`CLAUDE_CODE_OAUTH_TOKEN` (`claude setup-token`) in `environment.inherit`.
+Light mode with `isolation.mode: none` has no write boundary at all (doctor
+`LIGHT_NO_WRITE_BOUNDARY`); a writer tool profile with `network: none` or
+`loopback` is refused in light mode.
+
 **Strict mode** (`harness init --harness-mode strict`, `"harnessMode":
 "strict"`) is the old OS sandbox. It is frozen and may be removed after the
 next pilots. Choosing it is the **owner's** decision: ask only when the
