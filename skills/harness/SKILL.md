@@ -208,7 +208,21 @@ outline with a reason when the plan grows.
    validate, review and run it (steps 5–7). The review record of the plan
    carries the same digest as `data.graphDigest`.
 
-**Infra works.** Harness-owned infrastructure code — environment bridges,
+**Light mode (the default since 0.1.0-alpha.69).** A policy without
+`harnessMode` is light (`<pkg>/docs/light-mode.md`): writers and gates run
+on the host with Docker, browsers, network and their own ports and compose
+project (`attemptEnv`, `COMPOSE_PROJECT_NAME`); the only guard is writes
+outside the attempt worktree, its temp dir and tool caches. Acceptance tests
+live with the code as ordinary product tasks and are reviewed like code;
+infra works and `gateChanges` below are not required (still available).
+Strict mode (`harnessMode: strict`) is frozen; switching modes is the
+owner's decision — never change it yourself. When the product is served
+through a gateway in production, gates should go through the project's
+gateway (`repositories[].gateway`) and the routing files belong in
+`release.topology`.
+
+**Infra works (strict mode, or when the owner wants that boundary).**
+Harness-owned infrastructure code — environment bridges,
 gate wrappers, validators, acceptance tests under `.harness/` — is planned
 as tasks with `"kind": "infra"`, not written by you during setup or between
 runs (`<pkg>/docs/infra-works.md`). The setup report lists such code and the
@@ -278,6 +292,15 @@ needs a fresh `review-plan` — `reapprove` and `approve` refuse it
 (`APPROVAL_REQUIRED`). In operator mode `approve` of an already approved graph
 after a policy edit also points to `reapprove`.
 Never call library internals (`Engine.approve`, store writes) to approve.
+
+**Which rounds count.** Only a real plan change spends a round: an order
+added, removed, or changed in text, criteria, dependencies, write scope,
+kind, repository or required context. Reworks of accepted works, your
+diagnoses and addenda, owner answers and other context, source revisions,
+policy and reviewer changes are free. In light mode there is no round limit
+at all — the budget is release time and cost (`budgets.group` /
+`budgets.total`; `doctor` warns `light-no-budget` without one), and raising
+it stays the owner's decision.
 
 **Review rounds that go in circles.** Each plan or contract review round is a
 paid call; `status` / `explain` `data.reviews[].line` shows the verdict, rounds
@@ -806,6 +829,15 @@ connector — is invisible unless you say it:
 - At each step outside harness, one short line in plain words, the way you
   would tell a non-developer: `$H lead note "Обновляю документ DOC-2 в источнике задач"
 --state <state>` (up to 200 characters; no secrets, no paths, no logs).
+- When all code is accepted, run the **release acceptance review**
+  (`<pkg>/docs/release-review.md`):
+  `$H review-release --state <state> [--base <release base>]`. An independent
+  reviewer checks the accepted target against the brief, acceptance criteria,
+  owner answers and the deploy topology (`release.topology`: gateway/proxy
+  configs, production env files). Blocking findings are fixed by works (plan
+  them like any task), then run `review-release` again on the new target. In
+  light mode (or with `release.review: required`) `release done` refuses
+  until the latest round on the current target is approved.
 - When all code is accepted, delivered and checked, write the final report:
   `$H release done --state <state> --summary "<what was done, what is left>"`.
   Until then the view says «код принят, ведущий ещё работает: <your last

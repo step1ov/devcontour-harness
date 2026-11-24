@@ -151,6 +151,18 @@ lead outline`): незарегистрированные этапы и комп�
   отклонено (3 находки), попытка 2 — одобрено» по независимому ревью
   кандидата и интеграции; ревью кода ведущего (`reviews[kind=code]`) —
   отдельно.
+- **Режим harness** (`settings.harnessMode`, ревизия 9, harness
+  0.1.0-alpha.69): `light` (по умолчанию, `default: true` — поля в политике
+  нет) или `strict`; `writeGuard` — действует ли граница записи.
+  `settings.thresholds.reviewRoundsUnlimited` — в облегчённом режиме раунды
+  ревью плана без предела ([light-mode.md](light-mode.md)).
+- **Приёмка выпуска** (`forecast.progress.release.review`, ревизия 9):
+  обязательна ли, состояние (`not-run`, `stale`, `findings`, `approved`),
+  раунд, открытые и блокирующие находки, строка; раунды — `reviews[]` с
+  `kind: release` ([release-review.md](release-review.md)).
+- **Удержание gate без причины** (`resources.gates.held[].cause`, ревизия
+  9): `gate-definition` — gate упал, не назвав причины; ход ведущего —
+  поменять команду gate или повторить работу (`retry --by lead`).
 
 ## Гарантии
 
