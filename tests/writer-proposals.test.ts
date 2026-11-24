@@ -249,3 +249,51 @@ test('ревью 1: разделение после отклонённого —
   );
   h.close();
 });
+
+test('ревью 2: после правки работы ведущим новое разделение — снова предложение, а не засчитанный повтор', async () => {
+  const split = {
+    result: {
+      completed: false,
+      summary: 'Предлагаю разделить',
+      discoveries: [],
+      triage: {
+        decision: 'split',
+        reason: 'Две части',
+        parts: [
+          { title: 'API', goal: 'Функция greet', acceptance: ['greet'] },
+          { title: 'Экран', goal: 'Экран greet', acceptance: ['экран'] },
+        ],
+      },
+    },
+  };
+  const ctx = hsetup({
+    scenario: { writer: [split, split], reviewer: approve() },
+    policy: (p: any) => (p.maxAttempts = 3),
+  });
+  const h = ctx.open();
+  await h.run({ graph: ctx.graph, author: 'claude' });
+  const first = h.engine.read((v) => v.attempts(WORK)[0]!);
+  h.engine.decideProposal(WORK, first.writerSplit!, {
+    decision: 'reject',
+    by: 'lead',
+    reason: 'Делать целиком',
+  });
+  // Ведущий правит постановку: новая редакция графа с другой целью.
+  const revised = structuredClone(ctx.graph);
+  revised.source = { ...revised.source, revision: '2' };
+  revised.orders[0] = {
+    ...revised.orders[0]!,
+    source: { ...revised.orders[0]!.source, revision: '2' },
+    goal: 'Добавить greet(name) и экран приветствия, по частям.',
+  };
+  h.engine.retry(WORK, undefined, 'lead');
+  await h.run({ graph: revised, author: 'claude' }).catch(() => undefined);
+  const second = h.engine.read((v) => v.attempts(WORK).at(-1)!);
+  assert.equal(second.failureKind, 'needs-lead', second.error);
+  assert.match(second.writerSplit ?? '', /^P-/);
+  assert.equal(
+    h.engine.read((v) => v.work(WORK)!.proposals?.filter((p) => p.kind === 'split').length),
+    2,
+  );
+  h.close();
+});

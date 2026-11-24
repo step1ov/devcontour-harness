@@ -81,6 +81,15 @@ export const workProposalSchema = z.strictObject({
     .max(PROPOSAL_LIMITS.parts)
     .optional(),
   status: z.enum(proposalStatuses),
+  /**
+   * Содержание поручения, к которому относится предложение (digest без
+   * ревизии источника, ревью 2): отклонённое разделение держит только ту же
+   * постановку — после правки ведущим новое разделение снова предложение.
+   */
+  orderDigest: z
+    .string()
+    .regex(/^[0-9a-f]{64}$/)
+    .optional(),
   decision: z
     .strictObject({
       by: z.enum(['lead', 'operator']),

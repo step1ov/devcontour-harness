@@ -211,7 +211,13 @@ import {
   withSuffix,
 } from './classify.ts';
 import { TaskFailure, type FailureKind } from './failure.ts';
-import { activeOf, crashedRecheck, namesFailingCases, type Engine } from './engine.ts';
+import {
+  activeOf,
+  contentDigest,
+  crashedRecheck,
+  namesFailingCases,
+  type Engine,
+} from './engine.ts';
 import { environmentBlockOf, writerScratch } from './writer-block.ts';
 import { prompt } from './prompt.ts';
 import {
@@ -2227,7 +2233,11 @@ export class Runner {
                       !result.data.completed &&
                       triage?.decision === 'split' &&
                       (work.proposals ?? []).some(
-                        (p) => p.kind === 'split' && p.status === 'rejected',
+                        (p) =>
+                          p.kind === 'split' &&
+                          p.status === 'rejected' &&
+                          // Только отклонённое для этой же постановки (ревью 2).
+                          (!p.orderDigest || p.orderDigest === contentDigest(work.order)),
                       )
                     )
                       throw new TaskFailure(
@@ -4990,7 +5000,12 @@ async function receipts(dir: string): Promise<string[]> {
  */
 function proposalNotes(work: WorkState): string[] {
   return (work.proposals ?? [])
-    .filter((p) => p.kind === 'split' && p.status === 'rejected')
+    .filter(
+      (p) =>
+        p.kind === 'split' &&
+        p.status === 'rejected' &&
+        (!p.orderDigest || p.orderDigest === contentDigest(work.order)),
+    )
     .slice(-1)
     .map(
       (p) =>

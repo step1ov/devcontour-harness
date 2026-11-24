@@ -242,7 +242,7 @@ const openRework = (w: WorkState) =>
   !!w.rework && !w.rework.abandoned && w.status !== 'done' && w.status !== 'cancelled';
 
 /** Содержание поручения без номера редакции источника: одинаковое содержание — та же работа. */
-const contentDigest = (order: WorkState['order']) =>
+export const contentDigest = (order: WorkState['order']) =>
   digestOf({ ...order, source: { connector: order.source.connector, ref: order.source.ref } });
 
 /**
@@ -2528,6 +2528,7 @@ export class Engine {
           ...(p.evidence ? { evidence: p.evidence.slice(0, 4000) } : {}),
           ...(p.parts?.length ? { parts: p.parts.slice(0, PROPOSAL_LIMITS.parts) } : {}),
           status: 'proposed',
+          orderDigest: contentDigest(w.order),
         }),
       );
       const fresh = added.filter((p) => !existing.some((e) => e.id === p.id));
