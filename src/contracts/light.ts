@@ -224,6 +224,14 @@ export type GatewayPolicy = z.infer<typeof gatewaySchema>;
 export const releasePolicySchema = z.strictObject({
   review: z.enum(['required', 'advisory']).optional(),
   topology: z.array(relativePathSchema).max(50).optional(),
+  /**
+   * Шаг документации выпуска (0.1.0-alpha.70, docs/release-review.md):
+   * работа с меткой `docs`, зависящая от всех корневых работ выпуска,
+   * принята до приёмки выпуска. `required` — `review-release` отказывает
+   * без неё; `advisory` (нет поля) — `status`, представление и
+   * `review-release` называют, чего не хватает; `off` — шага нет.
+   */
+  docs: z.enum(['required', 'advisory', 'off']).optional(),
 });
 export type ReleasePolicy = z.infer<typeof releasePolicySchema>;
 

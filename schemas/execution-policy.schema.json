@@ -3006,6 +3006,14 @@
             "maxLength": 500,
             "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
           }
+        },
+        "docs": {
+          "type": "string",
+          "enum": [
+            "required",
+            "advisory",
+            "off"
+          ]
         }
       },
       "additionalProperties": false

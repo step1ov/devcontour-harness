@@ -26,6 +26,7 @@ import {
   digestOf,
   leadDataSchema,
   type InputQuestion,
+  type WorkState,
 } from '../src/contracts/index.ts';
 import type { Engine } from '../src/engine/engine.ts';
 import { cliAdapter } from '../src/agents/cli-adapter.ts';
@@ -38,6 +39,7 @@ import {
   type ReleaseReviewInput,
 } from '../src/control/review-release.ts';
 import { releaseReviewRequired, releaseReviewState } from '../src/control/release-review-state.ts';
+import { releaseDocsLine, releaseDocsState } from '../src/control/release-docs.ts';
 import { engineOf, graphOf, policyOf, ready } from './engine-fixture.ts';
 import { bin } from './runner-fixture.ts';
 import { finding, recordedPrompt, verdict } from './review-fixture.ts';
@@ -568,4 +570,38 @@ test('alpha.70: приёмка выпуска — второй проход по
   const r3 = await h.review();
   assert.equal(r3.approved, false);
   assert.equal(r3.passes, undefined);
+});
+
+test('alpha.70: шаг документации выпуска — корни, работа docs после них; required — review-release без неё отказывает', async () => {
+  const states = (graph: ReturnType<typeof graphOf>, docs?: 'required' | 'advisory' | 'off') =>
+    releaseDocsState(
+      {
+        works: () =>
+          graph.orders.map((order) => ({ id: order.id, status: 'ready', order }) as WorkState),
+      },
+      { release: docs ? { docs } : {} },
+    );
+  const g = graphOf({ api: [], ui: ['api'], cli: [] });
+  assert.deepEqual(states(g).roots, ['cli', 'ui']);
+  assert.equal(states(g).status, 'missing');
+  assert.equal(states(g).mode, 'advisory');
+  assert.equal(states(g, 'off').status, 'off');
+  const withDocs = graphOf({ api: [], ui: ['api'], cli: [], docs: ['ui'] });
+  withDocs.orders[3]!.labels = ['docs'];
+  assert.equal(states(withDocs).status, 'not-after-roots');
+  assert.deepEqual(states(withDocs).missingRoots, ['cli']);
+  withDocs.orders[3]!.dependsOn = ['ui', 'cli'];
+  assert.equal(states(withDocs).status, 'pending');
+  assert.match(releaseDocsLine(states(withDocs)) ?? '', /docs ещё не принята/);
+
+  const f = fixture((p) => (p.release.docs = 'required'));
+  ready(f.engine, graphOf({ w: [] }));
+  accept(f.engine, f.base, f.head);
+  f.scenario({ reviewer: verdict(true) });
+  await assert.rejects(f.review(), (e: unknown) => {
+    assert.ok(e instanceof HarnessError);
+    assert.equal(e.code, 'NOT_READY');
+    assert.match(e.message, /нет работы с меткой docs после корневых работ \(w\)/);
+    return true;
+  });
 });

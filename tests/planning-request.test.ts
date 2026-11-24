@@ -420,6 +420,7 @@ test('H2-01: standaloneInstructions — T1–T5, T6 только с требов
     'Ask the user a short question for every real ambiguity of the goal instead of guessing; the answer goes into the brief, and a changed brief makes this draft stale.',
     // alpha.70: ведущий не добавляет требований без источника.
     'Add no requirement without a source. For every acceptance criterion you write, cite where it comes from in criteriaSources: { "criterion": <index in acceptance>, "kind": "brief" | "owner-answer" | "review-finding" | "context", "ref": <brief section, question id, finding id or document> }. A criterion you cannot trace to the brief, an owner answer, a review finding or pinned context is a new requirement: ask the user instead of adding it. Plan review flags unsourced criteria.',
+    'Documentation step: when the plan finishes a release, add one task labelled "docs" (labels: ["docs"]) that depends on every root task (the tasks nothing else depends on) and updates the user and operator documentation for what the release changed; it runs after them and before the release review.',
   ]);
   const requirements = [
     {
@@ -429,13 +430,13 @@ test('H2-01: standaloneInstructions — T1–T5, T6 только с требов
     },
   ];
   const withReq = standaloneInstructions({ requirements });
-  assert.deepEqual(withReq.slice(0, 6), plain);
+  assert.deepEqual(withReq.slice(0, 7), plain);
   assert.equal(
-    withReq[6],
+    withReq[7],
     'Requirement snapshots at HEAD (copy id, source, text and digest exactly; no other requirements exist): ' +
       JSON.stringify(requirements),
   );
-  assert.equal(withReq.length, 7);
+  assert.equal(withReq.length, 8);
   const { prompt } = planningRequest({ brief: 'Greet', facts: facts(), hostInstructions: withReq });
   assert.ok(
     prompt.endsWith('Host instructions:\n' + withReq.join('\n\n') + '\n\nUser brief:\nGreet'),
