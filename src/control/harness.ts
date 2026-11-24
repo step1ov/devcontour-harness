@@ -17,6 +17,7 @@ import {
   workGraphDigest,
   planContentDigest,
   planOrderDigests,
+  planStatementDigests,
   type Author,
   type ContextSnapshot,
   type ContractDocument,
@@ -412,6 +413,7 @@ export class Harness {
         ? ((since) => ({
             planDigest: planContentDigest(input.graph),
             planOrders: planOrderDigests(input.graph),
+            planStatements: planStatementDigests(input.graph),
             ...(since ? { roundEpoch: since } : {}),
           }))(this.engine.read((v) => planRoundEpoch(v, subject)))
         : {}),

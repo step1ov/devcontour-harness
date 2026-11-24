@@ -12,6 +12,9 @@ import {
   contextDigestMatches,
   roundBudget,
   freeRoundsSinceApproved,
+  planStatementDigest,
+  LIGHT_REVIEW_LOOP_ROUNDS,
+  unapprovedSinceApproved,
   harnessModeOf,
   planOrderChanges,
   digestOf,
@@ -115,6 +118,8 @@ export interface TechnicalReviewInput {
    * поля — сравнение по `planDigest` (или digest предмета), как в alpha.68.
    */
   planOrders?: Record<string, string>;
+  /** Цель и критерии каждого поручения (`planStatementDigests`, alpha.69). */
+  planStatements?: Record<string, string>;
   /**
    * Начало эпохи раундов: последняя доработка принятой работы графа со своим
    * пределом попыток. Раунды до неё предел не тратят (0.1.0-alpha.68).
@@ -261,6 +266,23 @@ export async function technicalReview(
     !!last &&
     !plan.real &&
     (maxRounds === undefined || freeRoundsSinceApproved(rounds) < maxRounds);
+  if (harnessModeOf(policy) === 'light' && last) {
+    const unapproved = unapprovedSinceApproved(rounds);
+    if (unapproved >= 2 * LIGHT_REVIEW_LOOP_ROUNDS)
+      throw new HarnessError(
+        'ATTEMPTS_EXHAUSTED',
+        `Круг ревью ${kind} ${subject}: ${unapproved} неодобренных раундов подряд — решение владельца: одобрить ${kind === 'plan' ? 'план' : 'контракт'} самому (approvalMode operator, harness approve) или остановить работу`,
+      );
+    if (
+      !plan.real &&
+      !input.dispositions?.length &&
+      freeRoundsSinceApproved(rounds) >= LIGHT_REVIEW_LOOP_ROUNDS
+    )
+      throw new HarnessError(
+        'NOT_READY',
+        `Круг ревью ${kind} ${subject}: ${LIGHT_REVIEW_LOOP_ROUNDS} неодобренных раундов подряд без изменения ${kind === 'plan' ? 'плана' : 'контракта'} — ход ведущего: изменить постановку по находкам или принять ограничение (--accept-limitation <id> --reason …); новый раунд того же — не идёт`,
+      );
+  }
   if (maxRounds !== undefined && !free && budget.used >= maxRounds)
     throw new HarnessError(
       'ATTEMPTS_EXHAUSTED',
@@ -780,7 +802,10 @@ export function mergeTechnicalRound(
  */
 export function planChangeOf(
   engine: Pick<Engine, 'read'>,
-  input: Pick<TechnicalReviewInput, 'kind' | 'subject' | 'digest' | 'planDigest' | 'planOrders'>,
+  input: Pick<
+    TechnicalReviewInput,
+    'kind' | 'subject' | 'digest' | 'planDigest' | 'planOrders' | 'planStatements'
+  >,
   rounds: readonly ReviewRecord[],
 ): { real: boolean; changed: string[]; rework: string[] } {
   const last = rounds.at(-1);
@@ -788,10 +813,20 @@ export function planChangeOf(
   const approved = rounds.findLast((r) => r.approved) ?? last;
   const bases = approved === last ? [last] : [approved, last];
   if (input.kind === 'plan' && input.planOrders && bases.every((b) => b.planOrders)) {
+    // Доработка принятой работы бесплатна, пока её цель и критерии те же,
+    // что у принятой постановки (ревью alpha.69): новые цель или критерии —
+    // настоящее изменение плана.
     const accepted = new Set(
       engine
         .read((v) => v.works(input.subject))
         .filter((w) => w.status === 'done' || (!!w.rework && w.status !== 'cancelled'))
+        .filter((w) => {
+          const statement = input.planStatements?.[w.id];
+          return (
+            statement === undefined ||
+            statement === planStatementDigest(w.rework?.acceptedOrder ?? w.order)
+          );
+        })
         .map((w) => w.id),
     );
     const real = bases.map((b) =>

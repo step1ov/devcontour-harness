@@ -367,6 +367,22 @@ export type RoundBudget = ReturnType<typeof roundBudget>;
  * одобренного плана после доработки, ответа или документа — работа, а не
  * круг. Засчитанные раунды в этот счёт не входят.
  */
+/**
+ * Защита от круга в облегчённом режиме (alpha.69, ревью): предела раундов
+ * нет, но `LIGHT_REVIEW_LOOP_ROUNDS` неодобренных раундов подряд при
+ * неизменённом плане останавливают ревью до хода ведущего (изменить план или
+ * принять ограничение), а вдвое больше неодобренных раундов подряд — решение
+ * владельца. Действует и для ревью контракта; без бюджетов тоже.
+ */
+export const LIGHT_REVIEW_LOOP_ROUNDS = 6;
+/** Неодобренных раундов подряд после последнего одобренного. */
+export function unapprovedSinceApproved(
+  records: readonly Pick<ReviewRecord, 'round' | 'approved'>[],
+) {
+  const sorted = [...records].sort((a, b) => a.round - b.round);
+  return sorted.length - (sorted.findLastIndex((r) => r.approved) + 1);
+}
+
 export function freeRoundsSinceApproved(
   records: readonly Pick<ReviewRecord, 'round' | 'approved' | 'counted'>[],
 ) {

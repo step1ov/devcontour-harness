@@ -23,6 +23,7 @@ import {
   planContentDigest,
   planOrderDigest,
   planOrderDigests,
+  planStatementDigests,
   sha256,
   sourceDigest,
   workGraphDigest,
@@ -32,6 +33,7 @@ import {
   type RuntimeAdapter,
   type RuntimeName,
   type WorkGraph,
+  LIGHT_REVIEW_LOOP_ROUNDS,
 } from '../src/contracts/index.ts';
 import type { Engine } from '../src/engine/engine.ts';
 import { Harness } from '../src/control/harness.ts';
@@ -136,6 +138,7 @@ function roundOf(
     ...(cap === null ? {} : { maxRounds: cap }),
     planDigest: planContentDigest(graph),
     planOrders: planOrderDigests(graph),
+    planStatements: planStatementDigests(graph),
     ...(since ? { roundEpoch: since } : {}),
   });
 }
@@ -196,9 +199,9 @@ async function acceptedGraph() {
 
 test('A69-1a: доработка принятой работы не тратит раунд и не тратит эпоху графа', async () => {
   const { engine, clock, dir, adapters, graph } = await acceptedGraph();
-  // Доработка: изменённая постановка принятой `w`.
+  // Доработка с той же постановкой (цель и критерии прежние) — бесплатна.
   const rework = revision(graph, '2', (g) => {
-    g.orders[0]!.goal = 'Исправить ошибку, найденную после приёмки работы w.';
+    g.orders[0]!.writeScope = ['src', 'lib'];
   });
   const r2 = await roundOf(engine, adapters, dir, rework);
   assert.equal(r2.counted, false, 'доработка принятой работы — без траты предела');
@@ -212,7 +215,7 @@ test('A69-1a: доработка принятой работы не тратит
     true,
   );
   const again = revision(rework, '3', (g) => {
-    g.orders[0]!.acceptance = [...g.orders[0]!.acceptance, 'Ошибка воспроизведена тестом'];
+    g.orders[0]!.title = 'Доработка w: уточнённое название';
   });
   const r3 = await roundOf(engine, adapters, dir, again);
   assert.equal(r3.counted, false, 'правка открытой доработки — тоже доработка');
@@ -467,4 +470,67 @@ test('A69-2: строгий режим без бюджета — строки do
   assert.equal(lightBudgetWarning(strict), undefined);
   assert.equal(reviewRoundCap(strict), strict.maxAttempts * 2);
   assert.equal(budgetLimitsOf(strict).reviewRounds, strict.maxAttempts * 2);
+});
+
+test('A69-2: облегчённый режим — круг без одобрения: 6 раундов неизменённого плана — ход ведущего, 12 неодобренных — владелец', async () => {
+  const env = engineOf(policyOf((p: any) => (p.harnessMode = 'light')));
+  const { engine, dir } = env;
+  const adapter = (runtime: RuntimeName): RuntimeAdapter => ({
+    runtime,
+    capabilities: () => Promise.resolve({ runtime, available: true } as any),
+    invoke: () =>
+      Promise.resolve({
+        status: 'ok',
+        text: '',
+        model: null,
+        runtimeVersion: 'controlled',
+        output: { approved: false, summary: 'x', findings: [], previous: [] },
+        usage: {
+          inputTokens: 0,
+          outputTokens: 0,
+          cacheReadTokens: 0,
+          cacheWriteTokens: 0,
+          reportedUsd: 0,
+          complete: true,
+          source: 'claude-result',
+        },
+        diagnostics: { exitCode: 0 },
+      }),
+  });
+  const adapters = { codex: adapter('codex'), claude: adapter('claude') };
+  let graph = graphOf({ a: [] });
+  await roundOf(engine, adapters, dir, graph);
+  // Тот же план — бесплатные раунды до LIGHT_REVIEW_LOOP_ROUNDS, потом ход ведущего.
+  for (let i = 1; i <= LIGHT_REVIEW_LOOP_ROUNDS; i++)
+    await roundOf(engine, adapters, dir, graph, snap(source('doc', 'v' + i)));
+  await assert.rejects(
+    roundOf(engine, adapters, dir, graph, snap(source('doc', 'again'))),
+    refused('NOT_READY', /Круг ревью.*ход ведущего/),
+  );
+  // Ход ведущего — изменить план: раунды идут, пока неодобренных не вдвое больше.
+  let n = 0;
+  for (;;) {
+    graph = revision(graph, String(++n), (g) => (g.orders[0]!.title = `План ${n}`));
+    try {
+      await roundOf(engine, adapters, dir, graph);
+    } catch (e) {
+      refused('ATTEMPTS_EXHAUSTED', /решение владельца/)(e);
+      break;
+    }
+    assert.ok(n < 20, 'круг ограничен');
+  }
+});
+
+test('A69-1a: новые цель или критерии принятой работы — настоящее изменение плана', async () => {
+  const { engine, dir, adapters, graph } = await acceptedGraph();
+  const goal = await roundOf(
+    engine,
+    adapters,
+    dir,
+    revision(graph, '2', (g) => {
+      g.orders[0]!.goal = 'Исправить ошибку, найденную после приёмки работы w.';
+    }),
+  );
+  assert.equal(goal.counted, true, 'новая цель принятой работы — раунд засчитан');
+  assert.deepEqual(goal.changes?.orders?.changed, ['w']);
 });
