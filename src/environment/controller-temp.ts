@@ -39,7 +39,9 @@ export const controllerTemp = {
     const st = lstatSync(dir);
     // Чужой или подменённый каталог (ссылка, другой владелец, открытые права) не берётся.
     if (!st.isDirectory() || st.uid !== userInfo().uid || (st.mode & 0o077) !== 0)
-      throw new Error(`Каталог временных файлов controller ${dir} небезопасен (владелец или права)`);
+      throw new Error(
+        `Каталог временных файлов controller ${dir} небезопасен (владелец или права)`,
+      );
     root = dir;
   },
   dir(): string {

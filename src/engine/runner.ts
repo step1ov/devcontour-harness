@@ -176,7 +176,7 @@ import { CleanupFailure, cleanupEnvironment } from '../environment/lifecycle.ts'
 import { defaultResourceDatabase, withResources } from '../environment/resources.ts';
 import { guardEntries } from '../environment/write-guard.ts';
 import {
-  ATTEMPT_ENV_FILE,
+  attemptEnvFile,
   allocateAttemptPorts,
   attemptVariables,
   type AttemptPorts,
@@ -844,12 +844,12 @@ export class Runner {
                 this.attemptPorts.get(attempt.id)?.get(repo.id) ?? {},
                 repo.gateway,
                 repo.id,
-              ),
-              HARNESS_ATTEMPT_ENV_FILE: join(
-                this.dirOf(attempt.repositoryId),
-                'artifacts',
-                attempt.id,
-                ATTEMPT_ENV_FILE,
+                join(
+                  this.dirOf(attempt.repositoryId),
+                  'artifacts',
+                  attempt.id,
+                  attemptEnvFile(repo.id, repo.id === attempt.repositoryId),
+                ),
               ),
             }
           : {}),
@@ -1716,17 +1716,30 @@ export class Runner {
       }
       // Окружение попытки файлом (alpha.69, P6-11): имя проекта compose,
       // порты и шлюз — для lifecycle, gates и инструментов, которые читают
-      // файл, а не переменные. Секретов в нём нет.
+      // файл, а не переменные. У каждого репозитория попытки (её и
+      // проверяемых потребителей) — свой файл. Секретов в нём нет.
       if (harnessModeOf(this.policy) === 'light') {
         await mkdir(artifacts, { recursive: true });
-        await writeFile(
-          join(artifacts, ATTEMPT_ENV_FILE),
-          JSON.stringify(
-            attemptVariables(attempt.id, ports?.ports ?? {}, repo.gateway, repo.id),
-            null,
-            2,
-          ) + '\n',
-        );
+        for (const repositoryId of new Set([
+          repo.id,
+          ...(claimed.consumers ?? []).map((c) => c.repositoryId),
+        ])) {
+          const file = join(artifacts, attemptEnvFile(repositoryId, repositoryId === repo.id));
+          await writeFile(
+            file,
+            JSON.stringify(
+              attemptVariables(
+                attempt.id,
+                this.attemptPorts.get(attempt.id)?.get(repositoryId) ?? {},
+                this.repo(repositoryId).gateway,
+                repositoryId,
+                file,
+              ),
+              null,
+              2,
+            ) + '\n',
+          );
+        }
       }
       // Ресурсы поручения, gates его репозитория и выбранных проверок
       // потребителей — одним резервированием на всю попытку.

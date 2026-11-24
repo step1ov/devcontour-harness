@@ -17,6 +17,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   allocateAttemptPorts,
+  attemptEnvFile,
   attemptVariables,
   composeProjectName,
 } from '../src/environment/attempt-ports.ts';
@@ -78,6 +79,12 @@ test('переменные попытки: имя проекта compose, пор
     API_URL: 'http://127.0.0.1:20002',
   });
   assert.ok(keys!.split(',').includes('COMPOSE_PROJECT_NAME'));
+  // Файл окружения — свой у каждого репозитория попытки и в списке переменных.
+  assert.equal(attemptEnvFile('app', true), 'attempt-env.json');
+  assert.equal(attemptEnvFile('web', false), 'attempt-env.web.json');
+  const consumer = attemptVariables('a1', {}, undefined, 'web', '/x/attempt-env.web.json');
+  assert.equal(consumer.HARNESS_ATTEMPT_ENV_FILE, '/x/attempt-env.web.json');
+  assert.ok(consumer.HARNESS_ATTEMPT_ENV_KEYS!.split(',').includes('HARNESS_ATTEMPT_ENV_FILE'));
   // Переменные процесса порт и шлюз попытки не перекрывают.
   for (const name of ['PATH', 'NODE_OPTIONS', 'TMPDIR', 'HOME', 'COMPOSE_PROJECT_NAME', 'DYLD_X'])
     assert.equal(
@@ -193,6 +200,7 @@ fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,
     for (const r of receipts) {
       assert.match(r.attemptEnv?.COMPOSE_PROJECT_NAME ?? '', /^hx-app-[0-9a-f]{12}$/);
       assert.match(r.attemptEnv?.API_PORT ?? '', /^\d+$/);
+      assert.match(r.attemptEnv?.HARNESS_ATTEMPT_ENV_FILE ?? '', /attempt-env\.json$/);
     }
     // Аренда портов снята после попытки.
     const pool = new ResourcePool(join(ctx.state, 'resources.sqlite'));

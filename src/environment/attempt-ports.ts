@@ -98,6 +98,13 @@ export async function allocateAttemptPorts(
 
 /** Файл окружения попытки в её каталоге артефактов (`HARNESS_ATTEMPT_ENV_FILE`). */
 export const ATTEMPT_ENV_FILE = 'attempt-env.json';
+/**
+ * Файл окружения репозитория попытки: у репозитория попытки —
+ * `attempt-env.json`, у проверяемого потребителя — свой
+ * `attempt-env.<репозиторий>.json` (его стек не совпадает со стеком поставщика).
+ */
+export const attemptEnvFile = (repositoryId: string, own: boolean) =>
+  own ? ATTEMPT_ENV_FILE : `attempt-env.${repositoryId.replace(/[^A-Za-z0-9_-]/g, '_')}.json`;
 
 /** Ключ аренды порта попытки (для тестов и уборки). */
 export const attemptPortKey = (port: number) => resourceKey(leaseOf(port));
@@ -139,9 +146,12 @@ export function attemptVariables(
   ports: Record<string, number>,
   gateway: GatewayPolicy | undefined,
   repositoryId = '',
+  /** Путь файла окружения этого репозитория попытки (`HARNESS_ATTEMPT_ENV_FILE`). */
+  envFile?: string,
 ): Record<string, string> {
   const env: Record<string, string> = {
     HARNESS_ATTEMPT_ID: attemptId,
+    ...(envFile ? { HARNESS_ATTEMPT_ENV_FILE: envFile } : {}),
     COMPOSE_PROJECT_NAME: composeProjectName(attemptId, repositoryId),
     ...Object.fromEntries(Object.entries(ports).map(([k, v]) => [k, String(v)])),
   };
