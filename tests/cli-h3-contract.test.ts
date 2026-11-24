@@ -226,6 +226,8 @@ const ADDITIVE_ARGS = new Set([
   'init--recovery',
   'init--diagnose-after',
   'init--lead-resets',
+  // Режим harness новой политики (0.1.0-alpha.69).
+  'init--harness-mode',
 ]);
 /**
  * Текст `--writer` init в H2. 0.1.0-alpha.50 меняет умолчание: writer —
@@ -464,6 +466,29 @@ test('H3-01: прежние команды и схемы их данных не 
   // Порядок ключей cliDataSchemas H2 — без capabilities; аддитивные значения
   // перечней убираются, остальное — байты H2.
   const h2 = JSON.stringify(data, (k, v: unknown) => {
+    // Облегчённый режим (0.1.0-alpha.69): режим, граница записи, порты
+    // попытки, приёмка выпуска, шлюз и UI gates в политике.
+    if (k === 'properties' && v && typeof v === 'object' && 'policyVersion' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      for (const f of ['harnessMode', 'writeGuard', 'attemptEnv', 'release']) delete rest[f];
+      v = rest;
+    }
+    if (k === 'properties' && v && typeof v === 'object' && 'targetRef' in v && 'gates' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.gateway;
+      v = rest;
+    }
+    if (k === 'properties' && v && typeof v === 'object' && 'ui' in v && 'command' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.ui;
+      v = rest;
+    }
+    // Режим harness в doctor (0.1.0-alpha.69).
+    if (k === 'properties' && v && typeof v === 'object' && 'leadSandbox' in v && 'mode' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.mode;
+      v = rest;
+    }
     // Восстановление ведущим (0.1.0-alpha.66): настройки решений (`decisions`
     // у status, doctor и init), разборы и сбросы работы (`leadRecovery`),
     // правило политики (`recovery`) и строка сброса у работы status, поля
