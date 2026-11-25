@@ -152,7 +152,7 @@ export const ENVIRONMENT_BLOCK_WRITER_TEXT =
  * исполнит harness, — до сдачи. Доверенная проверка остаётся за harness.
  */
 export const WRITER_SELF_CHECK_TEXT =
-  'Self-check before you hand back: run each gate command above yourself from the worktree root (in its cwd when one is given), in the listed order, and return completed=true only when they all pass locally. Fix what fails instead of handing back a red gate. If a gate cannot run in your environment (a service, browser or port is unavailable), say which gate and the exact error in the summary. The harness runs the same gates again as the trusted check; your run only saves an attempt.';
+  'Self-check before you hand back: run each gate command above yourself from the worktree root (in its cwd when one is given), in the listed order, and fix what fails instead of handing back a red gate. If a gate cannot run in your environment (a service, browser or port is unavailable), the environment-block rule applies: name the gate and the exact error in the summary and still return completed=true when the work itself is done; completed=false is only for unfinished work. The harness runs the same gates again as the trusted check; your run only saves an attempt.';
 
 export function prompt(input: {
   work: WorkState;

@@ -11,13 +11,22 @@ import { nodeGate } from './git-fixture.ts';
 
 test('writer: подсказка называет команды и cwd gates области и требует самопроверки; значения окружения в неё не попадают', async () => {
   const secret = 'value-of-gate-only-env-7f3a';
+  // Объявленный секрет, вписанный значением в команду gate (ревью C LOW-5).
+  const inline = 'inline-gate-secret-9c41d2e7b3';
+  process.env.HARNESS_TEST_INLINE_SECRET = inline;
   const ctx = setup({
     files: { 'packages/b/package.json': '{"name":"b"}\n' },
     scenario: { writer: { ...implement(), recordPrompt: true }, reviewer: approve() },
-    graph: (g: any) => (g.orders[0].gates = ['unit', 'pkg-check']),
+    graph: (g: any) => (g.orders[0].gates = ['unit', 'pkg-check', 'inline-check']),
     policy: (p: any) => {
       p.harnessMode = 'light';
       p.environment.values.GATE_ONLY_TOKEN = secret;
+      p.environment.secrets = { API_TOKEN: 'HARNESS_TEST_INLINE_SECRET' };
+      p.repositories[0].gates.push({
+        id: 'inline-check',
+        kind: 'check',
+        command: ['env', `API_TOKEN=${inline}`, ...nodeGate('process.exit(0)')],
+      });
       p.repositories[0].gates.push({
         id: 'pkg-check',
         kind: 'check',
@@ -35,5 +44,10 @@ test('writer: подсказка называет команды и cwd gates о
   assert.ok(head.includes(JSON.stringify(nodeGate('process.exit(0)'))), 'точная команда');
   assert.ok(!head.includes(secret), 'значение окружения не в подсказке');
   assert.ok(!head.includes('GATE_ONLY_TOKEN'), 'имя переменной окружения gate не в подсказке');
+  assert.ok(head.includes('"id":"inline-check"'));
+  assert.ok(!head.includes(inline), 'значение секрета в команде gate замаскировано');
+  // Окружение блокирует gate — completed=true, если работа сделана (не unfinished).
+  assert.match(WRITER_SELF_CHECK_TEXT, /still return completed=true when the work itself is done/);
+  delete process.env.HARNESS_TEST_INLINE_SECRET;
   ctx.store.close();
 });

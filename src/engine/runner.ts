@@ -2066,9 +2066,11 @@ export class Runner {
                       context,
                       // Команда и cwd gate — без окружения: значения и
                       // секреты политики в подсказку не попадают (alpha.71).
+                      // Значения секретов, вписанные в команду gate, —
+                      // маской окружения попытки (ревью C LOW-5).
                       gates: gates.map((g) => ({
                         id: g.id,
-                        command: g.command,
+                        command: g.command.map((a) => execution.redact(a)),
                         ...(g.cwd ? { cwd: g.cwd } : {}),
                       })),
                       inputPolicy: attempt.inputPolicy ?? inputPolicyOf(this.policy),
