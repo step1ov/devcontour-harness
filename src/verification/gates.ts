@@ -12,7 +12,7 @@ import {
 import { controllerTemp } from '../environment/controller-temp.ts';
 import { hostLoad, loadText, type HostLoad } from '../environment/host-load.ts';
 import { join, resolve, sep, delimiter, relative, dirname } from 'node:path';
-import { accessSync, constants, existsSync, readdirSync } from 'node:fs';
+import { accessSync, constants, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import {
@@ -1737,6 +1737,16 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
           gateCwd,
           base: run.trustedBase,
           sha,
+          scripts: () => {
+            try {
+              const pkg = JSON.parse(readFileSync(join(gateCwd, 'package.json'), 'utf8')) as {
+                scripts?: Record<string, string>;
+              };
+              return pkg.scripts;
+            } catch {
+              return undefined;
+            }
+          },
           addedCalls: (isCall) =>
             run.trustedBase && run.trustedBase !== sha
               ? addedCallFiles(cwd, run.trustedBase, sha, isCall)

@@ -23,6 +23,8 @@ export interface ToolMissing {
   path?: string;
   /** Отказ pnpm по каталогу состояния: подтверждён своим кодом. */
   code?: 'ERR_PNPM_UNSAFE_TASK_RUN_STATE_PATH';
+  /** `spawn X ENOENT` — имя назвал процесс, а не оболочка gate (ревью B2 M3). */
+  spawn?: true;
 }
 
 const signatures: { re: RegExp; take: (m: RegExpExecArray) => Omit<ToolMissing, 'line'> }[] = [
@@ -35,7 +37,7 @@ const signatures: { re: RegExp; take: (m: RegExpExecArray) => Omit<ToolMissing, 
   },
   { re: /\bzsh: command not found: (\S+)/, take: (m) => ({ name: m[1]! }) },
   { re: /^env: ([^\s:]{1,200}): No such file or directory\s*$/m, take: (m) => ({ name: m[1]! }) },
-  { re: /\bspawn (\S{1,200}) ENOENT\b/, take: (m) => ({ name: m[1]! }) },
+  { re: /\bspawn (\S{1,200}) ENOENT\b/, take: (m) => ({ name: m[1]!, spawn: true as const }) },
   // Playwright: браузер не установлен.
   {
     re: /\bExecutable doesn't exist at (\S+)[\s\S]{0,400}\bplaywright install\b/,
@@ -104,6 +106,38 @@ const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
  * файл с именем инструмента; добавленные строки изменения не называют
  * инструмент. Неуверенность — засчитанный провал.
  */
+/**
+ * Программы, которые зовёт сам gate (ревью B2 M3): `argv[0]` (после `env`
+ * с присваиваниями), цель `exec`/`dlx`/`npx`, первая программа script
+ * пакета, который запускает менеджер пакетов (`run <script>` или краткая
+ * форма), из `package.json` каталога gate.
+ */
+export function gateBinaries(
+  gate: Pick<GatePolicy, 'command'>,
+  scriptsOf: () => Record<string, string> | undefined,
+): string[] {
+  const strip = (argv: string[]) => {
+    let a = argv;
+    if (posix.basename(a[0] ?? '') === 'env') a = a.slice(1);
+    while (a[0] && /^[A-Za-z_][A-Za-z0-9_]*=/.test(a[0])) a = a.slice(1);
+    return a;
+  };
+  const argv = strip([...gate.command]);
+  const out = new Set<string>(argv[0] ? [argv[0]] : []);
+  const tool = posix.basename(argv[0] ?? '');
+  const positional = argv.slice(1).filter((a) => !a.startsWith('-'));
+  if (tool === 'npx' && positional[0]) out.add(positional[0]);
+  if (['pnpm', 'npm', 'yarn'].includes(tool)) {
+    const [verb, next] = positional;
+    if ((verb === 'exec' || verb === 'dlx' || verb === 'x') && next) out.add(next);
+    const script = verb === 'run' || verb === 'run-script' ? next : verb;
+    const text = script ? scriptsOf()?.[script] : undefined;
+    const first = text ? strip(text.trim().split(/\s+/))[0] : undefined;
+    if (first) out.add(first);
+  }
+  return [...out];
+}
+
 export async function toolMissingVerdict(input: {
   tool: ToolMissing;
   gate: Pick<GatePolicy, 'command' | 'cwd'>;
@@ -115,8 +149,22 @@ export async function toolMissingVerdict(input: {
   probe(argv: string[]): Promise<number | undefined>;
   /** Файлы, куда изменение добавило строку, распознанную `isCall`. */
   addedCalls?(isCall: (line: string) => boolean): Promise<string[]>;
+  /** Scripts `package.json` каталога gate (для `run <script>`). */
+  scripts?(): Record<string, string> | undefined;
 }): Promise<{ held: boolean; why: string }> {
   const { tool } = input;
+  // `spawn X ENOENT` — обычно код под проверкой зовёт неверный путь: это
+  // отказ инструмента gate, только когда X — программа самого gate.
+  if (tool.spawn && tool.name) {
+    const own = gateBinaries(input.gate, () => input.scripts?.()).some(
+      (b) => b === tool.name || (!tool.name!.includes('/') && posix.basename(b) === tool.name),
+    );
+    if (!own)
+      return {
+        held: false,
+        why: `spawn ${tool.name} — не программа gate (зовёт код под проверкой)`,
+      };
+  }
   if (!tool.code) {
     const argv = tool.path
       ? ['test', '-x', tool.path]

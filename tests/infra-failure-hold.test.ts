@@ -12,7 +12,11 @@ import {
   registryPullFailure,
   registryPullStep,
 } from '../src/engine/classify.ts';
-import { toolMissingFailure, toolMissingLine } from '../src/verification/gate-tooling.ts';
+import {
+  gateBinaries,
+  toolMissingFailure,
+  toolMissingLine,
+} from '../src/verification/gate-tooling.ts';
 import { approve, implement, runAll, setup } from './runner-fixture.ts';
 import { gateHoldLine } from '../src/projections/gate-hold.ts';
 import { nodeGate } from './git-fixture.ts';
@@ -186,7 +190,7 @@ test('ревью C HIGH-1: исполнитель добавил spawn недо�
         'src/run.js': `require('child_process').spawn('${MISSING}', ['status']);\n`,
       },
     }),
-    /добавило вызов pw-harness-missing-tool/,
+    /не программа gate|добавило вызов pw-harness-missing-tool/,
   );
 });
 
@@ -206,4 +210,29 @@ test('ревью C HIGH-1: строку напечатал код, а инстр
     toolSetup({ output: ' ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL  Command "node" not found' }),
     /проба harness нашла инструмент/,
   );
+});
+
+test('ревью B2 M3: spawn вычисленного неверного пути — не программа gate, провал засчитан', async () => {
+  await counted(
+    toolSetup({ output: `Error: spawn /wrong/dir/${MISSING} ENOENT` }),
+    /spawn \/wrong\/dir\/pw-harness-missing-tool — не программа gate/,
+  );
+});
+
+test('ревью B2 M3: программы gate — argv[0], цель exec и первая программа script пакета', () => {
+  const scripts = () => ({ e2e: 'PW=1 playwright test --reporter=junit', build: 'tsc -p .' });
+  assert.deepEqual(gateBinaries({ command: ['pnpm', 'run', 'e2e'] }, scripts), [
+    'pnpm',
+    'playwright',
+  ]);
+  assert.deepEqual(gateBinaries({ command: ['npm', 'build'] }, scripts), ['npm', 'tsc']);
+  assert.deepEqual(gateBinaries({ command: ['pnpm', 'exec', 'vitest', 'run'] }, scripts), [
+    'pnpm',
+    'vitest',
+  ]);
+  assert.deepEqual(gateBinaries({ command: ['env', 'A=1', 'npx', 'maestro', 'test'] }, scripts), [
+    'npx',
+    'maestro',
+  ]);
+  assert.deepEqual(gateBinaries({ command: ['node', 'x.js'] }, scripts), ['node']);
 });
