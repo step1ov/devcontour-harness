@@ -1088,6 +1088,11 @@ export const workStateSchema = z.strictObject({
        * Нет поля (состояние до этого поля) — `sandbox-process-list`.
        */
       cause: z.enum(noRetryEnvironmentCauses).optional(),
+      /**
+       * `gate-definition` из-за отсутствующего инструмента или браузера
+       * (`GATE_TOOL_MISSING`, alpha.71): чинится команда gate или окружение.
+       */
+      tool: z.literal(true).optional(),
     })
     .optional(),
 });

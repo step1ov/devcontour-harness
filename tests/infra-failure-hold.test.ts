@@ -13,6 +13,7 @@ import {
 } from '../src/engine/classify.ts';
 import { toolMissingFailure, toolMissingLine } from '../src/verification/gate-tooling.ts';
 import { approve, implement, runAll, setup } from './runner-fixture.ts';
+import { gateHoldLine } from '../src/projections/gate-hold.ts';
 import { nodeGate } from './git-fixture.ts';
 
 test('toolMissing: pnpm «Command not found», sh, spawn ENOENT, браузер Playwright, pnpm state path; провал кода — нет', () => {
@@ -108,6 +109,12 @@ test('runner: gate не нашёл инструмент — environment gate-def
   assert.match(a.error ?? '', /GATE_TOOL_MISSING: .*Command "playwright" not found/);
   assert.equal(work.attempt, 0, 'попытка не засчитана');
   assert.equal(work.environmentHold?.gate, 'browser', 'gate удержан до хода ведущего');
+  // Строка удержания называет инструмент, а не «печатать выжимку».
+  assert.equal(work.environmentHold?.tool, true);
+  const line = gateHoldLine({ ...work.environmentHold, workId: work.id }, work.id);
+  assert.match(line.ru, /не нашла свой инструмент или браузер/);
+  assert.match(line.ru, /установить инструмент или браузер либо поправить команду gate/);
+  assert.doesNotMatch(line.ru, /печатала/);
   ctx.store.close();
 });
 

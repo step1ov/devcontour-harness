@@ -5966,6 +5966,9 @@ export class Engine {
         ? {}
         : { isolation: strictSandbox(this.policy) ? ('os' as const) : ('none' as const) }),
       ...(cause === 'sandbox-process-list' ? {} : { cause }),
+      ...(cause === 'gate-definition' && e.summary.includes('GATE_TOOL_MISSING')
+        ? { tool: true as const }
+        : {}),
     };
   }
 
