@@ -10,6 +10,7 @@ import {
   classifyFailure,
   environmentCauseOf,
   registryPullFailure,
+  registryPullStep,
 } from '../src/engine/classify.ts';
 import { toolMissingFailure, toolMissingLine } from '../src/verification/gate-tooling.ts';
 import { approve, implement, runAll, setup } from './runner-fixture.ts';
@@ -40,7 +41,7 @@ test('toolMissing: pnpm «Command not found», sh, spawn ENOENT, браузер 
   assert.equal(toolMissingFailure(pnpm, { total: 2, texts: [pnpm] }), undefined, 'не все тексты');
 });
 
-test('registry pull: обрыв реестра в выводе шага окружения — environment (dependency-network); прочий провал шага — прежний класс', () => {
+test('registry pull (ревью C MEDIUM-3): обрыв с контекстом загрузки в той же строке; health check без него — не окружение; класс решает runner', () => {
   const pull =
     'Шаг compose-setup: exit=1; timeout=false; стадия setup ⟦вывод: rabbitmq Pulled | minio Error Head "https://registry-1.docker.io/v2/library/turbo-starter-minio/manifests/dev": EOF | minio-init Interrupted⟧';
   assert.ok(registryPullFailure(pull));
@@ -49,17 +50,26 @@ test('registry pull: обрыв реестра в выводе шага окру
       'Error response from daemon: Get "https://ghcr.io/v2/": net/http: TLS handshake timeout',
     ),
   );
-  assert.ok(registryPullFailure('toomanyrequests: You have reached your pull rate limit'));
-  assert.equal(
-    registryPullFailure('Шаг compose-setup: exit=1 ⟦вывод: port is already allocated⟧'),
-    false,
+  assert.ok(registryPullFailure('docker pull postgres:16: toomanyrequests: rate limit'));
+  assert.ok(
+    registryPullFailure(' ERR_PNPM_FETCH_502  GET https://registry.npmjs.org/x: ECONNRESET'),
   );
-  const failure = new TaskFailure('unknown', pull);
-  assert.equal(classifyFailure(failure, pull), 'environment');
-  assert.equal(environmentCauseOf(failure, pull, 'environment'), 'dependency-network');
-  assert.equal(classifyFailure(new Error(pull), pull), 'environment');
-  const other = 'Шаг compose-setup: exit=1; timeout=false ⟦вывод: port is already allocated⟧';
-  assert.equal(classifyFailure(new TaskFailure('unknown', other), other), 'unknown');
+  // Без контекста загрузки в той же строке — не обрыв реестра.
+  for (const text of [
+    'Шаг ready: exit=1 ⟦вывод: Get "http://localhost:8080/health": net/http: request canceled (Client.Timeout exceeded)⟧',
+    'toomanyrequests from our own API under test',
+    'Шаг compose-setup: exit=1 ⟦вывод: port is already allocated⟧',
+    'registry ready | health: request canceled',
+  ])
+    assert.equal(registryPullFailure(text), false, text);
+  assert.equal(registryPullStep('Шаг compose-pull: exit=1'), true);
+  assert.equal(registryPullStep('Шаг compose-setup: exit=1 ⟦вывод: docker compose pull …⟧'), true);
+  assert.equal(registryPullStep('Шаг compose-setup: exit=1 ⟦вывод: x Pulling⟧'), false);
+  // Классификатор сам обрыв реестра окружением не делает: решает runner
+  // (до кода исполнителя или на шаге загрузки).
+  assert.equal(classifyFailure(new TaskFailure('unknown', pull), pull), 'unknown');
+  assert.equal(classifyFailure(new Error(pull), pull), 'unknown');
+  assert.notEqual(environmentCauseOf(new Error(pull), pull, 'environment'), 'dependency-network');
 });
 
 /** Инструмент, которого точно нет на машине теста (проба `command -v` его не найдёт). */

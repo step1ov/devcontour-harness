@@ -220,6 +220,8 @@ import {
   classifyFailure,
   environmentCauseOf,
   failureOrigin,
+  registryPullFailure,
+  registryPullStep,
   withSuffix,
 } from './classify.ts';
 import { TaskFailure, type FailureKind } from './failure.ts';
@@ -2541,14 +2543,21 @@ export class Runner {
         // setup, хранилище зависимостей, prepare), у попытки без взятого или
         // восстановленного кода исполнителя (по записанному состоянию).
         const persisted = this.engine.read((v) => v.attempt(attempt.id));
-        const preWriter =
-          classified === 'unknown' &&
+        const onBase =
           this.preparing.has(attempt.id) &&
           !persisted?.reusedFrom &&
           !persisted?.continuedFrom?.applied &&
           !persisted?.candidateSha;
+        const preWriter = classified === 'unknown' && onBase;
+        // Обрыв реестра при загрузке (alpha.71, ревью C MEDIUM-3): окружение
+        // только до кода исполнителя или на шаге загрузки; после кода
+        // исполнителя такой вывод может быть симптомом его кода.
+        const registry =
+          classified === 'unknown' &&
+          registryPullFailure(message) &&
+          (onBase || registryPullStep(message));
         this.preparing.delete(attempt.id);
-        const kind: FailureKind = preWriter ? 'environment' : classified;
+        const kind: FailureKind = preWriter || registry ? 'environment' : classified;
         // Незакоммиченная работа сохраняется при любом отказе до кандидата:
         // по времени, «не закончил», обрыв. Иначе повтор начинал с пустого
         // дерева и тратил попытку на сделанное.
@@ -2558,7 +2567,11 @@ export class Runner {
         // начинает с базы в новом дереве.
         const named = environmentCauseOf(stalled ? undefined : error, message, kind);
         // Отказ до вызова исполнителя без названной причины — `preflight`.
-        const cause = preWriter && named === 'other' ? 'preflight' : named;
+        const cause = registry
+          ? 'dependency-network'
+          : preWriter && named === 'other'
+            ? 'preflight'
+            : named;
         let reported = message;
         const ports = this.portWarnings.get(attempt.id);
         if (ports?.length) reported += `; предупреждение пробы портов: ${ports.join('; ')}`;
