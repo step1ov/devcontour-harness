@@ -351,6 +351,22 @@ $H run --graph .harness/work/<graph-id>.json --policy .harness/policy.json \
 
 The state directory lives outside the repository; `run` creates it.
 
+**Waiting for progress.** While `run` works (in the background or in another
+process), do not loop `status`. Block on the next event that matters instead:
+
+```sh
+$H wait --state <manifest.paths.state> --policy .harness/policy.json \
+  [--until accepted,failed,held,question] [--timeout 30m]
+```
+
+It returns when a work is accepted, fails or is held, a writer asks a
+question, the release is ready, or the queue stops (no controller and no
+attempt). The result names what happened, the next step from `explain`
+(`next.actor`, `next.action`, `next.message`) and a short status line. Exit
+codes: 0 accepted, 10 release-ready, 11 question, 12 held, 13 failed, 14
+stopped, 15 timeout. It reads the state read-only and does not query the
+controller. Act on `next`, then wait again.
+
 Before a long cycle, first run the cheap decisive gates
 («перед долгим циклом сначала прогоните дешёвые решающие gates»):
 

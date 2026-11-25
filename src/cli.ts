@@ -126,6 +126,7 @@ import { leadOutline } from './control/outline.ts';
 import { parseDurationFlag } from './control/duration.ts';
 import { readyNotRunning } from './control/lead-end-warning.ts';
 import { briefMissingLine } from './control/review-release.ts';
+import { WAIT_EXIT_CODES, waitFor, waitKinds, type WaitKind } from './control/wait.ts';
 import { recordGatesRun } from './control/release-gates.ts';
 
 const usage = `harness ${HARNESS_VERSION}
@@ -488,6 +489,7 @@ const options = {
   detail: { type: 'boolean' },
   since: { type: 'string' },
   until: { type: 'string' },
+  timeout: { type: 'string' },
   'as-of': { type: 'string' },
   format: { type: 'string' },
   'no-titles': { type: 'boolean' },
@@ -569,7 +571,8 @@ const flagOwners = {
   'probe-sandbox': ['doctor'],
   detail: ['status'],
   since: ['report'],
-  until: ['report'],
+  until: ['report', 'wait'],
+  timeout: ['wait'],
   'as-of': ['report'],
   format: ['report', 'handoff'],
   'no-titles': ['report', 'view'],
@@ -1187,6 +1190,7 @@ async function run(
   const readOnly = [
     'status',
     'events',
+    'wait',
     'result',
     'view',
     'report',
@@ -1419,6 +1423,44 @@ async function run(
         return { command, data, code: failed ? runExit(h, data.works) : exitCodes.ok };
       } finally {
         h.close();
+      }
+    }
+    case 'wait': {
+      // Ожидание события (alpha.71, E1): журнал событий на чтение, без опроса controller.
+      const state = need('state');
+      const b = loadPolicy(need('policy'));
+      const until = (v.until ?? '')
+        .split(',')
+        .map((k) => k.trim())
+        .filter(Boolean);
+      const unknown = until.filter((k) => !(waitKinds as readonly string[]).includes(k));
+      if (unknown.length)
+        throw new HarnessError(
+          'INVALID_INPUT',
+          `--until: ожидается ${waitKinds.join(', ')}; неизвестно: ${unknown.join(', ')}`,
+          [{ path: ['--until'], message: unknown.join(',') }],
+        );
+      const timeoutMs =
+        v.timeout === undefined
+          ? 30 * 60_000
+          : parseDurationFlag('timeout', v.timeout, { minMs: 1000, maxMs: 24 * 3_600_000 });
+      const abort = new AbortController();
+      const stop = () => abort.abort(new Error('Ожидание прервано сигналом'));
+      process.once('SIGINT', stop);
+      process.once('SIGTERM', stop);
+      try {
+        const data = await waitFor({
+          stateDir: state,
+          policy: b.policy,
+          baseDir: b.baseDir,
+          ...(until.length ? { until: until as WaitKind[] } : {}),
+          timeoutMs,
+          signal: abort.signal,
+        });
+        return { command, data, code: WAIT_EXIT_CODES[data.kind] };
+      } finally {
+        process.off('SIGINT', stop);
+        process.off('SIGTERM', stop);
       }
     }
     case 'status':

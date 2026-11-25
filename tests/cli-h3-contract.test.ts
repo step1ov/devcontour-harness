@@ -95,6 +95,8 @@ const laterCommands: readonly string[] = [
   'env-up',
   'env-down',
   'env-sweep',
+  // Ожидание значимого события вместо цикла status (0.1.0-alpha.71).
+  'wait',
 ];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [

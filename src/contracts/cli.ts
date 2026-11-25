@@ -1859,6 +1859,35 @@ export const cliCommands = {
     ],
     refusals: ['NOT_FOUND', 'RUNTIME_UNAVAILABLE'],
   },
+  wait: {
+    description:
+      'Ждать следующего значимого события (alpha.71): принятие, отказ или удержание работы, вопрос исполнителя, готовность выпуска, остановка очереди; итог — что случилось, следующий шаг из explain и строка состояния. Читает журнал событий только на чтение, controller не опрашивает',
+    writes: false,
+    idempotency:
+      'Только чтение. Ждёт событий после своего начала; уже готовый выпуск или очередь без controller и попыток — сразу. Коды выхода: 0 accepted, 10 release-ready, 11 question, 12 held, 13 failed, 14 stopped, 15 timeout',
+    args: [
+      state,
+      {
+        ...policy,
+        required: true,
+        description: 'ExecutionPolicy JSON: для следующего шага (explain)',
+      },
+      {
+        name: '--until',
+        value: 'text',
+        required: false,
+        description:
+          'Какие исходы ждать через запятую: accepted, failed, held, question, release-ready, stopped; release-ready, stopped и таймаут кончают ожидание всегда',
+      },
+      {
+        name: '--timeout',
+        value: 'duration',
+        required: false,
+        description: 'Предел ожидания: Nm, Nh или Ns; по умолчанию 30m',
+      },
+    ],
+    refusals: ['NOT_FOUND'],
+  },
   'lead-outline': {
     description:
       'План выпуска ведущего до первого графа (и до первого run — с --policy): этапы × компоненты с грубым размером (S/M/L или число задач) и тем, кто их делает (writers, environment, owner). Прогноз считает незарегистрированные части плана объёмом выпуска; без плана status и панель подсказывают RELEASE_OUTLINE_MISSING, run не блокируется (0.1.0-alpha.68). Синоним: harness lead outline --file F',
@@ -2494,6 +2523,24 @@ export const statusDataSchema = z.strictObject({
       attempts: z.array(attemptViewSchema),
     })
     .optional(),
+});
+
+/** Итог `harness wait` (alpha.71, E1). */
+export const waitDataSchema = z.strictObject({
+  kind: z.enum(['accepted', 'failed', 'held', 'question', 'release-ready', 'stopped', 'timeout']),
+  event: z
+    .strictObject({ seq: z.number().int().positive(), type: z.string(), at: isoTimeSchema })
+    .optional(),
+  workId: idSchema.optional(),
+  next: z
+    .strictObject({
+      actor: z.string().nullable(),
+      action: z.string(),
+      message: z.string().max(500),
+    })
+    .optional(),
+  status: z.string().max(500),
+  waitedMs: z.number().int().min(0),
 });
 
 export const eventsDataSchema = z.strictObject({
@@ -3712,6 +3759,7 @@ export const cliDataSchemas = {
   run: runDataSchema,
   status: statusDataSchema,
   events: eventsDataSchema,
+  wait: waitDataSchema,
   pause: controlDataSchema,
   resume: controlDataSchema,
   cancel: workActionDataSchema,
