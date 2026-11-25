@@ -43,9 +43,11 @@ outline with a reason when the plan grows.
    scenario (alpha.71): one task per coherent scenario through all its layers.
    Split only by repository, or when the parts are independent and can be
    accepted separately. A few larger tasks beat many slices that each pay for
-   gates and review. Shared test infrastructure that only the first product
-   task needs (an acceptance launcher, fixtures) goes inside that task, not
-   into a separate work. Task keys become order
+   gates and review. In light mode, shared test infrastructure that only the
+   first product task needs (an acceptance launcher, fixtures) goes inside
+   that task, not into a separate work; in strict mode, acceptance code under
+   `repositories[].infra.paths` stays an `infra` task that product tasks
+   depend on (below). Task keys become order
    ids; `description` becomes the goal; omitted `writePaths` mean the whole
    repository. Scope each task's `gates` to the gates that cover its
    criteria and the packages it touches: a web-only task does not list the

@@ -23,7 +23,7 @@ export interface PlanningRequest {
  * проверка.
  */
 export const TASK_SIZE_SECTION =
-  'Size tasks by user scenario: one task per coherent user scenario, through every layer it needs (API, UI, data, tests). Split a scenario only by repository, or when its parts are truly independent and can be accepted separately. Shared test infrastructure (an acceptance launcher, fixtures, a test harness) that only the first product task needs belongs inside that task, not in a separate one.';
+  'Size tasks by user scenario: one task per coherent user scenario, through every layer it needs (API, UI, data, tests). Split a scenario only by repository, or when its parts are truly independent and can be accepted separately. In light mode, shared test infrastructure (an acceptance launcher, fixtures, a test harness) that only the first product task needs belongs inside that task, not in a separate one; in strict mode, acceptance code under protected infra paths stays a separate infra task that the product tasks depend on.';
 
 /**
  * Область gates задачи (alpha.71): только gates, покрывающие её критерии и
