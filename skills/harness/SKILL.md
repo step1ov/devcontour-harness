@@ -159,6 +159,9 @@ Without it `status` and `harness view` say «плана выпуска нет �
 outline with a reason when the plan grows.
 
 1. Write the user's goal and constraints to `.harness/work/<graph-id>.brief.md`.
+   Keep it next to the graph file: `run --graph .harness/work/<graph-id>.json`
+   records it in the state, and the release review checks the release
+   against it, failure paths included.
    Ask the user a short question for every real ambiguity instead of
    guessing; the answer goes into the brief. A changed brief makes an earlier
    draft stale.
