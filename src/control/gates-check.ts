@@ -36,6 +36,8 @@ export interface GateCheckInput {
   resourceDatabase?: string;
   /** Явная команда (`harness gates`): сетевой отказ сборки seed повторяется сразу. */
   retryStoreNetworkFailure?: boolean;
+  /** Путь checkout репозитория вместо `baseDir` (хост, который знает пути сам). */
+  repoPath?: (r: { path: string }) => string;
 }
 
 type Repo = ExecutionPolicy['repositories'][number];
@@ -85,7 +87,7 @@ export async function commitOf(path: string, rev: string, repositoryId: string) 
 export async function checkGates(input: GateCheckInput) {
   const { policy } = input;
   const repo = repositoryOf(policy, input.repositoryId);
-  const repoPath = repositoryPath(input.baseDir);
+  const repoPath = input.repoPath ?? repositoryPath(input.baseDir);
   let ids: string[];
   try {
     ids = expandGateRefs(repo, input.gates);

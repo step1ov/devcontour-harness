@@ -18,6 +18,8 @@ import {
   digestOf,
 } from '../contracts/index.ts';
 import { requestsOf } from '../engine/input-requests.ts';
+import { checkGates, commitOf } from './gates-check.ts';
+import { fullGatesProblem } from './release-gates.ts';
 import {
   rawGit,
   reviewBranch,
@@ -123,6 +125,26 @@ export async function reviewRelease(
     throw new HarnessError(
       'NOT_READY',
       `review-release: ${docsLine}; release.docs: required — сначала примите работу документации (метка docs, зависит от корневых работ)`,
+    );
+  // Полный прогон gates на цели выпуска (alpha.71, ревью B): нет годного —
+  // review-release исполняет его сам; не прошёл — отказ до ревью.
+  const path = ctx.repoPath(repo.path);
+  const sha = await commitOf(path, head, repo.id);
+  if (fullGatesProblem(ctx.stateDir, repo, sha))
+    await checkGates({
+      policy: ctx.policy,
+      baseDir: '',
+      repoPath: (r) => ctx.repoPath(r.path),
+      stateDir: ctx.stateDir,
+      repositoryId: repo.id,
+      rev: sha,
+      ...(input.signal ? { signal: input.signal } : {}),
+    });
+  const gates = fullGatesProblem(ctx.stateDir, repo, sha);
+  if (gates)
+    throw new HarnessError(
+      'NOT_READY',
+      `review-release: ${gates}. Приёмка выпуска опирается на полный прогон всех gates на цели (без неприменимости и переноса): исправьте провал обычной работой и повторите review-release`,
     );
   return reviewBranch(
     ctx,

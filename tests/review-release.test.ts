@@ -24,6 +24,7 @@ import {
   cliDataSchemas,
   codeReviewRecordSchema,
   digestOf,
+  gateDigest,
   leadDataSchema,
   type InputQuestion,
   type WorkState,
@@ -38,6 +39,7 @@ import {
   reviewRelease,
   type ReleaseReviewInput,
 } from '../src/control/review-release.ts';
+import { fullGatesProblem } from '../src/control/release-gates.ts';
 import { releaseReviewRequired, releaseReviewState } from '../src/control/release-review-state.ts';
 import { releaseDocsLine, releaseDocsState } from '../src/control/release-docs.ts';
 import { engineOf, graphOf, policyOf, ready } from './engine-fixture.ts';
@@ -111,7 +113,37 @@ function fixture(patch: (p: Record<string, any>) => void = () => {}) {
     stateDir: state,
     repoPath: (path: string) => path,
   };
-  const review = (input: ReleaseReviewInput = {}) => reviewRelease(ctx, input);
+  // Полный прогон gates на цели (alpha.71): здесь не предмет — записан
+  // проходящим итогом `harness gates`, как его оставил бы ведущий.
+  let seq = 0;
+  const fullGates = (sha: string, status = 'passed', definition?: string) => {
+    seq += 1;
+    const dir = join(state, 'gates-at', `GA-${sha.slice(0, 8)}-${seq}`);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(
+      join(dir, 'result.json'),
+      JSON.stringify({
+        // Каждый следующий итог позже прежнего: решает самый поздний.
+        at: new Date(Date.now() + seq * 1000).toISOString(),
+        data: {
+          id: 'GA-' + sha.slice(0, 8),
+          repositoryId: 'app',
+          sha,
+          passed: status === 'passed',
+          gates: policy.repositories[0]!.gates.map((g) => ({
+            gate: g.id,
+            status,
+            definition: definition ?? gateDigest(g),
+          })),
+        },
+      }),
+    );
+  };
+  const review = (input: ReleaseReviewInput = {}) => {
+    fullGates(input.head ?? git('rev-parse', targetRef));
+    return reviewRelease(ctx, input);
+  };
+  const reviewBare = (input: ReleaseReviewInput = {}) => reviewRelease(ctx, input);
   const heads = () => ({ app: git('rev-parse', targetRef) });
   return {
     ...env,
@@ -125,6 +157,9 @@ function fixture(patch: (p: Record<string, any>) => void = () => {}) {
     scenario,
     scenarioPath,
     review,
+    reviewBare,
+    fullGates,
+    state,
     heads,
   };
 }
@@ -685,4 +720,37 @@ test('ревью 3: отмена во время второго прохода �
     .split('\n')
     .filter((l) => l.startsWith('worktree '));
   assert.equal(trees.length, 1, trees.join('\n'));
+});
+
+test('ревью B, страховка выпуска: review-release без полного прогона gates на цели исполняет его сам и отказывает при провале; устаревший — заново; release done без него — отказ', async () => {
+  const f = fixture();
+  ready(f.engine, graphOf({ a: [] }));
+  accept(f.engine, f.base, f.head);
+  // Нет итога: review-release исполняет все gates на цели; gate unit на ней падает.
+  await assert.rejects(
+    () => f.reviewBare(),
+    (e: unknown) =>
+      e instanceof HarnessError &&
+      e.code === 'NOT_READY' &&
+      /полный прогон gates app .* не прошёл: unit/.test(e.message),
+  );
+  assert.match(fullGatesProblem(f.state, f.policy.repositories[0]!, f.head) ?? '', /не прошёл/);
+  // Устаревшее определение gate — прогон не годен.
+  f.fullGates(f.head, 'passed', 'f'.repeat(64));
+  assert.match(fullGatesProblem(f.state, f.policy.repositories[0]!, f.head) ?? '', /устарел/);
+  // Годный прогон — ревью идёт.
+  f.fullGates(f.head);
+  assert.equal(fullGatesProblem(f.state, f.policy.repositories[0]!, f.head), undefined);
+  const record = await f.reviewBare();
+  assert.equal(record.kind, 'release');
+  // release done: причина полного прогона — отказ при любом правиле ревью.
+  notReady(
+    () =>
+      releaseDone(f.engine, {
+        summary: 'готово',
+        heads: f.heads(),
+        fullGates: { app: 'нет полного прогона gates app' },
+      }),
+    /нет полного прогона gates app/,
+  );
 });

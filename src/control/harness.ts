@@ -78,6 +78,7 @@ import { staleArtifacts } from '../verification/confirm.ts';
 import { processListBackend } from '../verification/gates.ts';
 import { collectReportInput } from './report.ts';
 import { valueReport, type ValueReportOptions } from '../report/compute.ts';
+import { fullGatesProblem } from './release-gates.ts';
 
 export interface HarnessOptions {
   /** Каталог состояния исполнения: база, worktrees, артефакты. */
@@ -490,6 +491,7 @@ export class Harness {
   async releaseCheck(): Promise<{
     heads: Record<string, string>;
     contracts: Record<string, string>;
+    fullGates: Record<string, string | undefined>;
   }> {
     const heads = await this.targetHeads();
     const repositories = this.engine.read(
@@ -502,9 +504,11 @@ export class Harness {
         ),
     );
     const contracts: Record<string, string> = {};
+    const fullGates: Record<string, string | undefined> = {};
     for (const repo of this.policy.repositories) {
       const head = heads[repo.id];
       if (!head || !repositories.has(repo.id)) continue;
+      fullGates[repo.id] = fullGatesProblem(this.options.stateDir, repo, head);
       contracts[repo.id] = (
         await releaseContract(
           { engine: this.engine, policy: this.policy },
@@ -514,7 +518,7 @@ export class Harness {
         )
       ).digest;
     }
-    return { heads, contracts };
+    return { heads, contracts, fullGates };
   }
 
   /** Записать базу выпуска репозиториев (`release-base`) по текущим target ref. */
