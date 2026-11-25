@@ -67,6 +67,45 @@ export function releaseBaseOf(view: ExecutionView, repositoryId: string): string
     .sort((a, b) => a.startedAt.localeCompare(b.startedAt) || a.id.localeCompare(b.id))[0]?.baseSha;
 }
 
+/** Путь закреплённого документа Relay по его ID (`documents/<id>.md`, как в снимке коннектора). */
+const docPath = (id: string) => `documents/${id.replace(/[^A-Za-z0-9_-]/g, '_')}.md`;
+
+/**
+ * Документы-постановки источника Relay по его `references/provenance.json`:
+ * обязательные документы задачи (требования) и документы, чьё имя называет
+ * постановку, бриф или требования.
+ */
+function provenanceBriefs(source: {
+  references: { path: string; content: { encoding: string; data: string } }[];
+}): string[] {
+  const ref = source.references.find((r) => r.path === 'references/provenance.json');
+  if (!ref || ref.content.encoding !== 'utf8') return [];
+  try {
+    const value = JSON.parse(ref.content.data) as {
+      documents?: { id?: unknown; name?: unknown; key?: unknown; required?: unknown }[];
+    };
+    return (value.documents ?? [])
+      .filter(
+        (d) =>
+          typeof d.id === 'string' &&
+          (d.required === true ||
+            /бриф|brief|постановк|требован|requirement/i.test(
+              `${String(d.name)} ${String(d.key)}`,
+            )),
+      )
+      .map((d) => docPath(d.id as string));
+  } catch {
+    return [];
+  }
+}
+
+/** Постановок выпуска нет (`BRIEF_MISSING`): ни `.brief.md`, ни документа-постановки в контексте. */
+export const BRIEF_MISSING = 'BRIEF_MISSING';
+export const briefMissingLine = (view: ExecutionView) =>
+  releaseBriefsAndAnswers(view).briefs.length
+    ? undefined
+    : `${BRIEF_MISSING}: у выпуска нет постановки — ни .harness/work/<граф>.brief.md рядом с графом при run --graph, ни документа-постановки в закреплённом контексте; ревью выпуска сверяет только критерии работ. Закрепите бриф (документ Relay задачи или .brief.md) и повторите review-release`;
+
 /** Раздел `## Ответ`/`## Answer` документа Relay с непустым текстом (вопрос владельцу с ответом). */
 const answered = (text: string) => /^##\s+(?:ответ|answer)\s*#*\s*$\n+(?!\s*(?:##|$))/im.test(text);
 
@@ -86,18 +125,41 @@ export function releaseBriefsAndAnswers(view: ExecutionView) {
     if (g.approval?.context?.digest) digests.add(g.approval.context.digest);
   for (const a of view.attempts())
     if (a.contextSnapshot && (!done || a.startedAt > done)) digests.add(a.contextSnapshot);
+  // Ссылки критериев на постановку (`criteriaSources` kind brief, alpha.70).
+  const briefRefs = new Set(
+    view
+      .works()
+      .flatMap((w) => w.order.criteriaSources ?? [])
+      .filter((c) => c.kind === 'brief')
+      .map((c) => docPath(c.ref)),
+  );
   const answers = new Map<string, { source: string; path: string; text: string }>();
+  const docs = new Map<string, { graph: string; digest: string; text: string }>();
   for (const digest of [...digests].sort()) {
     const snapshot = view.local('context-snapshots', WORKSPACE_OWNER, digest);
-    for (const source of snapshot?.sources ?? [])
+    for (const source of snapshot?.sources ?? []) {
+      const briefPaths = new Set([...briefRefs, ...provenanceBriefs(source)]);
       for (const file of source.files) {
-        if (file.content.encoding !== 'utf8' || answers.has(file.digest)) continue;
+        if (file.content.encoding !== 'utf8') continue;
         const text = file.content.data;
-        if (source.kind === INPUT_SOURCE_KIND || (/\.md$/i.test(file.path) && answered(text)))
+        if (
+          !answers.has(file.digest) &&
+          (source.kind === INPUT_SOURCE_KIND || (/\.md$/i.test(file.path) && answered(text)))
+        )
           answers.set(file.digest, { source: source.id, path: file.path, text });
+        // Постановка в документе Relay (alpha.71, A1): документ, на который
+        // ссылаются критерии как на постановку, обязательный документ задачи
+        // или документ с именем постановки/брифа/требований.
+        else if (!docs.has(file.digest) && briefPaths.has(file.path))
+          docs.set(file.digest, {
+            graph: `${source.id}/${file.path}`,
+            digest: file.digest,
+            text,
+          });
       }
+    }
   }
-  return { briefs, answers: [...answers.values()] };
+  return { briefs: [...briefs, ...docs.values()], answers: [...answers.values()] };
 }
 
 /** Постановки и ответы владельца — разделы договора выпуска из состояния. */
@@ -242,7 +304,7 @@ export async function releaseContract(
       owner.briefs.length
         ? "(c) Briefs of the release (the user's own words; every scenario they describe must work in the accepted target, including its failure paths): " +
           owner.briefs.map((b) => `\n--- brief of graph ${b.graph}\n${b.text}`).join('')
-        : '(c) Briefs: none recorded (graphs registered without .brief.md).',
+        : `(c) Briefs: none recorded (${BRIEF_MISSING}: no .brief.md and no brief document in the pinned context). Review the release against the orders, and report every user scenario the orders imply but do not state as a note.`,
       owner.answers.length
         ? '(d) Owner answer documents from the pinned context (the release must follow them): ' +
           owner.answers.map((a) => `\n--- ${a.source}/${a.path}\n${a.text}`).join('')

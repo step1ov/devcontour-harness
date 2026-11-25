@@ -38,6 +38,7 @@ import { releaseDone } from '../src/control/lead.ts';
 import { FAILURE_PATHS_REVIEW_TEXT } from '../src/engine/prompt.ts';
 import {
   releaseBaseOf,
+  briefMissingLine,
   releaseContract,
   RELEASE_TOPOLOGY_FILE_LIMIT,
   reviewRelease,
@@ -818,4 +819,59 @@ test('A1: договор выпуска содержит постановку г
   const changed = await releaseContract(ctxOf, 'app', f.app, f.head);
   assert.notEqual(changed.digest, after.digest);
   assert.match(changed.prompt, /офлайн-загрузка/);
+});
+
+test('A1 (Relay): документ-постановка из закреплённого контекста — в разделе постановок; без постановки — BRIEF_MISSING', async () => {
+  const f = fixture();
+  ready(f.engine, graphOf({ a: [] }));
+  const ctxOf = { engine: f.engine, policy: f.policy };
+  // Ни .brief.md, ни документа-постановки: заметка BRIEF_MISSING.
+  assert.match(f.engine.read((v) => briefMissingLine(v)) ?? '', /^BRIEF_MISSING: /);
+  assert.match((await releaseContract(ctxOf, 'app', f.app, f.head)).prompt, /BRIEF_MISSING/);
+  const pinned = (path: string, data: string) => ({
+    path,
+    digest: sha256(data),
+    bytes: Buffer.byteLength(data),
+    content: { encoding: 'utf8' as const, data },
+  });
+  const brief = '# Каталог чая\n\nЗагрузка фото, оборвавшаяся посреди, не должна удалять снимки.\n';
+  const other = '# Заметки дизайнера\n\nЦвета.\n';
+  const provenance = JSON.stringify({
+    documents: [
+      { id: 'DOC-1', key: 'DOC-1', name: 'Исходная постановка', included: 'full', required: true },
+      { id: 'DOC-2', key: 'DOC-2', name: 'Заметки', included: 'full', required: false },
+    ],
+  });
+  const snapshot = {
+    apiVersion: API_VERSION,
+    sources: [
+      {
+        id: 'relay-a',
+        kind: 'relay-task',
+        version: '1',
+        required: true,
+        files: [pinned('documents/DOC-1.md', brief), pinned('documents/DOC-2.md', other)],
+        references: [pinned('references/provenance.json', provenance)],
+        digest: 'a'.repeat(64),
+      },
+    ],
+    missing: [],
+  };
+  const a = f.engine.claim('c1')!;
+  f.store.transact('run.phase', (tx) => {
+    tx.putLocal('context-snapshots', WORKSPACE_OWNER, 'c'.repeat(64), snapshot);
+    tx.putAttempt({ ...tx.attempt(a.id)!, contextSnapshot: 'c'.repeat(64) });
+  });
+  assert.equal(
+    f.engine.read((v) => briefMissingLine(v)),
+    undefined,
+  );
+  const contract = await releaseContract(ctxOf, 'app', f.app, f.head);
+  assert.match(contract.prompt, /\(c\) Briefs of the release[\s\S]*relay-a\/documents\/DOC-1\.md/);
+  assert.ok(contract.prompt.includes('не должна удалять снимки'));
+  assert.ok(
+    !contract.prompt.includes('Заметки дизайнера'),
+    'необязательный документ — не постановка',
+  );
+  assert.doesNotMatch(contract.prompt, /BRIEF_MISSING/);
 });

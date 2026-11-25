@@ -886,6 +886,12 @@ connector — is invisible unless you say it:
   owner answers and the deploy topology (`release.topology`: gateway/proxy
   configs, production env files). Blocking findings are fixed by works (plan
   them like any task), then run `review-release` again on the new target.
+  If `review-release` prints `BRIEF_MISSING`, the release has no brief.
+  There is no `.harness/work/<graph-id>.brief.md` next to a registered
+  graph, and no brief document (a required Relay task document, or one
+  named as the brief or requirements) in the pinned context. Pin the brief
+  document to the task, or write the `.brief.md` and register the graph
+  again, then rerun the review.
   Before the review, `review-release` needs a full `harness gates` run on
   the target: all gates, with no skips and no carry-over (alpha.71). If there
   is none, it ran on another target, or a gate definition changed since,

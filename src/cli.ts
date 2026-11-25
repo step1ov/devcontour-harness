@@ -125,6 +125,7 @@ import {
 import { leadOutline } from './control/outline.ts';
 import { parseDurationFlag } from './control/duration.ts';
 import { readyNotRunning } from './control/lead-end-warning.ts';
+import { briefMissingLine } from './control/review-release.ts';
 
 const usage = `harness ${HARNESS_VERSION}
 
@@ -2244,6 +2245,9 @@ async function run(
             AbortSignal.timeout(b.policy.runTimeoutMs + 5000),
           ]),
         });
+        // Постановки выпуска нет (alpha.71, A1): заметка в stderr, ответ прежний.
+        const missing = h.engine.read((view) => briefMissingLine(view));
+        if (missing) process.stderr.write(`harness: ${missing}\n`);
         return { command, data: record, code: record.approved ? 0 : exitCodes.refused };
       } finally {
         process.off('SIGINT', stop);
