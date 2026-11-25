@@ -1398,6 +1398,13 @@ async function run(
       const h = open(need('state'), b, false);
       try {
         const { graph, ctx } = await graphAndContext();
+        // Постановка графа (`<граф>.brief.md` рядом с графом, alpha.71 A1) —
+        // в состояние: её читает договор выпуска.
+        const briefPath = v.graph
+          ? need('graph').replace(/(\.draft)?\.json$/, '.brief.md')
+          : undefined;
+        if (briefPath && briefPath !== need('graph') && existsSync(briefPath))
+          h.engine.recordBrief(graph.id, readFileSync(briefPath, 'utf8'));
         const sink = sinkOf(v.sink, h, b.baseDir);
         const data = await h.run({
           graph,

@@ -25,6 +25,9 @@ import {
   codeReviewRecordSchema,
   digestOf,
   gateDigest,
+  sha256,
+  API_VERSION,
+  WORKSPACE_OWNER,
   leadDataSchema,
   type InputQuestion,
   type WorkState,
@@ -32,6 +35,7 @@ import {
 import type { Engine } from '../src/engine/engine.ts';
 import { cliAdapter } from '../src/agents/cli-adapter.ts';
 import { releaseDone } from '../src/control/lead.ts';
+import { FAILURE_PATHS_REVIEW_TEXT } from '../src/engine/prompt.ts';
 import {
   releaseBaseOf,
   releaseContract,
@@ -247,6 +251,8 @@ test('P7-6: review-release — договор выпуска в запросе: 
   assert.match(rec.id, /^RR-/);
   const prompt = recordedPrompt(f.scenarioPath, 'reviewer', 0);
   assert.match(prompt, /RELEASE CONTRACT/);
+  // A2: чеклист сбойных путей в ревью выпуска.
+  assert.ok(prompt.includes(FAILURE_PATHS_REVIEW_TEXT), 'чеклист сбойных путей');
   // (a) постановки и критерии приёмки
   assert.match(prompt, /Add a greeting function/);
   assert.match(prompt, /greet\('Ada'\) returns 'Hello, Ada!'/);
@@ -753,4 +759,63 @@ test('ревью B, страховка выпуска: review-release без п�
       }),
     /нет полного прогона gates app/,
   );
+});
+
+test('A1: договор выпуска содержит постановку графа и документы-ответы владельца из закреплённого контекста; смена постановки меняет digest', async () => {
+  const f = fixture();
+  ready(f.engine, graphOf({ a: [] }));
+  const ctxOf = { engine: f.engine, policy: f.policy };
+  const before = await releaseContract(ctxOf, 'app', f.app, f.head);
+  assert.match(before.prompt, /\(c\) Briefs: none recorded/);
+  assert.match(before.prompt, /\(d\) Owner answer documents: none pinned/);
+  const brief =
+    'Каталог чая с фото. Загрузка фото может оборваться — повтор не должен удалять снимки.';
+  assert.equal(f.engine.recordBrief('g1', brief), true);
+  assert.equal(f.engine.recordBrief('g1', brief), false, 'та же постановка — без записи');
+  // Документ-ответ владельца в закреплённом контексте попытки.
+  const pinned = (path: string, data: string) => ({
+    path,
+    digest: sha256(data),
+    bytes: Buffer.byteLength(data),
+    content: { encoding: 'utf8' as const, data },
+  });
+  const answer =
+    '# Вопрос: адрес медиа\n\n## Вопрос\nКак отдавать медиа?\n\n## Ответ\nЧерез шлюз /media.\n';
+  const question = '# Вопрос: цвет\n\n## Вопрос\nКакой цвет?\n\n## Ответ\n\n## Варианты\n- синий\n';
+  const snapshot = {
+    apiVersion: API_VERSION,
+    sources: [
+      {
+        id: 'relay-a',
+        kind: 'relay-task',
+        version: '1',
+        required: true,
+        files: [pinned('documents/DOC-1.md', answer), pinned('documents/DOC-2.md', question)],
+        references: [],
+        digest: 'a'.repeat(64),
+      },
+    ],
+    missing: [],
+  };
+  f.store.transact('run.phase', (tx) => {
+    tx.putLocal('context-snapshots', WORKSPACE_OWNER, 'c'.repeat(64), snapshot);
+    const a = tx.attempts()[0];
+    if (a) tx.putAttempt({ ...a, contextSnapshot: 'c'.repeat(64) });
+  });
+  if (!f.engine.read((v) => v.attempts().length)) {
+    const a = f.engine.claim('c1')!;
+    f.store.transact('run.phase', (tx) =>
+      tx.putAttempt({ ...tx.attempt(a.id)!, contextSnapshot: 'c'.repeat(64) }),
+    );
+  }
+  const after = await releaseContract(ctxOf, 'app', f.app, f.head);
+  assert.ok(after.prompt.includes(brief), 'постановка в договоре');
+  assert.ok(after.prompt.includes('Через шлюз /media.'), 'документ-ответ в договоре');
+  assert.ok(!after.prompt.includes('Какой цвет?'), 'вопрос без ответа — не ответ');
+  assert.notEqual(after.digest, before.digest);
+  // Новая редакция постановки — другой digest договора (раунд устаревает).
+  f.engine.recordBrief('g1', brief + ' И офлайн-загрузка не роняет экран.');
+  const changed = await releaseContract(ctxOf, 'app', f.app, f.head);
+  assert.notEqual(changed.digest, after.digest);
+  assert.match(changed.prompt, /офлайн-загрузка/);
 });

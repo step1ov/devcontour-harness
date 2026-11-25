@@ -15,6 +15,7 @@ import {
   type GraphState,
   type WorkState,
   WORKSPACE_OWNER,
+  INPUT_SOURCE_KIND,
   digestOf,
 } from '../contracts/index.ts';
 import { requestsOf } from '../engine/input-requests.ts';
@@ -64,6 +65,39 @@ export function releaseBaseOf(view: ExecutionView, repositoryId: string): string
     .attempts()
     .filter((a) => a.repositoryId === repositoryId && a.baseSha && (!done || a.startedAt > done))
     .sort((a, b) => a.startedAt.localeCompare(b.startedAt) || a.id.localeCompare(b.id))[0]?.baseSha;
+}
+
+/** Раздел `## Ответ`/`## Answer` документа Relay с непустым текстом (вопрос владельцу с ответом). */
+const answered = (text: string) => /^##\s+(?:ответ|answer)\s*#*\s*$\n+(?!\s*(?:##|$))/im.test(text);
+
+/**
+ * Постановки графов выпуска (`release-brief`, alpha.71 A1) и документы-ответы
+ * владельца из закреплённых контекстов графов и попыток: источники
+ * `input-answer` целиком и документы Relay с разделом «Ответ». Только записи
+ * после итога прежнего выпуска; документы — без повторов по digest.
+ */
+export function releaseBriefsAndAnswers(view: ExecutionView) {
+  const done = view.local('lead', WORKSPACE_OWNER, 'log')?.release?.doneAt;
+  const briefs = (view.local('release-brief', WORKSPACE_OWNER, 'briefs')?.items ?? [])
+    .filter((b) => !done || b.at >= done)
+    .map((b) => ({ graph: b.graphId, digest: b.digest, text: b.text }));
+  const digests = new Set<string>();
+  for (const g of view.graphs())
+    if (g.approval?.context?.digest) digests.add(g.approval.context.digest);
+  for (const a of view.attempts())
+    if (a.contextSnapshot && (!done || a.startedAt > done)) digests.add(a.contextSnapshot);
+  const answers = new Map<string, { source: string; path: string; text: string }>();
+  for (const digest of [...digests].sort()) {
+    const snapshot = view.local('context-snapshots', WORKSPACE_OWNER, digest);
+    for (const source of snapshot?.sources ?? [])
+      for (const file of source.files) {
+        if (file.content.encoding !== 'utf8' || answers.has(file.digest)) continue;
+        const text = file.content.data;
+        if (source.kind === INPUT_SOURCE_KIND || (/\.md$/i.test(file.path) && answered(text)))
+          answers.set(file.digest, { source: source.id, path: file.path, text });
+      }
+  }
+  return { briefs, answers: [...answers.values()] };
 }
 
 /** Постановки и ответы владельца — разделы договора выпуска из состояния. */
@@ -179,6 +213,7 @@ export async function releaseContract(
   sha: string,
 ): Promise<{ prompt: string; digest: string }> {
   const state = ctx.engine.read((v) => contractFromState(v, repositoryId));
+  const owner = ctx.engine.read((v) => releaseBriefsAndAnswers(v));
   const topology = ctx.policy.release?.topology ?? [];
   const files: { full: string; clipped: string }[] = [];
   for (const file of topology) {
@@ -204,11 +239,19 @@ export async function releaseContract(
         ? '(b) Owner answers to input requests: the release must follow them. ' +
           JSON.stringify(state.answers)
         : '(b) Owner answers: none recorded.',
+      owner.briefs.length
+        ? "(c) Briefs of the release (the user's own words; every scenario they describe must work in the accepted target, including its failure paths): " +
+          owner.briefs.map((b) => `\n--- brief of graph ${b.graph}\n${b.text}`).join('')
+        : '(c) Briefs: none recorded (graphs registered without .brief.md).',
+      owner.answers.length
+        ? '(d) Owner answer documents from the pinned context (the release must follow them): ' +
+          owner.answers.map((a) => `\n--- ${a.source}/${a.path}\n${a.text}`).join('')
+        : '(d) Owner answer documents: none pinned.',
       topology.length
-        ? '(c) Deploy topology (policy release.topology, read from head):\n' + list.join('\n')
-        : '(c) Deploy topology: the policy names no topology files (release.topology). Find the production gateway/proxy configs and production env files in the checkout yourself; their absence for a deployed app is a finding.',
+        ? '(e) Deploy topology (policy release.topology, read from head):\n' + list.join('\n')
+        : '(e) Deploy topology: the policy names no topology files (release.topology). Find the production gateway/proxy configs and production env files in the checkout yourself; their absence for a deployed app is a finding.',
       'Topology check: compare the production routing and env (gateway/proxy routes, production env files, public base URLs for media, uploads and API) with what the gates and tests exercised (often the API port directly). Every user-visible URL the works produce must be routed by the production gateway; report mismatches as blocking.',
-      '(d) The diff base..head follows.',
+      '(f) The diff base..head follows.',
     ].join('\n\n');
   return {
     prompt: clip(compose(files.map((f) => f.clipped)), RELEASE_CONTRACT_LIMIT),

@@ -148,6 +148,32 @@ export const ENVIRONMENT_BLOCK_WRITER_TEXT =
 
 /** Запрос исполнителю или reviewer: исходные критерии, область, прежние находки, контекст. */
 /**
+ * Сбойные пути пользовательских сценариев (alpha.71, A2/A3): ревью попытки
+ * и выпуска проверяет их как часть приёмки, исполнитель — до сдачи.
+ * Сценарий постановки, ломающийся на сбойном пути, — блокирующая находка.
+ */
+export const FAILURE_PATHS = [
+  'the response is lost or times out (the client retries or gives up)',
+  'the same request is retried or submitted twice',
+  'the client is offline or the network drops mid-request',
+  'a dependency (database, queue, storage, external API) is down or slow',
+  'state is expired or abandoned (an upload, session, reservation or link left half-way)',
+  'concurrent requests touch the same data',
+] as const;
+
+/** Чеклист сбойных путей для reviewer (попытка и выпуск). */
+export const FAILURE_PATHS_REVIEW_TEXT =
+  'Failure paths: for each user scenario in the order (and in the brief), check what happens when ' +
+  FAILURE_PATHS.join('; ') +
+  '. A scenario that loses or corrupts data, deletes what it should keep, gets stuck in an error that a retry cannot clear, or takes down another page or screen on such a path is a blocking finding, even when no acceptance criterion names that path.';
+
+/** Тот же чеклист исполнителю: проверить до сдачи. */
+export const FAILURE_PATHS_WRITER_TEXT =
+  'Before you hand back, check the failure paths of your scenarios and handle them: ' +
+  FAILURE_PATHS.join('; ') +
+  '. The reviewer rejects a scenario that breaks on one of these paths even when no acceptance criterion names it.';
+
+/**
  * Самопроверка исполнителя (alpha.71): те же команды gates области, что
  * исполнит harness, — до сдачи. Доверенная проверка остаётся за harness.
  */
@@ -215,6 +241,7 @@ export function prompt(input: {
       : '',
     'Gates that prove this work: ' + JSON.stringify(input.gates),
     review ? '' : WRITER_SELF_CHECK_TEXT,
+    review ? FAILURE_PATHS_REVIEW_TEXT : FAILURE_PATHS_WRITER_TEXT,
     (review && input.findings
       ? 'Historical attempt errors and gate observations (diagnostic context only). Only controller-issued ids in the review findings sections below may appear in `previous`; do not derive ids from this history: '
       : 'Previous attempts, with the findings each review left. Address every finding that is still open first and say what you changed for it: ') +

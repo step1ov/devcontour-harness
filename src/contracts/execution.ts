@@ -1631,6 +1631,24 @@ export const localSchemas = {
     /** `attempt` — выпуск, начатый до alpha.69: база самой ранней его попытки. */
     source: z.enum(['register', 'outline', 'attempt']),
   }),
+  /**
+   * Постановки выпуска (alpha.71, A1): запись `briefs` у `@workspace` —
+   * текст `.brief.md` каждого зарегистрированного графа (до 512 KiB, длиннее
+   * — с пометкой обрезки), его digest по полному тексту и время записи.
+   * Читает договор выпуска (`review-release`); пишет регистрация графа.
+   */
+  'release-brief': z.strictObject({
+    items: z
+      .array(
+        z.strictObject({
+          graphId: idSchema,
+          digest: digestSchema,
+          at: isoTimeSchema,
+          text: z.string().max(600 * 1024),
+        }),
+      )
+      .max(20),
+  }),
   'round-epochs': z.strictObject({
     epochs: z.array(z.strictObject({ at: isoTimeSchema, workId: idSchema })).max(100),
   }),

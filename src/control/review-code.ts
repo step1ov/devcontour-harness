@@ -1,3 +1,4 @@
+import { FAILURE_PATHS_REVIEW_TEXT } from '../engine/prompt.ts';
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, rm, rmdir, stat, writeFile } from 'node:fs/promises';
@@ -385,7 +386,7 @@ export async function reviewBranch(
 
   const prompt = [
     release
-      ? 'You independently review a release before it is declared done: the accepted target of all works of this release. Do not edit files. Every work already passed its own gates and per-attempt review; your job is the release as a whole against the RELEASE CONTRACT below: the orders and their acceptance criteria, the owner answers and the deploy topology. Check that what the tests exercised is what production will run: production routing and environment (gateway/proxy configs, production env files, public URLs of media, uploads and API) must route every user-visible path the works added, not only the API port the tests called directly. A missing or inconsistent production route, env value or deploy step is a blocking finding. Report concrete findings with path, line, rule, consequence and evidence.'
+      ? 'You independently review a release before it is declared done: the accepted target of all works of this release. Do not edit files. Every work already passed its own gates and per-attempt review; your job is the release as a whole against the RELEASE CONTRACT below: the orders and their acceptance criteria, the briefs, the owner answers and answer documents, and the deploy topology. Check that what the tests exercised is what production will run: production routing and environment (gateway/proxy configs, production env files, public URLs of media, uploads and API) must route every user-visible path the works added, not only the API port the tests called directly. A missing or inconsistent production route, env value or deploy step is a blocking finding. Report concrete findings with path, line, rule, consequence and evidence.'
       : 'You independently review an already written branch: code written outside the harness. Do not edit files. This is a technical review, not acceptance. Reject missing tests, weakened tests or checks, policy changes and unsafe changes. Report concrete findings with path, line, rule, consequence and evidence.',
     `Role: ${role}. Repository: ${repo.id}. Author: ${author}. Review subject round ${round}.`,
     `Base ${input.base} (${base}); merge base ${mergeBase}; head ${input.head} (${head}); ${commits} commits, ${names.length} files. The working directory is a detached checkout of head.`,
@@ -398,6 +399,7 @@ export async function reviewBranch(
         JSON.stringify(open.map((f) => ({ id: f.id, severity: f.severity, message: f.message })))
       : '',
     contract?.prompt ?? '',
+    release ? FAILURE_PATHS_REVIEW_TEXT : '',
     'Report execution.commands or an empty list with execution.noCommandsReason. Findings need a message; use null where a field does not apply.',
     names.length
       ? 'Exact diff to review:\n' + diff

@@ -4930,6 +4930,33 @@ export class Engine {
    * выпуска — нет записи или она старше итога прежнего выпуска (`release
    * done`). Записанная база не переписывается. Возвращает записанные.
    */
+  /**
+   * Записать постановку графа (`.brief.md`, alpha.71 A1) для договора
+   * выпуска: тот же digest — без записи; новая постановка того же графа
+   * заменяет прежнюю. Текст длиннее 512 KiB хранится обрезанным с
+   * пометкой, digest — по полному тексту.
+   */
+  recordBrief(graphId: string, text: string) {
+    const digest = sha256(text);
+    const limit = 512 * 1024;
+    const stored =
+      text.length > limit
+        ? text.slice(0, limit) + `\n[обрезано: ${text.length - limit} символов]`
+        : text;
+    return this.tx('lead.recorded', (tx) => {
+      const prev = tx.local('release-brief', WORKSPACE_OWNER, 'briefs')?.items ?? [];
+      if (prev.some((b) => b.graphId === graphId && b.digest === digest)) return false;
+      const at = new Date(this.now()).toISOString();
+      tx.putLocal('release-brief', WORKSPACE_OWNER, 'briefs', {
+        items: [
+          ...prev.filter((b) => b.graphId !== graphId),
+          { graphId, digest, at, text: stored },
+        ].slice(-20),
+      });
+      return true;
+    });
+  }
+
   recordReleaseBases(
     heads: Record<string, string>,
     source: 'register' | 'outline',
