@@ -96,3 +96,16 @@ export function standaloneScope(gates: Gate[], ids: string[]): string[] {
   const all = new Set(ids.flatMap((id) => [...gatePrerequisites(gates, id), id]));
   return gates.map((g) => g.id).filter((g) => all.has(g));
 }
+
+/**
+ * Область фазы с gate, на котором упала прежняя попытка поручения, первым
+ * (alpha.71): его предпосылки (`gatePrerequisites`, явные и неявные) и он сам
+ * идут в начале в порядке области, остальные — в прежнем порядке. Провал,
+ * который повторится, виден за время самого gate, а не после всех более
+ * ранних. `failed` вне области или не задан — область без изменений.
+ */
+export function failedFirst<T extends Gate>(gates: Gate[], scope: T[], failed?: string): T[] {
+  if (!failed || !scope.some((g) => g.id === failed)) return scope;
+  const head = new Set([...gatePrerequisites(gates, failed), failed]);
+  return [...scope.filter((g) => head.has(g.id)), ...scope.filter((g) => !head.has(g.id))];
+}

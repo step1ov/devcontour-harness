@@ -162,7 +162,7 @@ import {
   type ChangeOutcome,
   type LivenessChange,
 } from './stall-sweep.ts';
-import { gatePrerequisites, orderedScope } from '../verification/gate-scope.ts';
+import { failedFirst, gatePrerequisites, orderedScope } from '../verification/gate-scope.ts';
 import { REUSED_LABEL } from '../verification/integration-reuse.ts';
 import {
   changedPaths,
@@ -2338,7 +2338,7 @@ export class Runner {
                 attempt,
                 work,
                 repo,
-                gates,
+                failedFirst(repo.gates, gates, this.failedGate(attempt)),
                 'candidate',
                 cwd,
                 sha,
@@ -3142,6 +3142,25 @@ export class Runner {
       (error.properties?.bound.length ?? 0) + (error.properties?.unbound.length ?? 0) > 0;
     if (!error.exitOnly || named || !candidatePassed) return error;
     return new ReapedGate('environment', error.message, undefined, 'process-reap');
+  }
+
+  /**
+   * Gate, на котором упала прежняя попытка поручения (её последняя
+   * собственная запись `test` — провал), или undefined. Gates исполняются
+   * по одному и первый провал останавливает фазу, поэтому последняя запись —
+   * решающая; повтор, прошедший как flaky, провалом не считается.
+   */
+  private failedGate(attempt: AttemptState): string | undefined {
+    return this.engine.read((v) => {
+      const prior = v
+        .attempts(attempt.workId)
+        .filter((a) => a.attempt < attempt.attempt && a.status !== 'active')
+        .sort((a, b) => a.attempt - b.attempt)
+        .at(-1);
+      if (!prior || prior.status === 'succeeded') return undefined;
+      const last = prior.evidence.findLast((e) => e.kind === 'test' && e.consumer === undefined);
+      return last && !last.passed ? last.gate : undefined;
+    });
   }
 
   /**
@@ -4821,7 +4840,12 @@ export class Runner {
         );
     }
     this.engine.phase(attempt.id, attempt.token, 'integrating', { integrationSha: sha });
-    const gates = ordered(repo.gates, attempt.requiredGates ?? repo.gates.map((g) => g.id));
+    // Gate, на котором упала прежняя попытка, — первым (`failedFirst`).
+    const gates = failedFirst(
+      repo.gates,
+      ordered(repo.gates, attempt.requiredGates ?? repo.gates.map((g) => g.id)),
+      this.failedGate(attempt),
+    );
     // Выходы генераторов кандидата построены на его базе: на слиянии с
     // текущей они обязаны остаться прежними (после gates установки:
     // генератору нужны зависимости проекта), иначе повтор от неё.
