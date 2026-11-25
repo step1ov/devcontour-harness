@@ -519,8 +519,9 @@ id>"]`. The hypothesis is required for `coverage` and `approach` and must be
 new for the work. The next attempt gets the cause and the hypothesis in its
 prompt; then `$H retry --work <id>` or `$H run` continues.
 
-**The same defect twice in a row.** When two consecutive counted failures
-have the same failure fingerprint or the same blocking review finding, the
+**The same defect twice in a row.** When two consecutive counted gate or
+review failures have the same failure fingerprint or the same blocking
+review finding, the
 work is held for your diagnosis whatever `diagnoseAfter` says, harness does
 not retry it on its own, and the diagnosis needs a `--hypothesis`. The next
 attempt starts from a clean tree instead of continuing the failed patch, so
@@ -544,7 +545,8 @@ on the same order.
 **Attempts exhausted (`ATTEMPTS_EXHAUSTED`).** If `explain` says `actor:
 lead`, it is yours: with `diagnose`, diagnose the last failure first; with
 `reset-attempts`, a fresh technical diagnosis exists (`coverage`, `approach`,
-`other` with a hypothesis, or `environment` with evidence) and you grant a
+`other` with a hypothesis, or `environment` with evidence when every
+diagnosed failure was classified as environment by harness) and you grant a
 new attempt limit yourself:
 `$H retry --state D --work <id> --reset --by lead --diagnosis <D…>`. You may
 do this `recovery.leadResets` times per work budget (default 2), only after a
@@ -582,11 +584,13 @@ context, then retry or split the task.
 The gate command could not find its program or browser. Examples:
 `Command "playwright" not found`, `sh: vitest: not found`,
 `Executable doesn't exist … playwright install`. Another case is pnpm
-refusing its task state path. The task change did not touch manifests or
-lockfiles, so this is the gate's or the environment's fault: the attempt is
-not counted, the writer is not retried, and the gate is held. Install the
-tool or browser, or fix the gate command, then `$H retry --work <id> --by
-lead`. When the change did touch manifests, it stays a counted gate failure.
+refusing its task state path. It is held only when this is the only failure
+signal, a harness probe in the gate environment confirmed the tool is
+absent, and the change touched no manifest, lockfile, file named in the gate
+command, wrapper script or test config and added no call to that name. Then
+the attempt is not counted, the writer is not retried, and the gate is held.
+Install the tool or browser, or fix the gate command, then `$H retry --work
+<id> --by lead`. Otherwise it stays a counted gate failure with the reason.
 
 **A gate needs `ps` (`GATE_SANDBOX_PROCESS_LIST`, cause
 `sandbox-process-list`).** The gate ran `ps`, `pgrep` or `top` inside the OS
