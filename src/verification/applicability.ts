@@ -216,6 +216,9 @@ export async function changedPaths(
 const installInputs =
   /(^|\/)(package\.json|package-lock\.json|npm-shrinkwrap\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|yarn\.lock|\.yarnrc\.yml|bun\.lockb?|\.npmrc|\.pnpmfile\.cjs|\.nvmrc|\.node-version|\.tool-versions|Cargo\.toml|Cargo\.lock|go\.mod|go\.sum|go\.work|go\.work\.sum|pyproject\.toml|poetry\.lock|uv\.lock|Pipfile|Pipfile\.lock|requirements[^/]*\.txt|Gemfile|Gemfile\.lock|composer\.json|composer\.lock|\.gitattributes|\.gitmodules|\.lfsconfig)$/i;
 
+/** Путь — манифест, lockfile или версия инструмента (`installInputs`). */
+export const isInstallInput = (path: string) => installInputs.test(path);
+
 const fold = (path: string) => path.normalize('NFC').toLowerCase();
 /** Путь внутри префикса (без учёта регистра, NFC): лишнее совпадение только чаще исполняет gate. */
 const under = (raw: string, rawPrefix: string) => {

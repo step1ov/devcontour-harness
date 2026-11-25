@@ -46,6 +46,16 @@ const transportFailure = (message: string) =>
     message,
   );
 
+/**
+ * Реестр образов или пакетов оборвал загрузку (alpha.71, C1): `EOF`,
+ * таймаут TLS или ввода-вывода, предел частоты реестра при pull. Ищется и в
+ * выводе шага: это единственное место, где docker compose называет причину.
+ */
+export const registryPullFailure = (full: string) =>
+  /\bregistry[^\s"']*\/v2\/[^\s"']*"?:?\s*EOF\b|\b(?:error pulling|failed to pull|pull access denied|error response from daemon: Get)\b[\s\S]{0,300}?\b(?:EOF|i\/o timeout|TLS handshake timeout|connection reset by peer|context deadline exceeded)\b|\btoomanyrequests\b|net\/http: (?:request canceled|TLS handshake timeout)/i.test(
+    full,
+  );
+
 /** Класс отказа для случаев, где он не поставлен в точке обнаружения. */
 /** Отказ движка с кодом, который сам называет класс отказа попытки. */
 const byCode: Partial<Record<ErrorCode, FailureKind>> = {
@@ -63,12 +73,14 @@ export function classifyFailure(error: unknown, full: string): FailureKind {
   // окружения — ресурсы попытки не освобождены.
   if (error instanceof CleanupFailure)
     return error.original ? classifyFailure(error.original, full) : 'environment';
-  if (error instanceof TaskFailure) return error.kind;
+  // Неизвестный класс шага окружения, а вывод называет обрыв реестра: окружение.
+  if (error instanceof TaskFailure)
+    return error.kind === 'unknown' && registryPullFailure(full) ? 'environment' : error.kind;
   // Приёмка отказала по правилу (нет доказательства, ревью, область): класс —
   // это правило, а не «неизвестно».
   if (error instanceof HarnessError && byCode[error.code]) return byCode[error.code]!;
   if (providerRefusal(message)) return 'provider-auth';
-  if (transportFailure(message)) return 'environment';
+  if (transportFailure(message) || registryPullFailure(full)) return 'environment';
   // Поле `timeout=false` в сообщении шага («Шаг X: exit=1; timeout=false»)
   // говорит как раз, что предела не было: оно не признак превышения времени.
   if (
@@ -118,6 +130,7 @@ export function environmentCauseOf(
   if (error instanceof CleanupFailure)
     return error.original ? environmentCauseOf(error.original, full, kind) : 'cleanup';
   if (error instanceof TaskFailure && error.diagnosis) return error.diagnosis;
+  if (registryPullFailure(full)) return 'dependency-network';
   if (
     transportFailure(message) ||
     /econnreset|epipe|socket hang up|connection reset|stream closed|channel closed|fetch failed|network error/i.test(

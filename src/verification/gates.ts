@@ -72,6 +72,8 @@ import {
 import { keepGateArtifacts } from './gate-artifacts.ts';
 import { uiFailureArtifacts, uiGateEnvironment } from './ui-gates.ts';
 import { ReapedGate } from './reaped.ts';
+import { GATE_TOOL_MISSING, toolMissingFailure } from './gate-tooling.ts';
+import { changedPaths, isInstallInput } from './applicability.ts';
 import {
   processListCall,
   processListCallPatterns,
@@ -1685,6 +1687,33 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
             redact(network),
             `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`,
           ),
+        );
+      }
+      // Отказ инструмента gate (alpha.71, C1): программа или браузер не
+      // найдены, pnpm отказал по каталогу состояния — правка команды gate
+      // или окружения. Изменение задачи не трогало манифесты и lockfile —
+      // попытка не засчитана, gate удержан до хода ведущего (`gate-definition`);
+      // трогало — исполнитель мог сам убрать инструмент: засчитанный провал.
+      const tool =
+        !property && !reaped && !run.consumer
+          ? toolMissingFailure(result.stdout + '\n' + result.stderr, failureTexts)
+          : undefined;
+      if (tool) {
+        const base = run.trustedBase;
+        const touched =
+          base && base !== sha
+            ? (await changedPaths(cwd, [{ from: base, to: sha }])).files.some(isInstallInput)
+            : false;
+        if (!touched) {
+          kind = 'environment';
+          cause = 'gate-definition';
+          throw new Error(
+            `${NO_RETRY_GATE_CODES['gate-definition']}: ${GATE_TOOL_MISSING}: ${redact(tool)} — команда gate не нашла инструмент (или менеджер пакетов отказал по своему окружению); это правка команды gate или окружения, а не кода задачи: попытка не засчитана, ход ведущего — починить gate или окружение и повторить (retry --by lead). ` +
+              `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`,
+          );
+        }
+        partialNotes.push(
+          `${GATE_TOOL_MISSING}: ${redact(tool)}; изменение задачи меняет манифесты или lockfile — провал засчитан`,
         );
       }
       // Провал назван только кодом выхода (без упавших случаев отчёта).

@@ -190,9 +190,14 @@ export const environmentCauseCatalog: Record<EnvironmentCause, Omit<FailureCatal
     ],
   },
   'gate-definition': {
-    meaning: 'Gate молча падает и на базе: правка команды gate, а не кода задачи; gate удержан.',
+    meaning:
+      'Gate молча падает и на базе или его команда не нашла инструмент или браузер (GATE_TOOL_MISSING): правка команды gate или окружения, а не кода задачи; gate удержан.',
     actor: 'lead',
-    fixes: ['поменять команду gate, чтобы при провале она печатала выжимку', 'retry --by lead'],
+    fixes: [
+      'поменять команду gate, чтобы при провале она печатала выжимку',
+      'установить инструмент или браузер, поправить команду gate',
+      'retry --by lead',
+    ],
   },
   'dependency-network': {
     meaning: 'Установка зависимостей не достала реестр.',
