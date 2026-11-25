@@ -2385,8 +2385,8 @@ verdict, findings, notes, at, earlier?}`): по попытке и фазе
 | other, components: [{id, title, size?: S | M | L, tasks?: 1–50, actor:
 writers | environment | owner, works?: [ID работы или ключ задачи]}]}],
 reason?}` (не больше 12 этапов, 20 компонентов в этапе, 60 всего; ID
-  уникальны). Объём компонента в задачах: `tasks`, иначе размер S = 1, M = 2,
-  L = 4 (`OUTLINE_SIZE_UNITS`). Локальная запись `release-outline`
+  уникальны). Объём компонента в задачах: `tasks`, иначе размер S = 1,
+  M = 1–2 (считается 2), L = 2–3 (считается 3; alpha.71) (`OUTLINE_SIZE_UNITS`). Локальная запись `release-outline`
   (`releaseOutlineSchema`: `revision`, `recordedAt`, `firstRecordedAt`,
   `stages`, `units`, `changes[]`); `stateVersion` прежний. Тот же план —
   `changed: false`; другой — новая редакция и изменение `{at, revision,

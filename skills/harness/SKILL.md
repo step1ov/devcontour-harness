@@ -183,7 +183,13 @@ outline with a reason when the plan grows.
    ids (`app`, `developer`, `unit`) are placeholders to replace. Take
    `repositoryId`, `role`, `gates`, `contextPacks`, `resources` and
    `contracts` only from the request; copy requirement `id`, `source`, `text`
-   and `digest` exactly, never invent ids or digests. Task keys become order
+   and `digest` exactly, never invent ids or digests. Size tasks by user
+   scenario (alpha.71): one task per coherent scenario through all its layers.
+   Split only by repository, or when the parts are independent and can be
+   accepted separately. A few larger tasks beat many slices that each pay for
+   gates and review. Shared test infrastructure that only the first product
+   task needs (an acceptance launcher, fixtures) goes inside that task, not
+   into a separate work. Task keys become order
    ids; `description` becomes the goal; omitted `writePaths` mean the whole
    repository. Scope each task's `gates` to the gates that cover its
    criteria and the packages it touches: a web-only task does not list the
@@ -866,7 +872,8 @@ connector — is invisible unless you say it:
   `run` the state directory is not bound yet: add `--policy <policy>` once —
   it binds and creates the state like `run` does) with
   `{"stages":[{"id":"infra","title":"Инфраструктура","kind":"infra","components":[{"id":"api-infra","title":"API: сборка и gates","size":"S","actor":"writers"}]},{"id":"product","title":"Продукт","kind":"product","components":[{"id":"site","title":"Сайт","size":"M","actor":"writers","works":["site-form"]}]},{"id":"deploy","title":"Выкладка","kind":"deploy","components":[{"id":"staging","title":"Стенд","size":"S","actor":"owner"}]}]}`
-  (`kind`: infra | product | deploy | other; `size`: S = 1, M = 2, L = 4 tasks,
+  (`kind`: infra | product | deploy | other; `size`: S = 1, M = 1–2, L = 2–3 tasks,
+  counted as 1, 2 and 3 in the forecast,
   or `tasks: N`; `actor`: writers | environment | owner; optional `works`
   names the work IDs or task keys of a component). The forecast then counts
   the unregistered parts as release volume instead of reading one graph as
@@ -888,7 +895,7 @@ connector — is invisible unless you say it:
   them like any task), then run `review-release` again on the new target.
   If `review-release` prints `BRIEF_MISSING`, the release has no brief.
   There is no `.harness/work/<graph-id>.brief.md` next to a registered
-  graph, and no brief document (a required Relay task document, or one
+  graph, and no brief document (a required task-source document, or one
   named as the brief or requirements) in the pinned context. Pin the brief
   document to the task, or write the `.brief.md` and register the graph
   again, then rerun the review.

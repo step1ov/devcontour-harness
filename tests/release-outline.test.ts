@@ -121,16 +121,16 @@ test('alpha.68: lead outline — запись, та же редакция, ро�
     at: undefined,
     revision: 2,
     before: 7,
-    after: 11,
+    after: 10,
     added: ['Фото'],
     removed: [],
-    reason: 'план вырос: +Фото (было ~7 задач → стало ~11 задач)',
+    reason: 'план вырос: +Фото (было ~7 задач → стало ~10 задач)',
   });
   const log = env.engine.read((v) => v.local('lead', WORKSPACE_OWNER, 'log'))!;
   const journal = log.entries.filter((e) => e.action === 'lead.outline').map((e) => e.plain);
   assert.deepEqual(journal, [
     'ведущий записал план выпуска: 3 этапа, ~7 задач',
-    'ведущий обновил план выпуска: план вырос: +Фото (было ~7 задач → стало ~11 задач)',
+    'ведущий обновил план выпуска: план вырос: +Фото (было ~7 задач → стало ~10 задач)',
   ]);
   // Явная причина главнее разницы.
   grown.stages[1]!.components.pop();

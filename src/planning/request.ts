@@ -18,6 +18,14 @@ export interface PlanningRequest {
 }
 
 /**
+ * Размер задачи (alpha.71, D1/D2): одна задача на связный сценарий через
+ * слои; общая тестовая инфраструктура первой задачи — внутри неё. Совет, не
+ * проверка.
+ */
+export const TASK_SIZE_SECTION =
+  'Size tasks by user scenario: one task per coherent user scenario, through every layer it needs (API, UI, data, tests). Split a scenario only by repository, or when its parts are truly independent and can be accepted separately. Shared test infrastructure (an acceptance launcher, fixtures, a test harness) that only the first product task needs belongs inside that task, not in a separate one.';
+
+/**
  * Область gates задачи (alpha.71): только gates, покрывающие её критерии и
  * затронутые пакеты, — совет, не проверка.
  */
@@ -32,6 +40,7 @@ export const GATE_SCOPE_SECTION =
 function sharedSections(facts: PlanningFacts, recommendedTasks: number): string[] {
   return [
     `Inspect the repository read-only. Propose a small first vertical slice, at most ${recommendedTasks} tasks. Do not edit files, run implementation agents, commit, or mark tasks done. Independent plan review follows; the coordinator handles approval according to project policy.`,
+    TASK_SIZE_SECTION,
     "Declared roles, by repository. A task may only use a role declared for its own repository; no other role exists. Where a role has writePaths, the task's writePaths must lie inside them, or the executor can change nothing. A role marked requiresContract needs an approved contract bound to its task: " +
       JSON.stringify(facts.roles),
     'Configured checks, by repository. A task proves itself with gates: a subset of these that must include a test gate; a named group is referenced as "@name" instead of listing its members, and nothing is inherited implicitly. A task in a library proves its consumers only when it declares them: consumers lists dependent components and their gates or groups, run against the integrated result of the task. Requirements link to a test gate from that same subset: ' +
@@ -58,7 +67,7 @@ function sharedSections(facts: PlanningFacts, recommendedTasks: number): string[
 /** Read-only запрос планирования (OP-PLAN-01): чистая функция, модель не вызывает. */
 export function planningRequest(input: PlanningInput): PlanningRequest {
   const { brief, facts } = input;
-  const recommendedTasks = input.recommendedTasks ?? 15;
+  const recommendedTasks = input.recommendedTasks ?? 5;
   if (!facts.roles.some((r) => r.roles.length > 0))
     throw new HarnessError(
       'INVALID_INPUT',
