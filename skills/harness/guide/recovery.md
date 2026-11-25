@@ -2,6 +2,13 @@
 
 ### 8. When it stops
 
+**Check `explain` before you retry.** Harness retries some failures itself:
+a single timeout or stall (a second one in a row needs your diagnosis), and
+a no-retry environment failure whose gate hold a fix has lifted. Then
+`explain` (and `wait`'s `next`) says `actor: controller`, `action: retry`.
+Do not run `retry --by lead` then: you would race the controller. Retry
+yourself only when `explain` names you.
+
 `$H explain --state <state> --policy .harness/policy.json [--work <id>]` is
 read only (no retries, model calls or state changes). For every stopped order
 it returns `code`, `cause`, `phase`, `actor`, `action`, `retryPlanned`,
@@ -152,7 +159,9 @@ fail the same way, and the attempt is not counted. It is your move (explain:
 `lead`, `fix-environment`). While you have not, the gate is held: other works
 of that repository that need it are not started (`ENVIRONMENT_GATE_HELD`,
 `lead`, `fix-environment`; `view.resources.gates.heldLine`). Changing the
-gate definition lifts the hold by itself; after fixing the test instead, run
+gate definition (or the sandbox becoming able to list processes) lifts the
+hold by itself, and then harness retries the held work itself
+(`work.retried`, `by: recovery`). After fixing the test instead, run
 `$H retry --work <id> --by lead` on the stopped work. When the task change
 itself added the `ps` call (the base has none), it is a normal counted gate
 failure for the writer («тест вызывает ps … уберите вызов»), not this case.

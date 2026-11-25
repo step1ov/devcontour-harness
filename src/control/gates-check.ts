@@ -80,9 +80,11 @@ export async function commitOf(path: string, rev: string, repositoryId: string) 
  * Gates на коммите вне попытки (`harness gates`): то же исполнение, что
  * `runGatesAt` — отдельное рабочее дерево, снимки зависимостей, ресурсы,
  * lifecycle и prepare, окружение фазы `integration`, песочница. Попытка не
- * создаётся, состояние поручений и база состояния не открываются: evidence
- * возвращается вызывающему и никуда не записывается. Логи gates остаются в
- * `<stateDir>/gates-at/<id>`.
+ * создаётся, поручения не меняются: evidence возвращается вызывающему, итог
+ * пишется рядом с логами (`<stateDir>/gates-at/<id>/result.json`). Запись
+ * прогона в состояние (`gates-runs`, alpha.71) делает вызывающий —
+ * `recordGatesRun` (CLI `gates`, `review-release`); прерванный прогон не
+ * записывается.
  */
 export async function checkGates(input: GateCheckInput) {
   const { policy } = input;
