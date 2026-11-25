@@ -267,6 +267,8 @@ export function stopInputsIn(
       else byGraph.set(w.graphId, [w]);
     }
     const recovery = recoveryPolicyOf(h.policy);
+    let holds: ReturnType<typeof h.engine.environmentGateHolds> | undefined;
+    const activeHolds = () => (holds ??= h.engine.environmentGateHolds(v));
     const holdById = memo((id: string) =>
       recovery.enabled
         ? leadHold(byId.get(id)!, attemptsOf(id), recovery, options.maxAttempts)
@@ -279,6 +281,7 @@ export function stopInputsIn(
       attemptsOf,
       requestsOf: requestsById,
       leadHold: (w) => holdById(w.id),
+      holdFixed: (w) => !!w.environmentHold && !activeHolds().some((x) => x.workId === w.id),
     };
     const groupOf = memo((graphId: string): Map<string, Outlook> => {
       const job = jobOf(graphId, firstOf.get(graphId)!);
@@ -675,6 +678,8 @@ interface OutlookContext {
   requestsOf: (workId: string) => InputRequest[];
   /** Удержание правилом восстановления ведущим (`Engine.leadHoldOf`). */
   leadHold: (w: WorkState) => LeadHold | undefined;
+  /** Удержание gate работы снято исправлением (`repairDecision.holdFixed`). */
+  holdFixed: (w: WorkState) => boolean;
 }
 
 /**
@@ -788,6 +793,7 @@ function outlookOf(
       budgetLeft: options.repairBudget - used,
       maxAttempts: options.maxAttempts,
       leadHold: ctx.leadHold,
+      holdFixed: ctx.holdFixed,
     });
     if (!decision || decision.action === 'stop') return out;
   }

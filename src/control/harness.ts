@@ -1437,6 +1437,10 @@ export class Harness {
         budgetLeft: this.policy.repairBudget - (job.repairs ?? 0),
         maxAttempts: this.policy.maxAttempts,
         leadHold: (w) => this.engine.leadHoldOf(w, tx),
+        // Удержание gate снято исправлением (alpha.71, E2): повтор без ведущего.
+        holdFixed: (w) =>
+          !!w.environmentHold &&
+          !this.engine.environmentGateHolds(tx).some((x) => x.workId === w.id),
       });
       if (!decided || decided.action === 'stop') return decided;
       this.workflows.repair(job, `repair:${decided.kind}`, () => {

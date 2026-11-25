@@ -184,6 +184,12 @@ export function repairDecision(
      * после `diagnoseAfter` отказов, перепланирование, решение человека.
      */
     leadHold?: (work: WorkState) => LeadHold | undefined;
+    /**
+     * Удержание gate этой работы снято исправлением (alpha.71, E2):
+     * определение gate или среда сменились, удержание не действует — отказ
+     * без повтора повторяется автоматически в прежних пределах.
+     */
+    holdFixed?: (work: WorkState) => boolean;
   },
 ): RepairDecision | undefined {
   const blocking = options.blocking ?? ((w: WorkState) => blockingRequest(view, w));
@@ -273,7 +279,7 @@ export function repairDecision(
 
   // Отказ окружения, который повтор не снимет: сразу ведущему, без повтора.
   const noRetry = kind === 'environment' ? lastNoRetryCause(view.attempts(work.id)) : undefined;
-  if (noRetry)
+  if (noRetry && !options.holdFixed?.(work))
     return {
       action: 'stop',
       workId: work.id,

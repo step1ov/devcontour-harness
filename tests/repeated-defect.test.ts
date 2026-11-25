@@ -5,11 +5,25 @@ import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { HarnessError, type AttemptState, type WorkState } from '../src/contracts/index.ts';
+import {
+  HarnessError,
+  digestOf,
+  type AttemptState,
+  type WorkState,
+} from '../src/contracts/index.ts';
 import { leadHold, repeatedDefect } from '../src/projections/lead-recovery.ts';
 import { continuableDraft } from '../src/engine/reuse.ts';
 import { approve, implement, setup } from './runner-fixture.ts';
-import { planReview, trustNone } from './engine-fixture.ts';
+import {
+  engineOf,
+  graphOf,
+  planReview,
+  policyOf,
+  ready,
+  sha,
+  trustNone,
+} from './engine-fixture.ts';
+import { repairDecision } from '../src/engine/repair.ts';
 
 const work = { id: 'w', status: 'failed', attempt: 2 } as WorkState;
 const failed = (id: string, patch: Partial<AttemptState>) =>
@@ -177,4 +191,45 @@ test('ревью C LOW-4: повтор — только дефекты gate и �
   // Источник черновика — попытка пары: с чистого дерева.
   const onlyPair = { attempts: () => pair('gate') } as any;
   assert.equal(continuableDraft(onlyPair, approved, 'next'), undefined);
+});
+
+test('E2: время и зависание разбора ведущего не требуют — harness повторяет их сам; дефекты gate — по-прежнему разбор', () => {
+  const policy = { enabled: true, mode: 'lead', diagnoseAfter: 2, leadResets: 1 } as any;
+  const kinds = (a: AttemptState['failureKind'], b: AttemptState['failureKind']) => [
+    failed('k1', { failureKind: a, failureFingerprint: 'x1' }),
+    failed('k2', { failureKind: b, failureFingerprint: 'x2' }),
+  ];
+  assert.equal(leadHold(work, kinds('timeout', 'stalled'), policy, 6), undefined);
+  assert.equal(leadHold(work, kinds('gate', 'timeout'), policy, 6), undefined);
+  assert.equal(leadHold(work, kinds('gate', 'review'), policy, 6)?.kind, 'diagnosis-required');
+});
+
+test('E2: удержание gate снято исправлением — отказ без повтора повторяется автоматически; не снято — ход ведущего', () => {
+  const env = engineOf(policyOf((p: any) => (p.maxAttempts = 3)));
+  ready(env.engine, graphOf({ a: [] }));
+  const a = env.engine.claim('c1')!;
+  env.engine.phase(a.id, a.token, 'verifying', { candidateSha: sha('c') });
+  env.engine.evidence(a.id, a.token, {
+    kind: 'test',
+    phase: 'candidate',
+    sha: sha('c'),
+    gate: 'unit',
+    passed: false,
+    command: ['x'],
+    exitCode: 1,
+    log: '',
+    digest: digestOf('x'),
+    summary: 'GATE_DEFINITION_NO_CAUSE: GATE_TOOL_MISSING: Command "pw" not found',
+  });
+  env.engine.fail(a.id, a.token, 'GATE_DEFINITION_NO_CAUSE: GATE_TOOL_MISSING', {
+    kind: 'environment',
+    cause: 'gate-definition',
+  });
+  const decide = (holdFixed: boolean) =>
+    env.engine.read((v) =>
+      repairDecision(v, v.works(), { budgetLeft: 5, maxAttempts: 3, holdFixed: () => holdFixed }),
+    );
+  assert.equal(decide(false)?.action, 'stop', 'удержание действует — ведущий чинит gate');
+  assert.equal(decide(true)?.action, 'retry', 'gate исправлен — повтор без ведущего');
+  env.store.close();
 });

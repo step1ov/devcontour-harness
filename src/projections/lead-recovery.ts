@@ -253,8 +253,16 @@ export function leadHold(
   // Тот же дефект дважды подряд — разбор до следующей попытки при любом
   // `diagnoseAfter` (alpha.71): третье продолжение того же патча не выдаётся.
   const repeated = repeatedDefect(work, attempts);
+  // Время и зависание — известные технические причины (alpha.71, E2): их
+  // повторяет harness сам в пределе попыток, разбора они не требуют; попытки
+  // они по-прежнему тратят, и при исчерпании их разбирает ведущий.
+  const byId = new Map(attempts.map((a) => [a.id, a]));
+  const defects = pending.filter((id) => {
+    const kind = byId.get(id)?.failureKind;
+    return kind !== 'timeout' && kind !== 'stalled';
+  });
   if (
-    (pending.length >= policy.diagnoseAfter || (repeated && pending.includes(repeated.runs[1]))) &&
+    (defects.length >= policy.diagnoseAfter || (repeated && pending.includes(repeated.runs[1]))) &&
     work.attempt < maxAttempts
   )
     return { kind: 'diagnosis-required', failures: pending };
