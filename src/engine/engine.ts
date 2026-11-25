@@ -12,6 +12,7 @@ import {
   codeReviewScope,
   type CodeReviewDecision,
   roleBinding,
+  derivedApplicabilityOn,
   integrationReuseOn,
   integrationReuseProblem,
   executionDigest,
@@ -2457,6 +2458,7 @@ export class Engine {
         })),
         changes,
         finalShas,
+        { derived: derivedApplicabilityOn(this.policy) },
       );
     });
   }
@@ -2812,6 +2814,7 @@ export class Engine {
                     record: evidence,
                     proof: proofGates(w.order, contractDocuments(w.order, tx)),
                     ran: [],
+                    derived: derivedApplicabilityOn(this.policy),
                   });
         if (problem) throw new HarnessError('INVALID_INPUT', problem);
       }
@@ -3009,6 +3012,7 @@ export class Engine {
                   record,
                   proof: named,
                   ran: ran[phase],
+                  derived: derivedApplicabilityOn(this.policy),
                 })
               : 'нет записи';
           if (problem)

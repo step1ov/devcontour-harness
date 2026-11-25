@@ -346,6 +346,22 @@ test('Каждое поле результата с gate пакета, непр�
   const { result, context } = f.done();
   f.store.close();
   assert.ok(result.evidence.some((e) => e.notApplicable?.derived));
+  // Без доверия и без сверки Git получателем запись derived — не PASS (ревью B M2).
+  const untrusted = { ...context, policy: { ...context.policy, trustDerivedRecords: undefined } };
+  assert.ok(
+    resultProblems(result, untrusted).some((p) => /не сверена получателем/.test(p)),
+    'нужна сверка derivedChecks',
+  );
+  const checked = new Map(
+    result.evidence.filter((e) => e.notApplicable?.derived).map((e) => [e.id, undefined]),
+  );
+  assert.deepEqual(resultProblems(result, { ...untrusted, derivedChecks: checked }), []);
+  const refused = new Map([...checked.keys()].map((id) => [id, 'пути не замыкание']));
+  assert.ok(
+    resultProblems(result, { ...untrusted, derivedChecks: refused }).some((p) =>
+      /пути не замыкание/.test(p),
+    ),
+  );
   const { failures, visited } = judge(result, context, '');
   for (const p of visited) visitedAll.add(p);
   assert.deepEqual(failures, []);

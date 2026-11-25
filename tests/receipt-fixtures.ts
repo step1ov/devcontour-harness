@@ -496,6 +496,10 @@ export function notApplicableAttempt() {
  */
 export function derivedNotApplicableAttempt() {
   const policy = policyOf((p: any) => {
+    // Строгий режим фикстуры: применимость по умолчанию — явным полем;
+    // получатель доверяет исполнителю (сверку Git проверяет свой тест).
+    p.derivedApplicability = 'on';
+    p.trustDerivedRecords = true;
     p.repositories[0].gates.push({
       id: 'web',
       kind: 'check',

@@ -595,6 +595,20 @@ export const executionPolicySchema = z.strictObject({
    */
   integrationReuse: z.enum(['identical-tree', 'off']).optional(),
   /**
+   * Применимость по умолчанию gates пакетов workspace (alpha.71,
+   * `derivationAllowed`): `on` — gate пакета без `when` не исполняется, когда
+   * diff не задел пакет, его зависимости и неявные входы; `off` — каждый
+   * такой gate исполняется. Нет поля — `on` в облегчённом режиме, `off` в
+   * строгом (`derivedApplicabilityOn`).
+   */
+  derivedApplicability: z.enum(['on', 'off']).optional(),
+  /**
+   * Получатель результата засчитывает записи применимости по умолчанию
+   * (`notApplicable.derived`) на слово исполнителя, без сверки Git
+   * (`derivedRecordChecks`). Нет поля — без сверки такая запись не PASS.
+   */
+  trustDerivedRecords: z.literal(true).optional(),
+  /**
    * Проверка окружения перед `run` (opt-in). `cached`: до ревью плана и
    * первой попытки controller поднимает окружение каждого репозитория с
    * незавершёнными поручениями на его `targetRef` — как `harness smoke`
@@ -739,8 +753,8 @@ export const executionDigest = (policy: ExecutionPolicy) =>
 /**
  * Переносит ли интеграция PASS кандидата при том же дереве (gates и ревью):
  * явное `identical-tree` — да, явное `off` — нет; без поля — да в облегчённом
- * режиме, если хост объявил поддержку (`host` не передан — проверяющий
- * получатель: решает его политика), иначе нет (alpha.71).
+ * режиме, если хост объявил поддержку; у получателя (`host` не передан) —
+ * только при явном `harnessMode: light` его политики (alpha.71).
  */
 export const integrationReuseOn = (
   policy: {
@@ -751,8 +765,19 @@ export const integrationReuseOn = (
 ): boolean =>
   policy.integrationReuse !== undefined
     ? policy.integrationReuse === 'identical-tree'
-    : harnessModeOf(policy) === 'light' &&
-      (host === undefined || host.capabilities?.integrationReuse === true);
+    : host === undefined
+      ? // Получатель, не знающий режим, перенос не включает (ревью B, L2).
+        policy.harnessMode === 'light'
+      : harnessModeOf(policy) === 'light' && host.capabilities?.integrationReuse === true;
+
+/** Действует ли применимость по умолчанию (alpha.71): явное поле, иначе облегчённый режим. */
+export const derivedApplicabilityOn = (policy: {
+  derivedApplicability?: 'on' | 'off' | undefined;
+  harnessMode?: HarnessMode | undefined;
+}): boolean =>
+  policy.derivedApplicability !== undefined
+    ? policy.derivedApplicability === 'on'
+    : harnessModeOf(policy) === 'light';
 
 /** Действующий режим политики: нет поля — `light` (alpha.69). */
 export const harnessModeOf = (policy: { harnessMode?: HarnessMode | undefined }): HarnessMode =>

@@ -227,6 +227,7 @@ export {
   conditionalGate,
   coverageChanges,
   derivationAllowed,
+  derivedRecordChecks,
   explicitCondition,
   gateBasis,
   gateDecisions,

@@ -10,8 +10,26 @@ import { gitBlobs, gitRawOutput } from '../environment/process.ts';
  * неизвестна», и gate исполняется, как прежде.
  */
 
-/** Как gate называет свой пакет: именем пакета или каталогом от корня репозитория. */
-export type PackageSelector = { name: string } | { dir: string };
+/**
+ * Как gate называет свой пакет: именем, каталогом (пакет, в котором он
+ * лежит) или каталогом-фильтром pnpm (`under`: все пакеты под ним).
+ */
+export type PackageSelector = { name: string } | { dir: string } | { under: string };
+
+/**
+ * Аргумент или script выходит за каталог пакета или берёт весь workspace
+ * (alpha.71, ревью B): сегмент `..` (`cd ..`, `--root ..`, `-C ../..`),
+ * `-w`/`-r`/`--workspace-root`/`--recursive`/`--workspaces`, вызов другого
+ * пакета (`--filter`, `-F`, `workspace`). Тогда применимости по умолчанию нет.
+ */
+export const escapesPackage = (text: string) =>
+  /(^|[\s/'"=:(])\.\.(?=$|[/\s'")&;|])/.test(text) ||
+  /(^|\s)(?:-w|-r|-ws|--workspace-root|--recursive|--workspaces|--filter(?:-prod)?|-F|workspace)(?=$|[\s=])/.test(
+    text,
+  );
+
+/** Программы, через которые область команды не видна: оболочка, make, turbo, nx. */
+const opaque = new Set(['sh', 'bash', 'zsh', 'dash', 'make', 'turbo', 'nx', 'npx', 'dlx']);
 
 const pmName = (raw: string) => posix.basename(raw).replace(/\.(c?js|cmd|exe)$/i, '');
 
@@ -40,14 +58,17 @@ function repoDir(cwd: string | undefined, rel: string) {
   return path === '..' || path.startsWith('../') || posix.isAbsolute(rel) ? undefined : path;
 }
 
-/** Фильтр pnpm одного пакета: имя (`@a/b`, `b`, `b...`) или каталог (`./dir`, `{./dir}`). */
+/**
+ * Фильтр pnpm одного пакета: имя (`@a/b`, `b`, `b...`) или каталог
+ * (`./dir`, `{./dir}`) — все проекты под ним (`under`, ревью B L3).
+ */
 function pnpmFilter(raw: string, cwd: string | undefined): PackageSelector | undefined {
   let f = raw.endsWith('...') ? raw.slice(0, -3) : raw;
   if (f.startsWith('{') && f.endsWith('}')) f = f.slice(1, -1);
   if (!f || /[*?[\]!^{}]/.test(f) || f.includes('...')) return undefined;
   if (f === '.' || f.startsWith('./') || f.startsWith('../')) {
     const dir = repoDir(cwd, f);
-    return dir === undefined ? undefined : { dir };
+    return dir === undefined || dir === '.' ? undefined : { under: dir };
   }
   return /^(@[^/\s]+\/)?[^/\s@]+$/.test(f) ? { name: f } : undefined;
 }
@@ -62,9 +83,13 @@ function pnpmFilter(raw: string, cwd: string | undefined): PackageSelector | und
  * - `npm --workspace <пакет>` / `-w`; `--workspaces` — неизвестно;
  *   `npm --prefix <каталог>` — каталог;
  * - `yarn workspace <пакет>`;
- * - иначе `cwd` gate вне корня — его каталог (пакет, в котором он лежит).
+ * - иначе у pnpm/npm/yarn `cwd` gate вне корня — его каталог (пакет, в
+ *   котором он лежит).
  *
- * Ведущий `env` с присваиваниями пропускается.
+ * Ведущий `env` с присваиваниями пропускается. Не менеджер пакетов (в том
+ * числе `sh -c`, `make`, `turbo`, `nx`, `node`), исполнение через них
+ * (`pnpm exec turbo`) и аргумент, выходящий за пакет (`escapesPackage`), —
+ * привязки нет (ревью B, H2/M1).
  */
 export function packageBinding(
   gate: Pick<GatePolicy, 'command' | 'cwd'>,
@@ -76,6 +101,12 @@ export function packageBinding(
   }
   const tool = pmName(argv[0] ?? '');
   const args = argv.slice(1);
+  if (tool !== 'pnpm' && tool !== 'npm' && tool !== 'yarn') return undefined;
+  if (
+    args.some((a) => opaque.has(pmName(a))) ||
+    args.some((a) => /(^|[\s/'"=:(])\.\.(?=$|[/\s'")&;|])/.test(a))
+  )
+    return undefined;
   const cwdBinding = (): PackageSelector[] | undefined => {
     const dir = gate.cwd ? repoDir('.', gate.cwd) : undefined;
     return dir && dir !== '.' ? [{ dir }] : undefined;
@@ -119,7 +150,7 @@ export function packageBinding(
     if (args[0] === 'workspaces') return undefined;
     return cwdBinding();
   }
-  return cwdBinding();
+  return undefined;
 }
 
 /** Пакет workspace: каталог от корня, имя и имена его зависимостей (все поля зависимостей). */
@@ -128,6 +159,89 @@ export interface WorkspacePackage {
   name?: string;
   dependencies: string[];
   scripts: Record<string, string>;
+  /**
+   * Пути, которые пакет читает вне своего каталога (ревью B, H2): каталоги
+   * зависимостей `file:`/`link:` и цели `extends`/`references`/`paths` его
+   * `tsconfig*.json` — от корня репозитория.
+   */
+  reads?: string[];
+  /** Пакеты workspace, названные `extends` tsconfig по имени (`@repo/tsconfig/base.json`). */
+  readsPackages?: string[];
+  /** Почему пакет нельзя замкнуть: путь за пределами репозитория, tsconfig не разобран. */
+  problem?: string;
+}
+
+/** JSON с комментариями и висячими запятыми (tsconfig); не разобран — undefined. */
+export function looseJson(text: string): unknown {
+  let out = '';
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i]!;
+    if (c === '"') {
+      const end = /^"(?:[^"\\\n]|\\.)*"/.exec(text.slice(i));
+      if (!end) return undefined;
+      out += end[0];
+      i += end[0].length - 1;
+    } else if (c === '/' && text[i + 1] === '/') {
+      while (i < text.length && text[i] !== '\n') i++;
+      out += '\n';
+    } else if (c === '/' && text[i + 1] === '*') {
+      const end = text.indexOf('*/', i + 2);
+      if (end < 0) return undefined;
+      i = end + 1;
+    } else out += c;
+  }
+  try {
+    return JSON.parse(out.replace(/,(\s*[}\]])/g, '$1')) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Что пакет читает вне себя по `tsconfig*.json` (ревью B, H2): цели
+ * `extends` (относительные и по имени пакета), `references[].path`,
+ * `compilerOptions.paths` (до первого `*`, от `baseUrl`). Цель за
+ * пределами репозитория или неразобранный файл — `problem`.
+ */
+function tsconfigReads(
+  file: string,
+  text: string,
+): { reads: string[]; packages: string[]; problem?: string } {
+  const value = looseJson(text);
+  if (!value || typeof value !== 'object' || Array.isArray(value))
+    return { reads: [], packages: [], problem: `${file} не разобран` };
+  const config = value as {
+    extends?: unknown;
+    references?: unknown;
+    compilerOptions?: { baseUrl?: unknown; paths?: unknown };
+  };
+  const base = posix.dirname(file);
+  const reads: string[] = [];
+  const packages: string[] = [];
+  let problem: string | undefined;
+  const local = (rel: string, from: string) => {
+    const path = posix.normalize(posix.join(from, rel)).replace(/\/$/, '');
+    if (posix.isAbsolute(rel) || path === '..' || path.startsWith('../'))
+      problem ??= `${file}: ${rel} вне репозитория`;
+    else reads.push(path === '' ? '.' : path);
+  };
+  const extendsList = Array.isArray(config.extends) ? config.extends : [config.extends];
+  for (const e of extendsList) {
+    if (typeof e !== 'string') continue;
+    if (e.startsWith('.') || e.startsWith('/')) local(e, base);
+    else packages.push(e);
+  }
+  if (Array.isArray(config.references))
+    for (const r of config.references)
+      if (r && typeof r === 'object' && typeof (r as { path?: unknown }).path === 'string')
+        local((r as { path: string }).path, base);
+  const options = config.compilerOptions;
+  const baseUrl = typeof options?.baseUrl === 'string' ? posix.join(base, options.baseUrl) : base;
+  if (options?.paths && typeof options.paths === 'object')
+    for (const targets of Object.values(options.paths as Record<string, unknown>))
+      for (const t of Array.isArray(targets) ? targets : [])
+        if (typeof t === 'string') local(t.split('*')[0]! || '.', baseUrl);
+  return { reads, packages, ...(problem ? { problem } : {}) };
 }
 
 /** Предел пакетов workspace, сверх которого граф не строится. */
@@ -197,7 +311,12 @@ export async function workspaceGraphAt(
     const [, type, oid] = entry.slice(0, tab).split(' ');
     const path = entry.slice(tab + 1);
     if (type !== 'blob') continue;
-    if (path === 'pnpm-workspace.yaml' || path === 'package.json' || path.endsWith('/package.json'))
+    if (
+      path === 'pnpm-workspace.yaml' ||
+      path === 'package.json' ||
+      path.endsWith('/package.json') ||
+      /(^|\/)tsconfig[^/]*\.json$/.test(path)
+    )
       if (!path.split('/').includes('node_modules')) blobs.set(path, oid!);
   }
   const read = async (paths: string[]) => {
@@ -244,9 +363,21 @@ export async function workspaceGraphAt(
     .sort();
   if (dirs.length > WORKSPACE_PACKAGE_LIMIT)
     return `пакетов workspace больше ${WORKSPACE_PACKAGE_LIMIT}`;
+  // tsconfig*.json в корне каталога каждого пакета (ревью B, H2).
+  const tsconfigs = new Map(
+    dirs.map((d) => [
+      d,
+      [...blobs.keys()].filter(
+        (p) => p.startsWith(d + '/') && /^tsconfig[^/]*\.json$/.test(p.slice(d.length + 1)),
+      ),
+    ]),
+  );
   let texts: Map<string, string>;
   try {
-    texts = await read(dirs.map((d) => d + '/package.json'));
+    texts = await read([
+      ...dirs.map((d) => d + '/package.json'),
+      ...[...tsconfigs.values()].flat(),
+    ]);
   } catch (error) {
     return 'package.json: ' + (error instanceof Error ? error.message : String(error));
   }
@@ -255,9 +386,28 @@ export async function workspaceGraphAt(
     const pkg = json(texts.get(dir + '/package.json'));
     if (!pkg) return `${dir}/package.json не разобран`;
     const deps = new Set<string>();
+    const reads: string[] = [];
+    const readsPackages: string[] = [];
+    let problem: string | undefined;
     for (const field of depFields) {
       const value = pkg[field];
-      if (value && typeof value === 'object') for (const k of Object.keys(value)) deps.add(k);
+      if (!value || typeof value !== 'object') continue;
+      for (const [k, spec] of Object.entries(value as Record<string, unknown>)) {
+        deps.add(k);
+        // `file:`/`link:` — каталог вне workspace читается как путь (ревью B, H2).
+        const local = typeof spec === 'string' ? /^(?:file|link):(.+)$/.exec(spec)?.[1] : undefined;
+        if (!local) continue;
+        const path = posix.normalize(posix.join(dir, local)).replace(/\/$/, '');
+        if (posix.isAbsolute(local) || path === '..' || path.startsWith('../'))
+          problem ??= `${dir}: зависимость ${k} (${String(spec)}) вне репозитория`;
+        else reads.push(path);
+      }
+    }
+    for (const file of tsconfigs.get(dir) ?? []) {
+      const t = tsconfigReads(file, texts.get(file) ?? '');
+      reads.push(...t.reads);
+      readsPackages.push(...t.packages);
+      problem ??= t.problem;
     }
     const scripts =
       pkg.scripts && typeof pkg.scripts === 'object'
@@ -272,6 +422,9 @@ export async function workspaceGraphAt(
       ...(typeof pkg.name === 'string' ? { name: pkg.name } : {}),
       dependencies: [...deps].sort(),
       scripts,
+      ...(reads.length ? { reads: [...new Set(reads)].sort() } : {}),
+      ...(readsPackages.length ? { readsPackages: [...new Set(readsPackages)].sort() } : {}),
+      ...(problem ? { problem } : {}),
     });
   }
   return out;
@@ -281,14 +434,14 @@ export async function workspaceGraphAt(
 export type PackageClosure =
   { ok: true; packages: string[]; dirs: string[] } | { ok: false; reason: string };
 
-/** Ссылка на путь выше каталога пакета в script (`../`): пакет читает файлы вне себя. */
-const escapes = /(^|[\s'"=:(])\.\.(\/|$)/;
-
 /**
  * Замыкание пакетов gate по зависимостям workspace (все поля зависимостей
- * package.json, транзитивно). Селектор, не нашедший пакета, корневой пакет,
- * script пакета замыкания со ссылкой выше своего каталога (`../`) и больше
- * `limit` каталогов — причина, и gate исполняется.
+ * package.json, транзитивно) и путям, которые пакеты читают вне себя
+ * (`reads`: `file:`/`link:`, цели tsconfig; `readsPackages` — каталоги
+ * пакетов, названных `extends` по имени). Селектор, не нашедший пакета,
+ * `problem` пакета замыкания (путь вне репозитория, неразобранный
+ * tsconfig), script, выходящий за пакет или берущий весь workspace
+ * (`escapesPackage`), и больше `limit` путей — причина, и gate исполняется.
  */
 export function packageClosure(
   graph: readonly WorkspacePackage[],
@@ -299,17 +452,21 @@ export function packageClosure(
   for (const s of selectors) {
     const found =
       'name' in s
-        ? graph.find((p) => p.name === s.name)
-        : // Каталог gate — пакет, в котором он лежит (самый глубокий).
-          graph
-            .filter((p) => s.dir === p.dir || s.dir.startsWith(p.dir + '/'))
-            .sort((a, b) => b.dir.length - a.dir.length)[0];
-    if (!found)
+        ? graph.filter((p) => p.name === s.name)
+        : 'under' in s
+          ? // Фильтр каталога pnpm — все проекты под ним.
+            graph.filter((p) => p.dir === s.under || p.dir.startsWith(s.under + '/'))
+          : // Каталог gate — пакет, в котором он лежит (самый глубокий).
+            graph
+              .filter((p) => s.dir === p.dir || s.dir.startsWith(p.dir + '/'))
+              .sort((a, b) => b.dir.length - a.dir.length)
+              .slice(0, 1);
+    if (!found.length)
       return {
         ok: false,
-        reason: `пакет ${'name' in s ? s.name : s.dir} не найден в workspace`,
+        reason: `пакет ${'name' in s ? s.name : 'under' in s ? s.under : s.dir} не найден в workspace`,
       };
-    start.push(found);
+    start.push(...found);
   }
   const byName = new Map(graph.flatMap((p) => (p.name ? [[p.name, p] as const] : [])));
   const seen = new Map<string, WorkspacePackage>();
@@ -324,18 +481,34 @@ export function packageClosure(
     }
   }
   const all = [...seen.values()];
-  if (all.some((p) => p.dir === '.' || p.dir === ''))
-    return { ok: false, reason: 'корневой пакет в замыкании' };
-  const escaping = all.find((p) => Object.values(p.scripts).some((v) => escapes.test(v)));
+  const broken = all.find((p) => p.problem);
+  if (broken) return { ok: false, reason: broken.problem! };
+  const escaping = all.find((p) => Object.values(p.scripts).some(escapesPackage));
   if (escaping)
     return {
       ok: false,
-      reason: `script пакета ${escaping.name ?? escaping.dir} ссылается выше его каталога (../)`,
+      reason: `script пакета ${escaping.name ?? escaping.dir} выходит за его каталог или берёт весь workspace`,
     };
-  if (all.length > limit) return { ok: false, reason: `пакетов в замыкании больше ${limit}` };
+  // `extends` по имени пакета: путь начинается с имени пакета workspace.
+  const named = all.flatMap((p) =>
+    (p.readsPackages ?? []).flatMap((spec) => {
+      const owner = [...byName.keys()]
+        .filter((n) => spec === n || spec.startsWith(n + '/'))
+        .sort((a, b) => b.length - a.length)[0];
+      return owner ? [byName.get(owner)!.dir] : [];
+    }),
+  );
+  const dirs = [
+    ...new Set([...all.map((p) => p.dir), ...all.flatMap((p) => p.reads ?? []), ...named]),
+  ]
+    .filter((d) => d !== '.')
+    .sort();
+  if (all.some((p) => (p.reads ?? []).includes('.')))
+    return { ok: false, reason: 'пакет читает весь репозиторий (путь .)' };
+  if (dirs.length > limit) return { ok: false, reason: `путей в замыкании больше ${limit}` };
   return {
     ok: true,
     packages: start.map((p) => p.name ?? p.dir),
-    dirs: all.map((p) => p.dir).sort(),
+    dirs,
   };
 }

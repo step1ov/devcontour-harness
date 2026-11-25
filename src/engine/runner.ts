@@ -57,6 +57,7 @@ import {
   infraViolations,
   strictSandbox,
   gateDigest,
+  derivedApplicabilityOn,
   gateApplicabilityLimits,
   harnessModeOf,
   integrationReuseOn,
@@ -3214,7 +3215,8 @@ export class Runner {
     sha: string,
     base: string,
   ): Promise<GatePolicy[]> {
-    if (!gates.some((g) => conditionalGate(repo.gates, g))) return gates;
+    const derived = derivedApplicabilityOn(this.policy);
+    if (!gates.some((g) => conditionalGate(repo.gates, g, derived))) return gates;
     const candidate = phase === 'candidate' ? sha : attempt.candidateSha!;
     if (candidate === base) return gates;
     // Условие gate: явные `when.paths` или (alpha.71) каталоги его пакетов
@@ -3226,7 +3228,7 @@ export class Runner {
     for (const gate of gates) {
       const explicit = explicitCondition(gate);
       if (explicit) conditions.set(gate.id, explicit);
-      else if (derivationAllowed(repo.gates, gate)) {
+      else if (derivationAllowed(repo.gates, gate, derived)) {
         graph ??= await workspaceGraphAt(cwd, sha);
         if (typeof graph === 'string') continue;
         const closure = packageClosure(
@@ -3346,7 +3348,11 @@ export class Runner {
     const run = this.propertyRun(attempt, gate, consumer);
     const property = gate.property || expectsReference(run.expected) ? run : undefined;
     const basis =
-      conditionalGate(this.repo(attempt.repositoryId).gates, gate) && !consumer
+      conditionalGate(
+        this.repo(attempt.repositoryId).gates,
+        gate,
+        derivedApplicabilityOn(this.policy),
+      ) && !consumer
         ? {
             gateBasis: gateBasis(
               this.policy,

@@ -4,10 +4,18 @@
 import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { gateSchema, policyIssues, type GatePolicy } from '../src/contracts/index.ts';
+import {
+  derivedApplicabilityOn,
+  gateSchema,
+  integrationReuseOn,
+  policyIssues,
+  sha256,
+  type GatePolicy,
+} from '../src/contracts/index.ts';
 import {
   conditionalGate,
   derivationAllowed,
+  derivedRecordChecks,
   gateDecisions,
   notApplicableProblem,
   pathApplicability,
@@ -16,6 +24,7 @@ import {
 } from '../src/verification/applicability.ts';
 import { uncoveredGates } from '../src/verification/proof.ts';
 import {
+  escapesPackage,
   packageBinding,
   packageClosure,
   pnpmWorkspacePatterns,
@@ -23,7 +32,7 @@ import {
   type WorkspacePackage,
 } from '../src/verification/workspace-graph.ts';
 import { approve, greet, implement, runAll, setup } from './runner-fixture.ts';
-import { nodeGate, repo } from './git-fixture.ts';
+import { repo, write } from './git-fixture.ts';
 import { executionPolicySchema } from '../src/contracts/index.ts';
 import { example } from './fixtures.ts';
 
@@ -35,13 +44,14 @@ test('packageBinding: --filter, -F, -C, npm -w, yarn workspace и cwd; неиз�
     packageBinding({ command, ...(cwd ? { cwd } : {}) });
   assert.deepEqual(b(['pnpm', '--filter', '@oim/web', 'run', 'build']), [{ name: '@oim/web' }]);
   assert.deepEqual(b(['pnpm', '-F', 'web...', 'build']), [{ name: 'web' }]);
-  assert.deepEqual(b(['pnpm', '--filter=./apps/web', 'lint']), [{ dir: 'apps/web' }]);
-  assert.deepEqual(b(['pnpm', '--filter', '{./packages/a}', 'test']), [{ dir: 'packages/a' }]);
+  // Фильтр каталога pnpm — все проекты под ним (ревью B, L3).
+  assert.deepEqual(b(['pnpm', '--filter=./apps/web', 'lint']), [{ under: 'apps/web' }]);
+  assert.deepEqual(b(['pnpm', '--filter', '{./packages/a}', 'test']), [{ under: 'packages/a' }]);
   assert.deepEqual(b(['pnpm', '-C', 'apps/admin', 'run', 'build']), [{ dir: 'apps/admin' }]);
   assert.deepEqual(b(['npm', '--workspace', '@a/b', 'run', 'test']), [{ name: '@a/b' }]);
   assert.deepEqual(b(['npm', '-w', 'packages/x', 'test']), [{ dir: 'packages/x' }]);
   assert.deepEqual(b(['yarn', 'workspace', 'api', 'build']), [{ name: 'api' }]);
-  assert.deepEqual(b(['node', '--test', 'test/**/*.test.mjs'], 'apps/web'), [{ dir: 'apps/web' }]);
+  assert.deepEqual(b(['pnpm', 'run', 'test'], 'apps/web'), [{ dir: 'apps/web' }], 'cwd у pnpm');
   assert.deepEqual(
     b(['env', 'CI=1', 'pnpm', '--filter', 'api', 'test']),
     [{ name: 'api' }],
@@ -58,9 +68,24 @@ test('packageBinding: --filter, -F, -C, npm -w, yarn workspace и cwd; неиз�
     ['npm', '--workspaces', 'test'],
     ['npm', 'test'],
     ['node', 'scripts/check.mjs'],
+    // Ревью B, H2/M1: выход за пакет и непрозрачные программы.
+    ['pnpm', '-C', '../..', 'test'],
+    ['pnpm', '--filter', 'api', 'exec', 'vitest', '--root', '..', 'run'],
+    ['pnpm', 'exec', 'turbo', 'run', 'test'],
+    ['pnpm', 'exec', 'sh', '-c', 'cd ../.. && pnpm -r test'],
   ])
     assert.equal(b(command), undefined, command.join(' '));
   assert.equal(b(['node', 'x.js'], '.'), undefined);
+  // cwd — только у менеджера пакетов (ревью B, M1).
+  for (const command of [
+    ['node', '--test', 'test/**/*.test.mjs'],
+    ['sh', '-c', 'cd ../.. && pnpm -r test'],
+    ['make', 'test'],
+    ['turbo', 'run', 'test'],
+    ['nx', 'test', 'web'],
+    ['npx', 'vitest', 'run'],
+  ])
+    assert.equal(b(command, 'packages/a'), undefined, 'cwd: ' + command.join(' '));
 });
 
 test('pnpmWorkspacePatterns: список, строка [a, b], кавычки и комментарии; не разобрать — undefined', () => {
@@ -111,7 +136,7 @@ test('packageClosure: пакет и его зависимости в workspace �
   );
   assert.match(
     (packageClosure(graph, [{ name: 'tool' }], 64) as { reason: string }).reason,
-    /выше его каталога/,
+    /выходит за его каталог/,
   );
   assert.match(
     (packageClosure(graph, [{ name: '@x/web' }], 2) as { reason: string }).reason,
@@ -130,6 +155,7 @@ const webCondition: GateCondition = {
   derived: { packages: ['@x/web'] },
 };
 const repoOf = { protectedPaths: ['.github/'] };
+const unitGate = gate({ id: 'unit', kind: 'test', report: { type: 'junit', path: 'r.xml' } });
 
 test('применимость по умолчанию: нетронутый пакет — not-applicable с путями; зависимость, lockfile, манифест и файл корня — исполняется', () => {
   const skip = pathApplicability(
@@ -174,12 +200,12 @@ test('применимость по умолчанию: явный when.paths п
   const root = gate({ id: 'env-check', command: ['pnpm', 'run', 'env:check'] });
   // Явный граф (dependsOn: []): более ранние check gates — не предпосылки.
   const gates = [unit, webGate, explicit, always, root].map((g) => ({ ...g, dependsOn: [] }));
-  assert.equal(derivationAllowed(gates, webGate), true);
-  assert.equal(derivationAllowed(gates, explicit), false, 'явный when.paths — свои пути');
-  assert.equal(derivationAllowed(gates, always), false);
-  assert.equal(derivationAllowed(gates, root), false, 'привязка неизвестна');
-  assert.equal(conditionalGate(gates, explicit), true);
-  assert.equal(conditionalGate(gates, always), false);
+  assert.equal(derivationAllowed(gates, webGate, true), true);
+  assert.equal(derivationAllowed(gates, explicit, true), false, 'явный when.paths — свои пути');
+  assert.equal(derivationAllowed(gates, always, true), false);
+  assert.equal(derivationAllowed(gates, root, true), false, 'привязка неизвестна');
+  assert.equal(conditionalGate(gates, explicit, true), true);
+  assert.equal(conditionalGate(gates, always, true), false);
   // Решения области: без условия — исполняется; явное — по своим путям.
   const conditions = new Map<string, GateCondition>([
     ['web-build', webCondition],
@@ -211,8 +237,8 @@ test('применимость по умолчанию: явный when.paths п
     report: { type: 'junit', path: 'r.xml' },
     command: ['pnpm', '--filter', '@x/web', 'test'],
   });
-  assert.equal(derivationAllowed([onlyTest, webGate], onlyTest), false);
-  assert.equal(derivationAllowed([onlyTest, unit], onlyTest), true);
+  assert.equal(derivationAllowed([onlyTest, webGate], onlyTest, true), false);
+  assert.equal(derivationAllowed([onlyTest, unit], onlyTest, true), true);
   // Схема: when.always допустим, test gate с when.always считается безусловным.
   const policy = structuredClone(example('policy')) as any;
   policy.repositories[0].gates[0].when = { always: true };
@@ -233,15 +259,36 @@ test('приёмка: запись derived закрывает gate пакета;
   assert.ok(!skip.applies);
   const record = { notApplicable: !skip.applies ? skip.record : undefined };
   assert.equal(
-    notApplicableProblem({ gates, gate: 'web-build', record, proof: new Set(), ran: [] }),
+    notApplicableProblem({
+      gates,
+      gate: 'web-build',
+      record,
+      proof: new Set(),
+      ran: [],
+      derived: true,
+    }),
     undefined,
   );
   assert.match(
-    notApplicableProblem({ gates, gate: 'web-e2e', record, proof: new Set(), ran: [] }) ?? '',
+    notApplicableProblem({
+      gates,
+      gate: 'web-e2e',
+      record,
+      proof: new Set(),
+      ran: [],
+      derived: true,
+    }) ?? '',
     /без when не бывает неприменимым/,
   );
   assert.match(
-    notApplicableProblem({ gates, gate: 'env-check', record, proof: new Set(), ran: [] }) ?? '',
+    notApplicableProblem({
+      gates,
+      gate: 'env-check',
+      record,
+      proof: new Set(),
+      ran: [],
+      derived: true,
+    }) ?? '',
     /не привязан к пакету workspace/,
   );
   // Запись без derived у gate без when.paths — прежний отказ.
@@ -254,6 +301,7 @@ test('приёмка: запись derived закрывает gate пакета;
       record: { notApplicable: plain },
       proof: new Set(),
       ran: [],
+      derived: true,
     }) ?? '',
     /без when не бывает неприменимым/,
   );
@@ -286,11 +334,23 @@ test('приёмка: запись derived закрывает gate пакета;
     app: { ranges: [{ from: 'a'.repeat(40), to: 'c'.repeat(40) }], files, complete: true },
   });
   assert.deepEqual(
-    uncoveredGates(repos, works, union(['packages/c/y.ts']), { app: 'c'.repeat(40) }),
+    uncoveredGates(
+      repos,
+      works,
+      union(['packages/c/y.ts']),
+      { app: 'c'.repeat(40) },
+      { derived: true },
+    ),
     [],
   );
   assert.deepEqual(
-    uncoveredGates(repos, works, union(['packages/a/y.ts']), { app: 'c'.repeat(40) }),
+    uncoveredGates(
+      repos,
+      works,
+      union(['packages/a/y.ts']),
+      { app: 'c'.repeat(40) },
+      { derived: true },
+    ),
     [{ repositoryId: 'app', gates: ['web-build'] }],
   );
 });
@@ -343,7 +403,8 @@ test('runner: gate пакета не исполняется, когда diff н�
   const check = (id: string, extra: Record<string, unknown>) => ({
     id,
     kind: 'check',
-    command: nodeGate('process.exit(0)'),
+    // Привязка по cwd — только у менеджера пакетов (ревью B, M1).
+    command: ['npm', 'run', '--silent', 'check'],
     // Явный граф: более ранние check gates — не предпосылки (иначе gate-always
     // исполнял бы их всегда).
     dependsOn: [],
@@ -354,9 +415,10 @@ test('runner: gate пакета не исполняется, когда diff н�
       'src/greet.js': greet,
       'pnpm-workspace.yaml': 'packages:\n  - "packages/*"\n',
       'package.json': '{"name":"root","private":true}\n',
-      'packages/a/package.json': '{"name":"a"}\n',
-      'packages/b/package.json': '{"name":"b","dependencies":{"a":"workspace:*"}}\n',
-      'packages/c/package.json': '{"name":"c"}\n',
+      'packages/a/package.json': '{"name":"a","scripts":{"check":"node -e 0"}}\n',
+      'packages/b/package.json':
+        '{"name":"b","dependencies":{"a":"workspace:*"},"scripts":{"check":"node -e 0"}}\n',
+      'packages/c/package.json': '{"name":"c","scripts":{"check":"node -e 0"}}\n',
     },
     scenario: { writer: tasks.map(([, files]) => implement(files)), reviewer: approve() },
     policy: (p: any) => {
@@ -443,4 +505,175 @@ test('doctor: GATE_ALWAYS_RUNS — gate корня без when.paths и when.alw
   });
   assert.ok(report.notes?.some((n) => n.startsWith('GATE_ALWAYS_RUNS app (unit, api-acceptance)')));
   assert.ok(!report.problems?.some((p) => p.includes('GATE_ALWAYS_RUNS')));
+});
+
+test('ревью B H2: выход за пакет в script — cd .., --root .., -w, -r, вызов другого пакета; обычные scripts — нет', () => {
+  for (const text of [
+    'cd .. && vitest',
+    'vitest --root .. run',
+    'pnpm -w run test',
+    'pnpm -r build',
+    'pnpm --filter other test',
+    'tsc -p ../../tsconfig.json',
+    'node ../scripts/x.mjs',
+  ])
+    assert.equal(escapesPackage(text), true, text);
+  for (const text of ['vitest run', 'tsc -p .', 'next build', 'eslint src --max-warnings 0'])
+    assert.equal(escapesPackage(text), false, text);
+  for (const script of ['cd .. && vitest', 'vitest --root .. run', 'pnpm -w run test'])
+    assert.equal(
+      packageClosure([pkg('packages/a', 'a', [], { test: script })], [{ name: 'a' }], 64).ok,
+      false,
+      script,
+    );
+});
+
+test('ревью B H2: file:/link: и tsconfig extends/references/paths — пути замыкания; вне репозитория — нет применимости', async () => {
+  const r = repo({
+    'pnpm-workspace.yaml': 'packages:\n  - "packages/*"\n  - "packages/a/sub"\n',
+    'package.json': '{"name":"root","private":true}\n',
+    'packages/a/package.json': '{"name":"a","dependencies":{"x":"link:../../vendored/x"}}\n',
+    'packages/a/tsconfig.json':
+      '{\n  // общий конфиг\n  "extends": "../../tooling/tsconfig/base.json",\n  "references": [{ "path": "../b" }],\n  "compilerOptions": { "baseUrl": ".", "paths": { "@shared/*": ["../../shared/src/*"] }, },\n}\n',
+    'packages/a/sub/package.json': '{"name":"a-sub","dependencies":{"c":"workspace:*"}}\n',
+    'packages/b/package.json': '{"name":"b"}\n',
+    'packages/c/package.json': '{"name":"c"}\n',
+    'packages/t/package.json': '{"name":"@repo/tsconfig"}\n',
+    'packages/d/package.json': '{"name":"d"}\n',
+    'packages/d/tsconfig.build.json': '{"extends":"@repo/tsconfig/base.json"}\n',
+    'packages/e/package.json': '{"name":"e","devDependencies":{"y":"file:../../../outside"}}\n',
+    'packages/f/package.json': '{"name":"f"}\n',
+    'packages/f/tsconfig.json': '{"extends":"../../../outside/tsconfig.json"}\n',
+  });
+  const g = await workspaceGraphAt(r.dir, r.git('rev-parse', 'HEAD'));
+  assert.ok(Array.isArray(g), JSON.stringify(g));
+  const a = packageClosure(g, [{ name: 'a' }], 64);
+  assert.deepEqual(a.ok && a.dirs, [
+    'packages/a',
+    'packages/b',
+    'shared/src',
+    'tooling/tsconfig/base.json',
+    'vendored/x',
+  ]);
+  // extends по имени пакета workspace — каталог этого пакета.
+  const d = packageClosure(g, [{ name: 'd' }], 64);
+  assert.deepEqual(d.ok && d.dirs, ['packages/d', 'packages/t']);
+  // Цель вне репозитория — нет применимости по умолчанию.
+  assert.match(
+    (packageClosure(g, [{ name: 'e' }], 64) as { reason: string }).reason,
+    /вне репозитория/,
+  );
+  assert.match(
+    (packageClosure(g, [{ name: 'f' }], 64) as { reason: string }).reason,
+    /вне репозитория/,
+  );
+  // Ревью B L3: фильтр каталога pnpm — и вложенные проекты с их зависимостями.
+  const under = packageClosure(g, [{ under: 'packages/a' }], 64);
+  assert.ok(under.ok && under.dirs.includes('packages/a/sub') && under.dirs.includes('packages/c'));
+  const deepest = packageClosure(g, [{ dir: 'packages/a/src' }], 64);
+  assert.ok(deepest.ok && !deepest.dirs.includes('packages/c'), 'cwd — только свой пакет');
+});
+
+test('ревью B H1: unbound codegen — предпосылка gate пакета; codegen исполняется — исполняется и он; приёмка требует PASS', () => {
+  const codegen = gate({ id: 'codegen', command: ['node', 'scripts/gen.mjs'], dependsOn: [] });
+  const apiTest = gate({
+    id: 'api-test',
+    command: ['pnpm', '--filter', 'api', 'test'],
+    dependsOn: ['codegen'],
+  });
+  const unit = gate({
+    id: 'unit',
+    kind: 'test',
+    report: { type: 'junit', path: 'r.xml' },
+    dependsOn: [],
+  });
+  const gates = [codegen, apiTest, unit];
+  const condition: GateCondition = { paths: ['packages/api'], derived: { packages: ['api'] } };
+  const decisions = gateDecisions({
+    repo: { gates, protectedPaths: [] },
+    scope: gates,
+    proof: new Set(),
+    changedFor: () => changed(['schema/api.yaml']),
+    conditionFor: (g) => (g.id === 'api-test' ? condition : undefined),
+  });
+  const api = decisions.find((d) => d.gate.id === 'api-test')!;
+  assert.equal(api.run, true, 'вывод исполняемой предпосылки — вход gate');
+  assert.match(api.reason, /исполняется его предпосылка codegen/);
+  assert.equal(api.record, undefined);
+  // Явный when.paths — прежнее правило: owner принял этот риск сам.
+  const explicitDecisions = gateDecisions({
+    repo: { gates, protectedPaths: [] },
+    scope: gates,
+    proof: new Set(),
+    changedFor: () => changed(['schema/api.yaml']),
+    conditionFor: (g) => (g.id === 'api-test' ? { paths: ['packages/api'] } : undefined),
+  });
+  assert.equal(explicitDecisions.find((d) => d.gate.id === 'api-test')!.run, false);
+  // Приёмка: запись derived при исполненной предпосылке — нет PASS.
+  const skip = pathApplicability(repoOf, apiTest, changed(['schema/api.yaml']), condition);
+  assert.ok(!skip.applies);
+  assert.match(
+    notApplicableProblem({
+      gates,
+      gate: 'api-test',
+      record: { notApplicable: skip.record },
+      proof: new Set(),
+      ran: ['codegen'],
+      derived: true,
+    }) ?? '',
+    /предпосылка codegen исполнялась/,
+  );
+});
+
+test('ревью B L1/L2: применимость по умолчанию — облегчённый режим или явное on; перенос у получателя без режима — выключен', () => {
+  assert.equal(derivedApplicabilityOn({}), true);
+  assert.equal(derivedApplicabilityOn({ harnessMode: 'strict' }), false);
+  assert.equal(derivedApplicabilityOn({ harnessMode: 'strict', derivedApplicability: 'on' }), true);
+  assert.equal(derivedApplicabilityOn({ derivedApplicability: 'off' }), false);
+  assert.equal(derivationAllowed([webGate, unitGate], webGate, false), false);
+  assert.equal(integrationReuseOn({}), false, 'получатель без режима');
+  assert.equal(integrationReuseOn({ harnessMode: 'light' }), true);
+  assert.equal(integrationReuseOn({ integrationReuse: 'identical-tree' }), true);
+});
+
+test('ревью B M2: получатель сверяет запись derived своим Git — подделка узких путей и diff, задевший пакет, — отказ', async () => {
+  const r = repo({
+    'pnpm-workspace.yaml': 'packages:\n  - "packages/*"\n',
+    'package.json': '{"name":"root","private":true}\n',
+    'packages/a/package.json': '{"name":"a"}\n',
+    'packages/b/package.json': '{"name":"b","dependencies":{"a":"workspace:*"}}\n',
+    'packages/c/package.json': '{"name":"c"}\n',
+  });
+  const base = r.git('rev-parse', 'HEAD');
+  const commit = (path: string) => {
+    r.git('checkout', '-q', base);
+    write(r.dir, { [path]: '1\n' });
+    r.git('add', '-A');
+    r.git('commit', '-qm', path);
+    return r.git('rev-parse', 'HEAD');
+  };
+  const onC = commit('packages/c/x.js');
+  const onA = commit('packages/a/x.js');
+  const bGate = gate({ id: 'b-check', command: ['pnpm', '--filter', 'b', 'check'] });
+  const repoPolicy = { gates: [bGate], protectedPaths: [] };
+  const record = (to: string, files: string[], patterns: string[]) => ({
+    id: 'e-' + to.slice(0, 6) + patterns.length,
+    gate: 'b-check',
+    notApplicable: {
+      gateDigest: 'd'.repeat(64),
+      patterns,
+      ranges: [{ from: base, to }],
+      count: files.length,
+      files,
+      pathsDigest: sha256(files.join('\0')),
+      derived: { packages: ['b'] },
+    },
+  });
+  const honest = record(onC, ['packages/c/x.js'], ['packages/a', 'packages/b']);
+  const narrow = record(onA, ['packages/a/x.js'], ['packages/b']);
+  const touched = record(onA, ['packages/a/x.js'], ['packages/a', 'packages/b']);
+  const checks = await derivedRecordChecks(r.dir, repoPolicy, [honest, narrow, touched]);
+  assert.equal(checks.get(honest.id), undefined, 'честная запись подтверждена');
+  assert.match(checks.get(narrow.id) ?? '', /не замыкание пакетов gate/);
+  assert.match(checks.get(touched.id) ?? '', /применим/);
 });

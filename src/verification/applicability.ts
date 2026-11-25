@@ -17,7 +17,7 @@ import {
 import { gitRawOutput } from '../environment/process.ts';
 import { gatePrerequisites } from './gate-scope.ts';
 import { REQUIREMENT_GATE } from './requirements.ts';
-import { packageBinding } from './workspace-graph.ts';
+import { packageBinding, packageClosure, workspaceGraphAt } from './workspace-graph.ts';
 
 /**
  * Применимость gate с `when.paths` и (alpha.71) gate пакета workspace без
@@ -342,15 +342,21 @@ const unconditional = (gate: GatePolicy) =>
  * если в репозитории остаётся test gate, который исполняется всегда (как
  * требует правило «хотя бы один test gate без when»).
  */
-export function derivationAllowed(gates: readonly GatePolicy[], gate: GatePolicy) {
+export function derivationAllowed(
+  gates: readonly GatePolicy[],
+  gate: GatePolicy,
+  /** Применимость по умолчанию включена политикой (`derivedApplicabilityOn`). */
+  enabled: boolean,
+) {
+  if (!enabled) return false;
   if (gate.when !== undefined || gate.property !== undefined) return false;
   if (packageBinding(gate) === undefined) return false;
   return gate.kind !== 'test' || gates.some((g) => g.kind === 'test' && unconditional(g));
 }
 
 /** Gate может быть неприменимым: явные `when.paths` или применимость по умолчанию. */
-export const conditionalGate = (gates: readonly GatePolicy[], gate: GatePolicy) =>
-  whenPaths(gate) !== undefined || derivationAllowed(gates, gate);
+export const conditionalGate = (gates: readonly GatePolicy[], gate: GatePolicy, derived: boolean) =>
+  whenPaths(gate) !== undefined || derivationAllowed(gates, gate, derived);
 
 /** Применимость gate с условием по diff (без правил области задачи). */
 export function pathApplicability(
@@ -519,18 +525,32 @@ export function gateDecisions(input: GateDecisionInput): GateDecision[] {
         };
   });
   const ids = new Set(input.scope.map((g) => g.id));
+  const byId = new Map(decisions.map((d) => [d.gate.id, d]));
   for (let grew = true; grew;) {
     grew = false;
     for (const d of decisions) {
-      if (!d.run) continue;
-      for (const pre of gatePrerequisites(input.repo.gates, d.gate.id)) {
-        const dep = decisions.find((x) => x.gate.id === pre);
-        if (!ids.has(pre) || !dep || dep.run) continue;
-        dep.run = true;
-        dep.reason = 'предпосылка исполняемого gate ' + d.gate.id;
-        delete dep.record;
-        grew = true;
+      const pres = gatePrerequisites(input.repo.gates, d.gate.id).filter((p) => ids.has(p));
+      if (d.run) {
+        for (const pre of pres) {
+          const dep = byId.get(pre);
+          if (!dep || dep.run) continue;
+          dep.run = true;
+          dep.reason = 'предпосылка исполняемого gate ' + d.gate.id;
+          delete dep.record;
+          grew = true;
+        }
+        continue;
       }
+      // Применимость по умолчанию (ревью B, H1): вывод исполняемой
+      // предпосылки — вход gate пакета, которого его пакеты не называют
+      // (сгенерированный код, сборка). Исполняется предпосылка — и он.
+      if (!d.record?.derived) continue;
+      const running = pres.find((p) => byId.get(p)?.run);
+      if (!running) continue;
+      d.run = true;
+      d.reason = `исполняется его предпосылка ${running}: её вывод — вход gate`;
+      delete d.record;
+      grew = true;
     }
   }
   return decisions;
@@ -550,6 +570,8 @@ export function notApplicableProblem(input: {
   proof: ReadonlySet<string>;
   /** Gates той же фазы с решающей записью исполнения. */
   ran: readonly string[];
+  /** Применимость по умолчанию включена политикой проверяющего (`derivedApplicabilityOn`); нет — выключена. */
+  derived?: boolean;
 }): string | undefined {
   const gate = input.gates.find((g) => g.id === input.gate);
   if (!gate) return `gate ${input.gate} без when не бывает неприменимым`;
@@ -558,8 +580,13 @@ export function notApplicableProblem(input: {
   if (!whenPaths(gate))
     if (!input.record.notApplicable?.derived || gate.when !== undefined)
       return `gate ${input.gate} без when не бывает неприменимым`;
-    else if (!derivationAllowed(input.gates, gate))
-      return `gate ${input.gate} не привязан к пакету workspace: применимость по умолчанию ему не разрешена`;
+    else if (!derivationAllowed(input.gates, gate, input.derived === true))
+      return `gate ${input.gate} не привязан к пакету workspace или применимость по умолчанию выключена: нужен PASS`;
+    else {
+      // Предпосылка исполнялась — её вывод вход gate (ревью B, H1).
+      const pre = gatePrerequisites([...input.gates], gate.id).find((p) => input.ran.includes(p));
+      if (pre) return `gate ${gate.id} — его предпосылка ${pre} исполнялась: нужен PASS`;
+    }
   if (input.proof.has(gate.id))
     return `gate ${gate.id} доказывает требование или договор: нужен PASS`;
   if (!input.record.notApplicable || input.record.notApplicable.gateDigest !== gateDigest(gate))
@@ -598,4 +625,72 @@ export function coverageChanges(
     cwd,
     anchors.map((from) => ({ from, to: finalSha })),
   );
+}
+
+/**
+ * Сверка записей применимости по умолчанию своим Git (alpha.71, ревью B M2)
+ * — для получателя результата (`ReceiverContext.derivedChecks`): граф
+ * workspace на SHA фазы записи, замыкание пакетов gate по политике
+ * получателя, diff пар записи (`ranges`) и решение `pathApplicability`
+ * пересчитываются; запись подтверждена, только когда её пути — то же
+ * замыкание, её diff — тот же (`pathsDigest`), а пересчёт тоже говорит «не
+ * применим». ID записи → причина отказа или undefined. Что зелёный SHA
+ * записи (`ranges[0].from`) действительно был зелёным, сверка не знает:
+ * это закрывает полный прогон gates выпуска.
+ */
+export async function derivedRecordChecks(
+  cwd: string,
+  repo: { gates: readonly GatePolicy[]; protectedPaths: readonly string[] },
+  evidence: readonly { id: string; gate: string; notApplicable?: GateApplicability | undefined }[],
+): Promise<Map<string, string | undefined>> {
+  const out = new Map<string, string | undefined>();
+  const graphs = new Map<string, Awaited<ReturnType<typeof workspaceGraphAt>>>();
+  for (const e of evidence) {
+    const record = e.notApplicable;
+    if (!record?.derived) continue;
+    const gate = repo.gates.find((g) => g.id === e.gate);
+    const binding = gate ? packageBinding(gate) : undefined;
+    const to = record.ranges.at(-1)?.to;
+    if (!gate || !binding || !to) {
+      out.set(e.id, `gate ${e.gate} не привязан к пакету по политике получателя`);
+      continue;
+    }
+    if (!graphs.has(to)) graphs.set(to, await workspaceGraphAt(cwd, to));
+    const graph = graphs.get(to)!;
+    if (typeof graph === 'string') {
+      out.set(e.id, `граф workspace на ${to.slice(0, 12)} не прочитан: ${graph}`);
+      continue;
+    }
+    const closure = packageClosure(graph, binding, gateApplicabilityLimits.patterns);
+    if (!closure.ok) {
+      out.set(e.id, `замыкание пакетов gate ${e.gate}: ${closure.reason}`);
+      continue;
+    }
+    if (closure.dirs.join('\0') !== [...record.patterns].sort().join('\0')) {
+      out.set(
+        e.id,
+        `пути записи (${record.patterns.join(', ')}) — не замыкание пакетов gate у получателя (${closure.dirs.join(', ')})`,
+      );
+      continue;
+    }
+    const changed = await changedPaths(
+      cwd,
+      record.ranges.map(({ from, to }) => ({ from, to })),
+    );
+    if (changed.complete && sha256(changed.files.join('\0')) !== record.pathsDigest) {
+      out.set(e.id, 'diff записи не совпадает с diff Git получателя');
+      continue;
+    }
+    const decision = pathApplicability(repo, gate, changed, {
+      paths: closure.dirs,
+      derived: { packages: closure.packages },
+    });
+    out.set(
+      e.id,
+      decision.applies
+        ? `по Git получателя gate ${e.gate} применим: ${decision.reason}`
+        : undefined,
+    );
+  }
+  return out;
 }

@@ -71,7 +71,9 @@ test('integrationReuseOn: облегчённый режим без поля — 
   assert.equal(integrationReuseOn({}, yes), true);
   assert.equal(integrationReuseOn({ harnessMode: 'light' }, yes), true);
   assert.equal(integrationReuseOn({}, {}), false, 'хост без поддержки');
-  assert.equal(integrationReuseOn({}), true, 'получатель решает своей политикой');
+  // Получатель без режима перенос не включает (ревью B L2); облегчённый явно — включает.
+  assert.equal(integrationReuseOn({}), false, 'получатель без режима');
+  assert.equal(integrationReuseOn({ harnessMode: 'light' }), true);
   assert.equal(integrationReuseOn({ harnessMode: 'strict' }, yes), false);
   assert.equal(integrationReuseOn({ integrationReuse: 'off' }, yes), false);
   assert.equal(

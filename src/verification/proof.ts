@@ -156,6 +156,11 @@ export function uncoveredGates(
   changes?: Readonly<Record<string, ChangedPaths>>,
   /** Итоговый SHA каждого репозитория: конец объединённого diff (`changes`). */
   finalShas?: Readonly<Record<string, string>>,
+  /**
+   * `derived` — применимость по умолчанию включена политикой
+   * (`derivedApplicabilityOn`); нет — записи `derived` не покрывают gate.
+   */
+  options: { derived?: boolean } = {},
 ) {
   const result: { repositoryId: string; gates: string[] }[] = [];
   for (const repositoryId of [...new Set(works.map((w) => w.repositoryId))]) {
@@ -185,7 +190,7 @@ export function uncoveredGates(
         'command' in gate &&
         skipped.length > 0 &&
         skipped.every((e) => e.notApplicable?.derived) &&
-        derivationAllowed(repository!.gates.filter(isGatePolicy), gate);
+        derivationAllowed(repository!.gates.filter(isGatePolicy), gate, options.derived === true);
       const condition: GateCondition | undefined = explicit
         ? { paths: [...explicit] }
         : derived

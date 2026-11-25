@@ -2859,6 +2859,17 @@
         "off"
       ]
     },
+    "derivedApplicability": {
+      "type": "string",
+      "enum": [
+        "on",
+        "off"
+      ]
+    },
+    "trustDerivedRecords": {
+      "type": "boolean",
+      "const": true
+    },
     "lifecyclePreflight": {
       "type": "string",
       "const": "cached"
