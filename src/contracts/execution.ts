@@ -1650,6 +1650,16 @@ export const localSchemas = {
       .max(20),
   }),
   /**
+   * Последний ответ пробы списка процессов в песочнице (alpha.71, ревью D/E
+   * MEDIUM-1): запись `probe` у `@workspace`. По ней снятие удержания gate
+   * отказом `ps` видят и другие процессы (`explain`, `wait`), а не только
+   * controller, который пробу исполнил.
+   */
+  'process-list': z.strictObject({
+    status: z.enum(['available', 'unavailable', 'unknown', 'not-isolated']),
+    at: isoTimeSchema,
+  }),
+  /**
    * Полные прогоны `harness gates` (alpha.71, ревью B2 M4): запись по
    * `<репозиторий>@<SHA>` у `@workspace` — до 10 последних прогонов с digest
    * файла итога и основанием каждого gate (`gateBasis`). Страховка выпуска

@@ -6034,9 +6034,37 @@ export class Engine {
       },
       {
         isolation: strictSandbox(this.policy) ? 'os' : 'none',
-        ...(processListSeen.status ? { processList: processListSeen.status } : {}),
+        ...((processListSeen.status ??
+          view.local('process-list', WORKSPACE_OWNER, 'probe')?.status)
+          ? {
+              processList: (processListSeen.status ??
+                view.local('process-list', WORKSPACE_OWNER, 'probe')?.status)!,
+            }
+          : {}),
       },
     );
+  }
+
+  /**
+   * Удержание gate работы снято исправлением (alpha.71, E2; ревью D/E
+   * MEDIUM-1): удержание записано, но по текущей политике и среде не
+   * действует. Одно правило для ремонта controller и для explain.
+   */
+  holdLifted(work: WorkState, view: ExecutionView): boolean {
+    return (
+      !!work.environmentHold &&
+      !this.environmentGateHolds(view).some((x) => x.workId === work.id)
+    );
+  }
+
+  /** Записать ответ пробы списка процессов: его читают и другие процессы. */
+  recordProcessList(status: 'available' | 'unavailable' | 'unknown' | 'not-isolated') {
+    return this.tx('lead.recorded', (tx) => {
+      const prev = tx.local('process-list', WORKSPACE_OWNER, 'probe');
+      if (prev?.status === status) return false;
+      tx.putLocal('process-list', WORKSPACE_OWNER, 'probe', { status, at: iso(this.now()) });
+      return true;
+    });
   }
 
   /** Удержания gates, которые нужны работе (её обязательные gates репозитория). */

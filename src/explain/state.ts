@@ -269,6 +269,13 @@ export function stopInputsIn(
     const recovery = recoveryPolicyOf(h.policy);
     let holds: ReturnType<typeof h.engine.environmentGateHolds> | undefined;
     const activeHolds = () => (holds ??= h.engine.environmentGateHolds(v));
+    // Причина без повтора действует, пока её удержание не снято исправлением
+    // (ревью D/E MEDIUM-1): иначе explain скажет «ход ведущего», а controller
+    // повторит сам.
+    const noRetryOf = (w: WorkState, attempts: AttemptState[]) =>
+      !!w.environmentHold && !activeHolds().some((x) => x.workId === w.id)
+        ? undefined
+        : lastNoRetryCause(attempts);
     const holdById = memo((id: string) =>
       recovery.enabled
         ? leadHold(byId.get(id)!, attemptsOf(id), recovery, options.maxAttempts)
@@ -281,6 +288,7 @@ export function stopInputsIn(
       attemptsOf,
       requestsOf: requestsById,
       leadHold: (w) => holdById(w.id),
+      // То же правило, что у ремонта controller (`Engine.holdLifted`).
       holdFixed: (w) => !!w.environmentHold && !activeHolds().some((x) => x.workId === w.id),
     };
     const groupOf = memo((graphId: string): Map<string, Outlook> => {
@@ -488,9 +496,9 @@ export function stopInputsIn(
           ...(work.failureKind === 'context-exhausted' && lastContextLimit(attempts)
             ? { contextLimit: lastContextLimit(attempts) }
             : {}),
-          ...(work.status === 'failed' && lastNoRetryCause(attempts)
+          ...(work.status === 'failed' && noRetryOf(work, attempts)
             ? {
-                environmentCause: lastNoRetryCause(attempts),
+                environmentCause: noRetryOf(work, attempts),
                 retryRoute: h.engine.retryRouteOf(work, v),
               }
             : {}),
@@ -498,7 +506,7 @@ export function stopInputsIn(
           // ход по исчерпанию — из того же правила, что у отказа без повтора.
           ...(work.status === 'failed' &&
           work.failureKind === 'environment' &&
-          !lastNoRetryCause(attempts) &&
+          !noRetryOf(work, attempts) &&
           (work.neutralFailures ?? 0) >= MAX_NEUTRAL_FAILURES
             ? { retryRoute: h.engine.retryRouteOf(work, v) }
             : {}),
@@ -603,7 +611,7 @@ export function stopInputsIn(
           sameFailureRepairs:
             fingerprint && !repeatedDefectPending(work, attempts)
               ? identical - 1
-              : repairRepeats(kind, lastContextLimit(attempts), lastNoRetryCause(attempts)),
+              : repairRepeats(kind, lastContextLimit(attempts), noRetryOf(work, attempts)),
           groupRepairsUsed: job?.repairs ?? 0,
           groupRepairBudget: job ? options.repairBudget : 0,
           ...(outlook ? { outlook } : {}),
@@ -805,7 +813,7 @@ function outlookOf(
     const repeats = repairRepeats(
       w.failureKind ?? 'unknown',
       lastContextLimit(attempts),
-      lastNoRetryCause(attempts),
+      ctx.holdFixed(w) ? undefined : lastNoRetryCause(attempts),
     );
     const identical = w.failureFingerprint
       ? attempts.filter((a) => a.failureFingerprint === w.failureFingerprint).length

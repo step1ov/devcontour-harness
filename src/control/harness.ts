@@ -1083,7 +1083,13 @@ export class Harness {
       strictSandbox(this.policy) &&
       this.engine.read((v) => this.engine.environmentGateHolds(v)).length
     )
-      await processListBackend.probe().catch(() => undefined);
+      await processListBackend
+        .probe()
+        .then((c) => {
+          // Ответ пробы — в состояние: снятие удержания видят explain и wait.
+          if (c.status !== 'unknown') this.engine.recordProcessList(c.status);
+        })
+        .catch(() => undefined);
     // Обязательный контекст — одинаково для библиотеки и CLI: без снимка нужных источников граф не исполняется.
     const needed = [...new Set(input.graph.orders.flatMap((o) => o.context))];
     if (needed.length && !input.context)
@@ -1441,9 +1447,7 @@ export class Harness {
         maxAttempts: this.policy.maxAttempts,
         leadHold: (w) => this.engine.leadHoldOf(w, tx),
         // Удержание gate снято исправлением (alpha.71, E2): повтор без ведущего.
-        holdFixed: (w) =>
-          !!w.environmentHold &&
-          !this.engine.environmentGateHolds(tx).some((x) => x.workId === w.id),
+        holdFixed: (w) => this.engine.holdLifted(w, tx),
       });
       if (!decided || decided.action === 'stop') return decided;
       this.workflows.repair(job, `repair:${decided.kind}`, () => {
