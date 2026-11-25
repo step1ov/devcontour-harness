@@ -26,6 +26,7 @@ import {
   type WorkGraph,
 } from '../src/contracts/index.ts';
 import type { Engine } from '../src/engine/engine.ts';
+import { junit, repo } from './git-fixture.ts';
 import { collectOperatorViewInput, connectorSources } from '../src/control/operator-view.ts';
 import { statusOf } from '../src/control/status.ts';
 import { cleanLeadText, leadBegin, leadNote, releaseDone } from '../src/control/lead.ts';
@@ -553,7 +554,7 @@ test('P4-10: журнал ведущего — сессия, заметки, и�
   const env = engineOf(policyOf((p) => (p.release = { review: 'advisory' })));
   ready(env.engine, graphOf({ w: [], x: ['w'] }));
   assert.throws(
-    () => releaseDone(env.engine, { summary: 'рано' }),
+    () => releaseDone(env.engine, { summary: 'рано', fullGates: { app: undefined } }),
     /Выпуск не готов: не приняты w, x/,
   );
   leadBegin(env.engine, { ttlMs: 30 * 60_000 });
@@ -582,7 +583,10 @@ test('P4-10: журнал ведущего — сессия, заметки, и�
   env.clock.now += 31 * 60_000;
   assert.equal(viewOf(env).lead?.active, false);
   env.clock.now += 1000;
-  const done = releaseDone(env.engine, { summary: 'Выпуск готов: форма заявок работает.' });
+  const done = releaseDone(env.engine, {
+    summary: 'Выпуск готов: форма заявок работает.',
+    fullGates: { app: undefined },
+  });
   assert.equal(done.release?.works, 2);
   const after = viewOf(env).forecast!;
   assert.equal(after.progress.percent, 100);
@@ -609,7 +613,19 @@ test('P4-10: строка ведущего — без управляющих с�
 
 test('P4-10: CLI lead begin|note|end и release done — синонимы, договор, capabilities', () => {
   // Приёмка выпуска (alpha.69) здесь не предмет: совет вместо требования.
-  const env = engineOf(policyOf((p) => (p.release = { review: 'advisory' })));
+  // Цель выпуска — настоящий репозиторий: release done требует полного
+  // прогона gates на читаемой цели (alpha.71, ревью B2 M2/M4).
+  const app = repo({ 'README.md': 'app\n' });
+  const env = engineOf(
+    policyOf((p) => {
+      p.release = { review: 'advisory' };
+      p.isolation = { mode: 'none', domains: [] };
+      const r = (p.repositories as { path: string; gates: { command: string[] }[] }[])[0]!;
+      r.path = app.dir;
+      r.gates[0]!.command = [process.execPath, '-e', junit('<testcase classname="a" name="ok"/>')];
+    }),
+  );
+  app.git('update-ref', env.engine.policy.repositories[0]!.targetRef, 'HEAD');
   ready(env.engine, graphOf({ w: [] }));
   acceptAll(env, 1, 'a');
   writeFileSync(
@@ -628,6 +644,12 @@ test('P4-10: CLI lead begin|note|end и release done — синонимы, до�
   );
   const tooEarly = harness('release-done', '--state', env.dir);
   assert.equal(tooEarly.status, 2, 'нужен --summary');
+  // Без полного прогона gates на цели — отказ; после harness gates — выпуск закрыт.
+  const early = harness('release', 'done', 'Всё принято и доставлено.', '--state', env.dir);
+  assert.notEqual(early.status, 0);
+  assert.match(early.stderr + JSON.stringify(early.json), /нет полного прогона gates app/);
+  const gates = harness('gates', '--state', env.dir, '--sha', app.git('rev-parse', 'HEAD'));
+  assert.equal(gates.status, 0, gates.stderr);
   const done = harness('release', 'done', 'Всё принято и доставлено.', '--state', env.dir);
   assert.equal(done.status, 0, done.stderr);
   assert.equal(cliDataSchemas['release-done'].parse(done.json.data).release?.works, 1);

@@ -205,9 +205,11 @@ export function releaseDone(
     contracts?: Readonly<Record<string, string | undefined>>;
     /**
      * Почему на цели репозитория нет годного полного прогона gates
-     * (`fullGatesProblem`, alpha.71): любая причина — отказ `NOT_READY`.
+     * (`releaseGatesProblems`, alpha.71): любая причина — отказ `NOT_READY`.
+     * Обязателен (ревью B2 L1): репозиторий с принятыми работами без
+     * записи — тоже отказ.
      */
-    fullGates?: Readonly<Record<string, string | undefined>>;
+    fullGates: Readonly<Record<string, string | undefined>>;
   },
 ): LeadData {
   const summary = cleanLeadText(options.summary, LEAD_LIMITS.summary, 'release done --summary');
@@ -222,7 +224,17 @@ export function releaseDone(
     if (!accepted) throw new HarnessError('NOT_READY', 'Выпуск не готов: принятых работ нет');
     // Полный прогон gates на цели выпуска (alpha.71, ревью B) обязателен
     // при любом правиле ревью выпуска.
-    const gates = Object.values(options.fullGates ?? {}).filter(Boolean);
+    const unchecked = [
+      ...new Set(
+        view
+          .works()
+          .filter((w) => w.status === 'done')
+          .map((w) => w.order.repositoryId),
+      ),
+    ]
+      .filter((id) => !Object.hasOwn(options.fullGates, id))
+      .map((id) => `полный прогон gates ${id} не проверен`);
+    const gates = [...unchecked, ...Object.values(options.fullGates).filter(Boolean)];
     if (gates.length)
       throw new HarnessError(
         'NOT_READY',

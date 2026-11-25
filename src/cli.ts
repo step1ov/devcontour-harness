@@ -126,6 +126,7 @@ import { leadOutline } from './control/outline.ts';
 import { parseDurationFlag } from './control/duration.ts';
 import { readyNotRunning } from './control/lead-end-warning.ts';
 import { briefMissingLine } from './control/review-release.ts';
+import { recordGatesRun } from './control/release-gates.ts';
 
 const usage = `harness ${HARNESS_VERSION}
 
@@ -2174,6 +2175,17 @@ async function run(
           onEvidence: (e) =>
             process.stderr.write(`harness gates: ${e.gate} ${e.passed ? 'passed' : 'failed'}\n`),
         });
+        // Прогон — в состояние (ревью B2 M4): страховка выпуска засчитывает
+        // только записанный прогон с основанием каждого gate. Нет базы
+        // состояния (проверка до первого run) — записывать некуда.
+        if (!data.interrupted && existsSync(join(resolve(state), 'state.sqlite'))) {
+          const h = open(state, b, false);
+          try {
+            recordGatesRun(h.engine, b.policy, data);
+          } finally {
+            h.close();
+          }
+        }
         // Прерывание — отказ CANCELLED; исход каждого gate — в issues.
         if (data.interrupted)
           throw new HarnessError(

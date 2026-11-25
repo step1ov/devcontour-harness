@@ -1649,6 +1649,33 @@ export const localSchemas = {
       )
       .max(20),
   }),
+  /**
+   * Полные прогоны `harness gates` (alpha.71, ревью B2 M4): запись по
+   * `<репозиторий>@<SHA>` у `@workspace` — до 10 последних прогонов с digest
+   * файла итога и основанием каждого gate (`gateBasis`). Страховка выпуска
+   * засчитывает только прогон из этой записи.
+   */
+  'gates-runs': z.strictObject({
+    runs: z
+      .array(
+        z.strictObject({
+          id: z.string().min(1).max(200),
+          at: isoTimeSchema,
+          digest: digestSchema,
+          passed: z.boolean(),
+          gates: z
+            .array(
+              z.strictObject({
+                gate: idSchema,
+                status: z.string().min(1).max(40),
+                basis: digestSchema,
+              }),
+            )
+            .max(500),
+        }),
+      )
+      .max(10),
+  }),
   'round-epochs': z.strictObject({
     epochs: z.array(z.strictObject({ at: isoTimeSchema, workId: idSchema })).max(100),
   }),

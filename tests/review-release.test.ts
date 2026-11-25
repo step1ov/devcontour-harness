@@ -15,7 +15,14 @@ import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
@@ -44,11 +51,17 @@ import {
   reviewRelease,
   type ReleaseReviewInput,
 } from '../src/control/review-release.ts';
-import { fullGatesProblem } from '../src/control/release-gates.ts';
+import {
+  fullGatesProblem,
+  recordGatesRun,
+  releaseGatesProblems,
+} from '../src/control/release-gates.ts';
+import { checkGates } from '../src/control/gates-check.ts';
 import { releaseReviewRequired, releaseReviewState } from '../src/control/release-review-state.ts';
 import { releaseDocsLine, releaseDocsState } from '../src/control/release-docs.ts';
 import { engineOf, graphOf, policyOf, ready } from './engine-fixture.ts';
 import { bin } from './runner-fixture.ts';
+import { junit } from './git-fixture.ts';
 import { finding, recordedPrompt, verdict } from './review-fixture.ts';
 
 const CADDY = 'example.com {\n  reverse_proxy /api/* api:3000\n}\n';
@@ -95,6 +108,12 @@ function fixture(patch: (p: Record<string, any>) => void = () => {}) {
     p.isolation = { mode: 'none', domains: [] };
     p.environment = { values: { FIXTURE_SCENARIO: scenarioPath } };
     p.release = { review: 'required', topology: ['deploy/Caddyfile', 'deploy/prod.env'] };
+    // Gate unit проходит на любом SHA: полный прогон gates цели — настоящий.
+    p.repositories[0].gates[0].command = [
+      process.execPath,
+      '-e',
+      junit('<testcase classname="app" name="ok"/>'),
+    ];
     patch(p);
   });
   const targetRef = policy.repositories[0]!.targetRef;
@@ -118,36 +137,24 @@ function fixture(patch: (p: Record<string, any>) => void = () => {}) {
     stateDir: state,
     repoPath: (path: string) => path,
   };
-  // Полный прогон gates на цели (alpha.71): здесь не предмет — записан
-  // проходящим итогом `harness gates`, как его оставил бы ведущий.
-  let seq = 0;
-  const fullGates = (sha: string, status = 'passed', definition?: string) => {
-    seq += 1;
-    const dir = join(state, 'gates-at', `GA-${sha.slice(0, 8)}-${seq}`);
-    mkdirSync(dir, { recursive: true });
-    writeFileSync(
-      join(dir, 'result.json'),
-      JSON.stringify({
-        // Каждый следующий итог позже прежнего: решает самый поздний.
-        at: new Date(Date.now() + seq * 1000).toISOString(),
-        data: {
-          id: 'GA-' + sha.slice(0, 8),
-          repositoryId: 'app',
-          sha,
-          passed: status === 'passed',
-          gates: policy.repositories[0]!.gates.map((g) => ({
-            gate: g.id,
-            status,
-            definition: definition ?? gateDigest(g),
-          })),
-        },
+  // Полный прогон gates на цели (alpha.71): здесь не предмет — исполняется
+  // тем же путём, что у harness gates и review-release, и записывается в
+  // состояние (ревью B2 M4).
+  const fullGates = async (sha: string) =>
+    recordGatesRun(
+      env.engine,
+      policy,
+      await checkGates({
+        policy,
+        baseDir: '',
+        repoPath: (r) => r.path,
+        stateDir: state,
+        repositoryId: 'app',
+        rev: sha,
       }),
     );
-  };
-  const review = (input: ReleaseReviewInput = {}) => {
-    fullGates(input.head ?? git('rev-parse', targetRef));
-    return reviewRelease(ctx, input);
-  };
+  // review-release сам исполняет полный прогон, когда годного нет.
+  const review = (input: ReleaseReviewInput = {}) => reviewRelease(ctx, input);
   const reviewBare = (input: ReleaseReviewInput = {}) => reviewRelease(ctx, input);
   const heads = () => ({ app: git('rev-parse', targetRef) });
   return {
@@ -288,7 +295,8 @@ test('P7-6: release done при required — отказ без ревью, с б
   ready(f.engine, graphOf({ w: [] }));
   accept(f.engine, f.base, f.head);
   notReady(
-    () => releaseDone(f.engine, { summary: 'готово', heads: f.heads() }),
+    () =>
+      releaseDone(f.engine, { summary: 'готово', heads: f.heads(), fullGates: { app: undefined } }),
     /ревью выпуска не проводилось.*harness review-release/,
   );
   assert.equal(
@@ -310,7 +318,8 @@ test('P7-6: release done при required — отказ без ревью, с б
   assert.equal(r1.approved, false);
   const blocking = r1.findings[0]!;
   notReady(
-    () => releaseDone(f.engine, { summary: 'готово', heads: f.heads() }),
+    () =>
+      releaseDone(f.engine, { summary: 'готово', heads: f.heads(), fullGates: { app: undefined } }),
     /не одобрено: открытых находок 1, блокирующих 1.*Открытых находок: 1/,
   );
   const findings = f.engine.read((v) => releaseReviewState(v, f.policy, f.heads()));
@@ -334,7 +343,8 @@ test('P7-6: release done при required — отказ без ревью, с б
   assert.equal(stale.head, f.head);
   assert.equal(stale.target, fixed);
   notReady(
-    () => releaseDone(f.engine, { summary: 'готово', heads: f.heads() }),
+    () =>
+      releaseDone(f.engine, { summary: 'готово', heads: f.heads(), fullGates: { app: undefined } }),
     /раунд 1\) на [0-9a-f]{12}, а принятая цель — [0-9a-f]{12}/,
   );
   // Раунд 2 на новой цели: прежняя находка закрыта, одна заметка — не блокирует.
@@ -351,7 +361,11 @@ test('P7-6: release done при required — отказ без ревью, с б
   assert.equal(r2.approved, true);
   assert.equal(r2.findings.find((x) => x.id === blocking.id)?.status, 'closed');
   const done = leadDataSchema.parse(
-    releaseDone(f.engine, { summary: 'Выпуск готов', heads: f.heads() }),
+    releaseDone(f.engine, {
+      summary: 'Выпуск готов',
+      heads: f.heads(),
+      fullGates: { app: undefined },
+    }),
   );
   assert.equal(done.release?.works, 1);
   // Шаг документации по умолчанию — совет (alpha.70): предупреждение, не отказ.
@@ -368,7 +382,9 @@ test('P7-6: advisory — release done проходит с предупрежде
   });
   ready(f.engine, graphOf({ w: [] }));
   accept(f.engine, f.base, f.head);
-  const done = leadDataSchema.parse(releaseDone(f.engine, { summary: 'готово', heads: f.heads() }));
+  const done = leadDataSchema.parse(
+    releaseDone(f.engine, { summary: 'готово', heads: f.heads(), fullGates: { app: undefined } }),
+  );
   assert.equal(done.release?.works, 1);
   assert.equal(done.releaseReview?.required, false);
   assert.equal(done.releaseReview?.status, 'not-run');
@@ -387,7 +403,7 @@ test('P7-6: advisory — release done проходит с предупрежде
   ready(strict.engine, graphOf({ w: [] }));
   accept(strict.engine, strict.base, strict.head);
   assert.throws(
-    () => releaseDone(strict.engine, { summary: 'готово' }),
+    () => releaseDone(strict.engine, { summary: 'готово', fullGates: { app: undefined } }),
     (e: unknown) => e instanceof HarnessError && e.code === 'NOT_READY',
   );
 
@@ -411,7 +427,12 @@ test('P7-6: advisory — release done проходит с предупрежде
   ready(light.engine, graphOf({ w: [] }));
   accept(light.engine, light.base, light.head);
   notReady(
-    () => releaseDone(light.engine, { summary: 'готово', heads: light.heads() }),
+    () =>
+      releaseDone(light.engine, {
+        summary: 'готово',
+        heads: light.heads(),
+        fullGates: { app: undefined },
+      }),
     /harness review-release/,
   );
 });
@@ -454,7 +475,7 @@ test('база выпуска: записана при регистрации и
   assert.equal(recorded.baseSource, 'register');
   // Новый выпуск (после release done) записывает новую базу.
   f.clock.now += 1000;
-  releaseDone(f.engine, { summary: 'готово', heads: f.heads() });
+  releaseDone(f.engine, { summary: 'готово', heads: f.heads(), fullGates: { app: undefined } });
   f.clock.now += 1000;
   assert.deepEqual(f.engine.recordReleaseBases({ app: other }, 'outline'), ['app']);
   assert.equal(f.engine.read((v) => releaseReviewState(v, f.policy)).baseSource, 'outline');
@@ -475,7 +496,12 @@ test('ревью выпуска — только от базы выпуска и
   assert.equal(state.status, 'stale');
   assert.equal(state.repositories[0]!.staleReason, 'base-mismatch');
   notReady(
-    () => releaseDone(f.engine, { summary: 'готово', heads: { app: head } }),
+    () =>
+      releaseDone(f.engine, {
+        summary: 'готово',
+        heads: { app: head },
+        fullGates: { app: undefined },
+      }),
     /не от базы выпуска/,
   );
   // Ревью от базы выпуска одобрено; договор изменился (ответ владельца) — снова нет.
@@ -493,12 +519,19 @@ test('ревью выпуска — только от базы выпуска и
         summary: 'готово',
         heads: { app: head },
         contracts: { app: 'changed-contract' },
+        fullGates: { app: undefined },
       }),
     /договор выпуска изменился/,
   );
   // Цель не определена (target ref не читается) — выпуск не закрывается.
   notReady(
-    () => releaseDone(f.engine, { summary: 'готово', heads: {}, contracts: before }),
+    () =>
+      releaseDone(f.engine, {
+        summary: 'готово',
+        heads: {},
+        contracts: before,
+        fullGates: { app: undefined },
+      }),
     /принятая цель не определена/,
   );
   // Выпуск без изменений: база = цель, ревью идёт с пустым diff.
@@ -668,13 +701,16 @@ test('ревью 1: release.docs: required держит release done и при r
   ready(f.engine, graphOf({ w: [] }));
   accept(f.engine, f.base, f.head);
   notReady(
-    () => releaseDone(f.engine, { summary: 'готово', heads: f.heads() }),
+    () =>
+      releaseDone(f.engine, { summary: 'готово', heads: f.heads(), fullGates: { app: undefined } }),
     /нет работы с меткой docs после корневых работ \(w\).*release\.docs: required/,
   );
   const g = fixture((p) => (p.release = { review: 'advisory', docs: 'advisory' }));
   ready(g.engine, graphOf({ w: [] }));
   accept(g.engine, g.base, g.head);
-  const done = leadDataSchema.parse(releaseDone(g.engine, { summary: 'готово', heads: g.heads() }));
+  const done = leadDataSchema.parse(
+    releaseDone(g.engine, { summary: 'готово', heads: g.heads(), fullGates: { app: undefined } }),
+  );
   assert.match(done.warning ?? '', /нет работы с меткой docs.*release\.docs: advisory/);
   // Второй выпуск: принятая в первом w не корень нового выпуска.
   const next = graphOf({ w: [], w2: [], d2: ['w2'] }, '2');
@@ -729,27 +765,65 @@ test('ревью 3: отмена во время второго прохода �
   assert.equal(trees.length, 1, trees.join('\n'));
 });
 
-test('ревью B, страховка выпуска: review-release без полного прогона gates на цели исполняет его сам и отказывает при провале; устаревший — заново; release done без него — отказ', async () => {
-  const f = fixture();
-  ready(f.engine, graphOf({ a: [] }));
-  accept(f.engine, f.base, f.head);
-  // Нет итога: review-release исполняет все gates на цели; gate unit на ней падает.
+test('ревью B, страховка выпуска: review-release исполняет полный прогон сам и отказывает при провале; годен только прогон из состояния под нынешним основанием; release done без него — отказ', async () => {
+  // Gate unit падает на цели: review-release исполняет все gates и отказывает.
+  const failing = fixture(
+    (p) => (p.repositories[0].gates[0].command = [process.execPath, '-e', 'process.exit(1)']),
+  );
+  ready(failing.engine, graphOf({ a: [] }));
+  accept(failing.engine, failing.base, failing.head);
   await assert.rejects(
-    () => f.reviewBare(),
+    () => failing.reviewBare(),
     (e: unknown) =>
       e instanceof HarnessError &&
       e.code === 'NOT_READY' &&
       /полный прогон gates app .* не прошёл: unit/.test(e.message),
   );
-  assert.match(fullGatesProblem(f.state, f.policy.repositories[0]!, f.head) ?? '', /не прошёл/);
-  // Устаревшее определение gate — прогон не годен.
-  f.fullGates(f.head, 'passed', 'f'.repeat(64));
-  assert.match(fullGatesProblem(f.state, f.policy.repositories[0]!, f.head) ?? '', /устарел/);
-  // Годный прогон — ревью идёт.
-  f.fullGates(f.head);
-  assert.equal(fullGatesProblem(f.state, f.policy.repositories[0]!, f.head), undefined);
+  const f = fixture();
+  ready(f.engine, graphOf({ a: [] }));
+  accept(f.engine, f.base, f.head);
+  const repo = f.policy.repositories[0]!;
+  const problem = (policy = f.policy) =>
+    f.engine.read((v) =>
+      fullGatesProblem(v, f.state, policy, policy.repositories[0]!, f.head, f.engine.version),
+    );
+  // Итог, написанный руками, без записи в состоянии — не прогон.
+  const forged = join(f.state, 'gates-at', 'GA-forged');
+  mkdirSync(forged, { recursive: true });
+  writeFileSync(
+    join(forged, 'result.json'),
+    JSON.stringify({
+      at: new Date().toISOString(),
+      data: {
+        id: 'GA-forged',
+        repositoryId: 'app',
+        sha: f.head,
+        passed: true,
+        gates: [{ gate: 'unit', status: 'passed', definition: gateDigest(repo.gates[0]!) }],
+      },
+    }),
+  );
+  assert.match(problem() ?? '', /нет полного прогона gates app/);
+  // review-release сам исполняет и записывает прогон; ревью идёт.
   const record = await f.reviewBare();
   assert.equal(record.kind, 'release');
+  assert.equal(problem(), undefined);
+  // Основание gate сменилось (окружение) — прогон устарел.
+  const moved = {
+    ...f.policy,
+    environment: {
+      inherit: [],
+      secrets: {},
+      ...f.policy.environment,
+      values: { ...f.policy.environment?.values, NEW: '1' },
+    },
+  };
+  assert.match(problem(moved) ?? '', /устарел: основание gate unit/);
+  // Подменённый файл итога записанного прогона — не годен.
+  const runs = f.engine.read((v) => v.local('gates-runs', WORKSPACE_OWNER, `app@${f.head}`)!.runs);
+  const file = join(f.state, 'gates-at', runs.at(-1)!.id, 'result.json');
+  writeFileSync(file, readFileSync(file, 'utf8') + ' ');
+  assert.match(problem() ?? '', /не совпадает с записью состояния/);
   // release done: причина полного прогона — отказ при любом правиле ревью.
   notReady(
     () =>
@@ -759,6 +833,20 @@ test('ревью B, страховка выпуска: review-release без п�
         fullGates: { app: 'нет полного прогона gates app' },
       }),
     /нет полного прогона gates app/,
+  );
+  // Ревью B2 L1: репозиторий с принятыми работами без проверки — отказ.
+  notReady(
+    () => releaseDone(f.engine, { summary: 'готово', heads: f.heads(), fullGates: {} }),
+    /полный прогон gates app не проверен/,
+  );
+  // Ревью B2 M2: цель не читается — причина с ходом при любом правиле ревью.
+  const problems = f.engine.read((v) =>
+    releaseGatesProblems(v, f.state, f.policy, {}, new Set(['app']), f.engine.version),
+  );
+  assert.match(problems.app ?? '', /не читается — полный прогон gates на ней не проверить/);
+  notReady(
+    () => releaseDone(f.engine, { summary: 'готово', heads: f.heads(), fullGates: problems }),
+    /не читается/,
   );
 });
 

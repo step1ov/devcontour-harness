@@ -20,7 +20,7 @@ import {
 } from '../contracts/index.ts';
 import { requestsOf } from '../engine/input-requests.ts';
 import { checkGates, commitOf } from './gates-check.ts';
-import { fullGatesProblem } from './release-gates.ts';
+import { fullGatesProblem, recordGatesRun } from './release-gates.ts';
 import {
   rawGit,
   reviewBranch,
@@ -226,17 +226,25 @@ export async function reviewRelease(
   // review-release исполняет его сам; не прошёл — отказ до ревью.
   const path = ctx.repoPath(repo.path);
   const sha = await commitOf(path, head, repo.id);
-  if (fullGatesProblem(ctx.stateDir, repo, sha))
-    await checkGates({
-      policy: ctx.policy,
-      baseDir: '',
-      repoPath: (r) => ctx.repoPath(r.path),
-      stateDir: ctx.stateDir,
-      repositoryId: repo.id,
-      rev: sha,
-      ...(input.signal ? { signal: input.signal } : {}),
-    });
-  const gates = fullGatesProblem(ctx.stateDir, repo, sha);
+  const problem = () =>
+    ctx.engine.read((v) =>
+      fullGatesProblem(v, ctx.stateDir, ctx.policy, repo, sha, ctx.engine.version),
+    );
+  if (problem())
+    recordGatesRun(
+      ctx.engine,
+      ctx.policy,
+      await checkGates({
+        policy: ctx.policy,
+        baseDir: '',
+        repoPath: (r) => ctx.repoPath(r.path),
+        stateDir: ctx.stateDir,
+        repositoryId: repo.id,
+        rev: sha,
+        ...(input.signal ? { signal: input.signal } : {}),
+      }),
+    );
+  const gates = problem();
   if (gates)
     throw new HarnessError(
       'NOT_READY',

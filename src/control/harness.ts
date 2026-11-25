@@ -78,7 +78,7 @@ import { staleArtifacts } from '../verification/confirm.ts';
 import { processListBackend } from '../verification/gates.ts';
 import { collectReportInput } from './report.ts';
 import { valueReport, type ValueReportOptions } from '../report/compute.ts';
-import { fullGatesProblem } from './release-gates.ts';
+import { releaseGatesProblems } from './release-gates.ts';
 
 export interface HarnessOptions {
   /** Каталог состояния исполнения: база, worktrees, артефакты. */
@@ -504,11 +504,21 @@ export class Harness {
         ),
     );
     const contracts: Record<string, string> = {};
-    const fullGates: Record<string, string | undefined> = {};
+    // Полный прогон gates (ревью B2 M2/M4): у каждого репозитория с
+    // принятыми работами, в том числе с нечитаемой целью — отказ с ходом.
+    const fullGates = this.engine.read((v) =>
+      releaseGatesProblems(
+        v,
+        this.options.stateDir,
+        this.policy,
+        heads,
+        repositories,
+        this.engine.version,
+      ),
+    );
     for (const repo of this.policy.repositories) {
       const head = heads[repo.id];
       if (!head || !repositories.has(repo.id)) continue;
-      fullGates[repo.id] = fullGatesProblem(this.options.stateDir, repo, head);
       contracts[repo.id] = (
         await releaseContract(
           { engine: this.engine, policy: this.policy },

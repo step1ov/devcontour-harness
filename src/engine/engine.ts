@@ -146,6 +146,7 @@ import {
 } from '../projections/gate-hold.ts';
 import {
   LEAD_RECOVERY_LIMIT,
+  type LocalValue,
   type LeadDiagnosis,
   type LeadDiagnosisCause,
   type LeadReset,
@@ -4930,6 +4931,20 @@ export class Engine {
    * выпуска — нет записи или она старше итога прежнего выпуска (`release
    * done`). Записанная база не переписывается. Возвращает записанные.
    */
+  /**
+   * Записать полный прогон `harness gates` (ревью B2 M4): digest файла итога
+   * и основание каждого gate; до 10 последних прогонов на репозиторий и SHA.
+   */
+  recordGatesRun(repositoryId: string, sha: string, run: LocalValue<'gates-runs'>['runs'][number]) {
+    return this.tx('lead.recorded', (tx) => {
+      const key = `${repositoryId}@${sha}`;
+      const prev = tx.local('gates-runs', WORKSPACE_OWNER, key)?.runs ?? [];
+      tx.putLocal('gates-runs', WORKSPACE_OWNER, key, {
+        runs: [...prev.filter((r) => r.id !== run.id), run].slice(-10),
+      });
+    });
+  }
+
   /**
    * Записать постановку графа (`.brief.md`, alpha.71 A1) для договора
    * выпуска: тот же digest — без записи; новая постановка того же графа
