@@ -18,6 +18,13 @@ export interface PlanningRequest {
 }
 
 /**
+ * Область gates задачи (alpha.71): только gates, покрывающие её критерии и
+ * затронутые пакеты, — совет, не проверка.
+ */
+export const GATE_SCOPE_SECTION =
+  "Scope each task's gates to the checks that cover its acceptance criteria and the packages it changes: include the gates of the touched packages and of the requirements it proves, and leave out slow acceptance or end-to-end gates of apps it does not touch (a web-only task does not need the API acceptance gate). Every test gate a requirement links to stays in that task's gates.";
+
+/**
  * Общие разделы prompt планирования (S1–S11): смысл подсказки DevContour без
  * продуктовых строк хоста. Host-инструкции идут отдельным блоком перед brief,
  * brief — последним.
@@ -29,6 +36,7 @@ function sharedSections(facts: PlanningFacts, recommendedTasks: number): string[
       JSON.stringify(facts.roles),
     'Configured checks, by repository. A task proves itself with gates: a subset of these that must include a test gate; a named group is referenced as "@name" instead of listing its members, and nothing is inherited implicitly. A task in a library proves its consumers only when it declares them: consumers lists dependent components and their gates or groups, run against the integrated result of the task. Requirements link to a test gate from that same subset: ' +
       JSON.stringify(facts.gates),
+    GATE_SCOPE_SECTION,
     'Use a DAG with stable local keys. Roles owning separate surfaces can work in parallel once their shared contracts are agreed; test scenarios can be prepared early. Each task must have observable acceptance criteria. Return only the requested JSON structure.',
     'Keep component tasks scoped to their repository. Use scope=workspace and relatedRepositories only for work spanning multiple components. Component rules and task histories are local; the coordinator owns shared contracts and dependency links.',
     'Available repositories: ' +

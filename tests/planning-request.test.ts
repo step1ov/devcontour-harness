@@ -30,6 +30,7 @@ const S = {
     `Inspect the repository read-only. Propose a small first vertical slice, at most ${n} tasks. Do not edit files, run implementation agents, commit, or mark tasks done. Independent plan review follows; the coordinator handles approval according to project policy.`,
   s2: "Declared roles, by repository. A task may only use a role declared for its own repository; no other role exists. Where a role has writePaths, the task's writePaths must lie inside them, or the executor can change nothing. A role marked requiresContract needs an approved contract bound to its task: ",
   s3: 'Configured checks, by repository. A task proves itself with gates: a subset of these that must include a test gate; a named group is referenced as "@name" instead of listing its members, and nothing is inherited implicitly. A task in a library proves its consumers only when it declares them: consumers lists dependent components and their gates or groups, run against the integrated result of the task. Requirements link to a test gate from that same subset: ',
+  s3b: "Scope each task's gates to the checks that cover its acceptance criteria and the packages it changes: include the gates of the touched packages and of the requirements it proves, and leave out slow acceptance or end-to-end gates of apps it does not touch (a web-only task does not need the API acceptance gate). Every test gate a requirement links to stays in that task's gates.",
   s4: 'Use a DAG with stable local keys. Roles owning separate surfaces can work in parallel once their shared contracts are agreed; test scenarios can be prepared early. Each task must have observable acceptance criteria. Return only the requested JSON structure.',
   s5: 'Keep component tasks scoped to their repository. Use scope=workspace and relatedRepositories only for work spanning multiple components. Component rules and task histories are local; the coordinator owns shared contracts and dependency links.',
   s6a: 'Available repositories: ',
@@ -92,6 +93,7 @@ function expectedShared(f: PlanningFacts, n = 15) {
     S.s1(n),
     S.s2 + JSON.stringify(f.roles),
     S.s3 + JSON.stringify(f.gates),
+    S.s3b,
     S.s4,
     S.s5,
     S.s6a +
