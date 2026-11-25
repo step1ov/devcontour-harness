@@ -1,4 +1,4 @@
-import { freshDiagnosis } from '../projections/lead-recovery.ts';
+import { freshDiagnosis, repeatedDefect } from '../projections/lead-recovery.ts';
 import { silentGateOnSha } from '../verification/gates-at.ts';
 import { controllerTemp } from '../environment/controller-temp.ts';
 import type { LeadDiagnosis } from '../contracts/execution.ts';
@@ -1638,6 +1638,19 @@ export class Runner {
     }
   }
 
+  /**
+   * Попытка после того же дефекта дважды подряд начинается с чистого дерева
+   * (alpha.71, C3, `continuableDraft`): исполнитель узнаёт почему.
+   */
+  private freshStartNotes(work: WorkState): string[] {
+    const defect = this.engine.read((v) => repeatedDefect(work, v.attempts(work.id)));
+    return defect
+      ? [
+          `Fresh start: attempts ${defect.runs.join(' and ')} failed on the same defect (${defect.by === 'finding' ? 'blocking review finding ' + defect.finding : 'the same failure'}), so this attempt starts from a clean tree instead of continuing their patch. Do not rebuild the same patch: follow the lead's diagnosis below and take a different approach, then make the gates pass.`,
+        ]
+      : [];
+  }
+
   /** Накладывает черновик предыдущей попытки, если он есть и годится. */
   private async continueDraft(
     attempt: AttemptState,
@@ -2054,6 +2067,7 @@ export class Runner {
                         ...this.notes(attempt, false),
                         ...(await this.hostNotes(work, attempt, false)),
                         ...(dependencies ? [writerDependenciesNote(dependencies)] : []),
+                        ...this.freshStartNotes(work),
                         ...(repo.generators?.length ? [generatorNote(repo.generators)!] : []),
                         ALREADY_SATISFIED_WRITER_NOTE,
                         WRITER_TRIAGE_TEXT,

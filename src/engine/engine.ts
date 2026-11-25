@@ -157,6 +157,7 @@ import {
   leadHold,
   normalizedHypothesis,
   pendingFailures,
+  repeatedDefect,
   type LeadHold,
 } from '../projections/lead-recovery.ts';
 import { REQUIREMENT_GATE } from '../verification/requirements.ts';
@@ -6371,6 +6372,21 @@ export class Engine {
           'INVALID_INPUT',
           `Гипотеза повторяет разбор ${same.id}: третья попытка с той же гипотезой — та же слепая попытка; назовите новую или передайте решение человеку`,
           [{ path: ['--hypothesis'], message: same.id }],
+        );
+      // Тот же дефект дважды подряд (alpha.71, C3): разбор без новой гипотезы
+      // ничего не меняет — третья попытка была бы той же слепой.
+      const repeated = repeatedDefect(w, attempts);
+      if (
+        repeated &&
+        !hypothesis &&
+        input.cause !== 'split' &&
+        input.cause !== 'contradiction' &&
+        failures.includes(repeated.runs[1])
+      )
+        throw new HarnessError(
+          'INVALID_INPUT',
+          `--hypothesis обязательна: попытки ${repeated.runs.join(' и ')} упали на одном и том же дефекте (${repeated.by === 'finding' ? 'находка ' + repeated.finding : 'тот же отпечаток отказа'}); назовите, что следующая попытка с чистого дерева сделает иначе`,
+          [{ path: ['--hypothesis'], message: 'required' }],
         );
       const evidence = (input.evidence ?? []).map((e) => maskSecrets(e).trim()).filter(Boolean);
       if (evidence.length > 10 || evidence.some((e) => e.length > 1000))

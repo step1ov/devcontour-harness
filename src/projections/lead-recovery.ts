@@ -15,7 +15,7 @@ type AttemptFacts = Pick<
   AttemptState,
   'id' | 'workId' | 'status' | 'failureKind' | 'blocked' | 'writerBlocked' | 'interrupted'
 > &
-  Partial<Pick<AttemptState, 'writerSplit'>>;
+  Partial<Pick<AttemptState, 'writerSplit' | 'failureFingerprint' | 'evidence'>>;
 type WorkFacts = Pick<
   WorkState,
   'id' | 'status' | 'attempt' | 'approvedDigest' | 'rework' | 'leadRecovery' | 'recovery'
@@ -100,6 +100,46 @@ export function pendingFailures(work: WorkFacts, attempts: readonly AttemptFacts
   return current.filter((a) => !settled.has(a.id) && !episodes.has(a.id)).map((a) => a.id);
 }
 
+/**
+ * Тот же дефект в двух засчитанных отказах подряд (alpha.71, C3): тот же
+ * отпечаток отказа или та же блокирующая находка ревью (её ID протокола) в
+ * решающих отклонениях обеих попыток. Отказы окружения и провайдера серию не
+ * обрывают и не продолжают. Следующая попытка начинается с чистого дерева,
+ * а выдача ждёт разбора ведущего с гипотезой.
+ */
+export interface RepeatedDefect {
+  runs: [string, string];
+  by: 'fingerprint' | 'finding';
+  /** ID повторившейся блокирующей находки (`by: finding`). */
+  finding?: string;
+}
+
+const blockingFindings = (a: AttemptFacts) =>
+  new Set(
+    (a.evidence ?? [])
+      .findLast((e) => e.kind === 'review' && !e.passed && !e.consumer)
+      ?.findings?.filter((f) => f.severity === 'blocking' && f.id)
+      .map((f) => f.id!) ?? [],
+  );
+
+export function repeatedDefect(
+  work: WorkFacts,
+  attempts: readonly AttemptFacts[],
+): RepeatedDefect | undefined {
+  const counted = countedFailures(work, attempts);
+  const [before, last] = counted.slice(-2);
+  if (!before || !last) return undefined;
+  const runs: [string, string] = [before.id, last.id];
+  if (last.failureFingerprint && last.failureFingerprint === before.failureFingerprint)
+    return { runs, by: 'fingerprint' };
+  if (last.failureKind === 'review' && before.failureKind === 'review') {
+    const earlier = blockingFindings(before);
+    const finding = [...blockingFindings(last)].find((id) => earlier.has(id));
+    if (finding) return { runs, by: 'finding', finding };
+  }
+  return undefined;
+}
+
 export const latestDiagnosis = (work: WorkFacts) => work.leadRecovery?.diagnoses.at(-1);
 
 /** Разбор свежий: разбирает последний засчитанный отказ текущей редакции. */
@@ -152,7 +192,13 @@ export function leadHold(
     if (fresh.cause === 'contradiction') return { kind: 'contradiction', diagnosis: fresh };
   }
   const pending = pendingFailures(work, attempts);
-  if (pending.length >= policy.diagnoseAfter && work.attempt < maxAttempts)
+  // Тот же дефект дважды подряд — разбор до следующей попытки при любом
+  // `diagnoseAfter` (alpha.71): третье продолжение того же патча не выдаётся.
+  const repeated = repeatedDefect(work, attempts);
+  if (
+    (pending.length >= policy.diagnoseAfter || (repeated && pending.includes(repeated.runs[1]))) &&
+    work.attempt < maxAttempts
+  )
     return { kind: 'diagnosis-required', failures: pending };
   return undefined;
 }

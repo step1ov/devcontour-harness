@@ -11,6 +11,7 @@ import {
   writerBlockedStop,
 } from '../contracts/repair-policy.ts';
 import { RECOVERY_THRESHOLD, isNeutral } from './property-recovery.ts';
+import { pendingFailures, repeatedDefect } from '../projections/lead-recovery.ts';
 import { blockingRequest } from './input-requests.ts';
 import type { LeadHold } from '../projections/lead-recovery.ts';
 
@@ -257,6 +258,18 @@ export function repairDecision(
           : hold.kind === 'replan'
             ? `${work.id}: разбор ${hold.diagnosis.id} — задача велика: перепланируйте и согласуйте разделение.${detail}`
             : `${work.id}: разбор ${hold.diagnosis.id} — противоречивое обещание: нужно решение человека.${detail}`,
+    };
+
+  // Тот же дефект дважды подряд без разбора (alpha.71, C3): автоматического
+  // повтора нет — разбор ведущего с новой гипотезой, затем попытка с чистого дерева.
+  const attempts = view.attempts(work.id);
+  const defect = repeatedDefect(work, attempts);
+  if (defect && pendingFailures(work, attempts).includes(defect.runs[1]))
+    return {
+      action: 'stop',
+      workId: work.id,
+      kind,
+      reason: `${work.id}: тот же дефект второй раз подряд (${defect.by === 'finding' ? 'блокирующая находка ' + defect.finding : 'тот же отпечаток отказа'}; попытки ${defect.runs.join(', ')}). Автоматического повтора нет: нужен разбор ведущего с новой гипотезой (harness diagnose --work ${work.id} --cause coverage|approach|split|contradiction|environment|other --hypothesis "…"), следующая попытка начнётся с чистого дерева.${detail}`,
     };
 
   // Отказ окружения, который повтор не снимет: сразу ведущему, без повтора.

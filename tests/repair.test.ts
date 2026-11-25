@@ -162,19 +162,17 @@ test('T15: каждый чинимый класс получает повтор;
   void store;
 });
 
-test('T15: одна и та же причина чинится до предела класса, затем остановка; другая причина — новая гипотеза', () => {
+test('T15: тот же отпечаток второй раз подряд — остановка (alpha.71); другая причина — новая гипотеза', () => {
   const { engine } = engineOf(policyOf((p) => ((p as any).maxAttempts = 10)));
   ready(engine, graphOf({ a: [] }));
   const options = { budgetLeft: 20, maxAttempts: 10 };
-  for (let i = 0; i < repairPolicy.gate.repeats; i++) {
-    breakWork(engine, 'a', 'gate', 'candidate/typecheck: та же ошибка');
-    assert.equal(decide(engine, options)!.action, 'retry');
-    engine.retry('a');
-  }
   breakWork(engine, 'a', 'gate', 'candidate/typecheck: та же ошибка');
-  const exhausted = decide(engine, options)!;
-  assert.equal(exhausted.action, 'stop');
-  assert.match(exhausted.reason, /одна и та же причина 3 раз/);
+  assert.equal(decide(engine, options)!.action, 'retry');
+  engine.retry('a');
+  breakWork(engine, 'a', 'gate', 'candidate/typecheck: та же ошибка');
+  const repeated = decide(engine, options)!;
+  assert.equal(repeated.action, 'stop');
+  assert.match(repeated.reason, /тот же дефект второй раз подряд/);
   engine.retry('a');
   breakWork(engine, 'a', 'gate', 'candidate/lint: другая ошибка');
   assert.equal(decide(engine, options)!.action, 'retry');
@@ -713,11 +711,12 @@ test('T15: одна и та же причина сверх предела кла
   assert.equal(data.works[0]!.status, 'failed');
   assert.equal(
     h.engine.read((v) => v.attempts('add-greeting').length),
-    repairPolicy.gate.repeats + 1,
+    2,
+    'тот же провал второй раз подряд — без автоматического повтора (alpha.71)',
   );
   assert.equal(data.workflow?.status, 'failed');
-  assert.equal(data.workflow?.repairs, repairPolicy.gate.repeats);
-  assert.match(data.workflow.error!, /одна и та же причина/);
+  assert.equal(data.workflow?.repairs, 1);
+  assert.match(data.workflow.error!, /тот же дефект второй раз подряд/);
   h.close();
 });
 

@@ -1,3 +1,4 @@
+import { repeatedDefect } from '../projections/lead-recovery.ts';
 import {
   digestOf,
   type AttemptState,
@@ -171,6 +172,9 @@ export function continuableDraft(
     )
     .at(-1);
   if (!previous || previous.status !== 'failed') return undefined;
+  // Тот же дефект дважды подряд (alpha.71, C3): следующая попытка — с чистого
+  // дерева, а не третье продолжение того же патча.
+  if (repeatedDefect(work, view.attempts(work.id))) return undefined;
   if (previous.candidateSha && previous.baseSha && previous.failureKind && work.approvedDigest) {
     // Отказ провайдера кода не касается: такой кандидат берётся
     // переиспользованием, а не черновиком.

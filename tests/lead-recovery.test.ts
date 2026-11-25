@@ -42,7 +42,8 @@ function failOnce(
 ) {
   const a = e.claim('c1');
   assert.ok(a, 'попытка выдана');
-  e.fail(a.id, a.token, 'проверка не прошла: ' + a.attempt, {
+  // Разный текст у каждой попытки: одинаковый отпечаток подряд — повтор дефекта (alpha.71).
+  e.fail(a.id, a.token, 'проверка не прошла: ' + String.fromCharCode(0x430 + (a.attempt % 32)), {
     kind,
     ...(interrupted ? { interrupted: true } : {}),
   });
