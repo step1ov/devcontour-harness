@@ -1650,6 +1650,16 @@ export const localSchemas = {
       .max(20),
   }),
   /**
+   * Метка запуска `harness run` (ревью final M2): процесс run жив и ещё не
+   * взял роль controller (регистрация, пробы, ревью плана). Запись `marker`
+   * у `@workspace`; `until` — предел на случай гибели процесса.
+   */
+  'run-start': z.strictObject({
+    pid: z.number().int().positive(),
+    at: isoTimeSchema,
+    until: isoTimeSchema,
+  }),
+  /**
    * Последний ответ пробы списка процессов в песочнице (alpha.71, ревью D/E
    * MEDIUM-1): запись `probe` у `@workspace`. По ней снятие удержания gate
    * отказом `ps` видят и другие процессы (`explain`, `wait`), а не только

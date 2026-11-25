@@ -18,8 +18,10 @@ $H wait --state <manifest.paths.state> --policy .harness/policy.json \
 ```
 
 It returns when a work is accepted, fails or is held, a writer asks a
-question, the release is ready, or the queue stops (no controller and no
-attempt). A failure that harness retries by itself is not reported. The
+question, the release is ready, or the queue stops (no controller, no
+attempt and no `run` still starting: while `run` registers the graph, probes
+and reviews the plan, its start marker keeps the queue live; a state
+directory that does not exist yet is waited for). A failure that harness retries by itself is not reported. The
 result names what happened, the next step from `explain` (`next.actor`,
 `next.action`, `next.message`), a short status line and `cursor`. Act on
 `next`, then wait again with `--after <cursor>`: events that arrived while

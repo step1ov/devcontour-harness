@@ -1,6 +1,9 @@
 import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { digestOf } from '../src/contracts/index.ts';
 import type { Engine } from '../src/engine/engine.ts';
 import { WAIT_EXIT_CODES, waitFor } from '../src/control/wait.ts';
@@ -179,4 +182,33 @@ test('ревью D/E LOW-3: ожидание продлевает активну
   assert.ok(ticks >= 1);
   assert.ok(Date.parse(until()!) > Date.parse(before!), 'аренда продлена');
   env.store.close();
+});
+
+test('ревью final M2: метка запуска run (процесс жив, роли ещё нет) — не stopped; метка снята или процесса нет — stopped', async () => {
+  const env = engineOf();
+  ready(env.engine, graphOf({ a: [] }));
+  env.clock.now = Date.now();
+  env.engine.recordRunStart(process.pid, 30 * 60_000);
+  const starting = await waitOf(env, { timeoutMs: 600 });
+  assert.equal(starting.kind, 'timeout', 'run запускается — очередь не остановлена');
+  env.engine.clearRunStart(process.pid);
+  assert.equal((await waitOf(env)).kind, 'stopped');
+  // Метка процесса, которого нет: очередь стоит.
+  env.engine.recordRunStart(2 ** 22 + 12345, 30 * 60_000);
+  assert.equal((await waitOf(env)).kind, 'stopped');
+  env.store.close();
+});
+
+test('ревью final M2: каталога состояния ещё нет — wait ждёт его до предела, а не NOT_FOUND', async () => {
+  const dir = join(mkdtempSync(join(tmpdir(), 'harness-wait-')), 'state');
+  const data = await waitFor({
+    stateDir: dir,
+    policy: engineOf().engine.policy,
+    baseDir: dir,
+    timeoutMs: 300,
+    pollMs: 50,
+  });
+  assert.equal(data.kind, 'timeout');
+  assert.match(data.status, /каталог состояния ещё не создан/);
+  waitDataSchema.parse(data);
 });

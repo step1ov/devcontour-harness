@@ -7,15 +7,28 @@
 // событий и состояние только на чтение (WAL); состояние перечитывается, лишь
 // когда его фиксировало другое соединение; controller не спрашивает.
 
+import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { ExecutionPolicy, ExecutionView, RunEvent } from '../contracts/index.ts';
 import type { stopDiagnosisSchema } from '../contracts/diagnosis.ts';
 import type { z } from 'zod';
-import { HarnessError } from '../contracts/index.ts';
+import { WORKSPACE_OWNER } from '../contracts/index.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import { diagnoseState } from '../explain/diagnose.ts';
 
 type StopDiagnosis = z.infer<typeof stopDiagnosisSchema>;
+
+type StartMarker = { pid: number; at: string; until: string } | undefined;
+
+/** Жив ли процесс этой машины (EPERM — жив, но чужой). */
+const processAlive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+};
 
 /** Значимые события ожидания. */
 export const waitKinds = [
@@ -134,11 +147,27 @@ export async function waitFor(input: {
   const now = input.now ?? Date.now;
   const started = now();
   const file = join(resolve(input.stateDir), 'state.sqlite');
-  let store: SqliteExecutionStore;
-  try {
-    store = new SqliteExecutionStore(file, 'harness-wait', { readOnly: true });
-  } catch {
-    throw new HarnessError('NOT_FOUND', 'Каталог состояния не найден: ' + input.stateDir);
+  const sleep = () => new Promise((r) => setTimeout(r, input.pollMs ?? 1000));
+  // Каталога состояния ещё нет (первый run только начинается, ревью final M2):
+  // ждём его в пределах времени, а не отказываем.
+  let store: SqliteExecutionStore | undefined;
+  for (;;) {
+    if (existsSync(file))
+      try {
+        store = new SqliteExecutionStore(file, 'harness-wait', { readOnly: true });
+        break;
+      } catch {
+        /* база ещё создаётся — следующий опрос */
+      }
+    const left = now() - started >= input.timeoutMs || input.signal?.aborted;
+    if (left)
+      return {
+        kind: input.signal?.aborted ? 'aborted' : 'timeout',
+        status: 'каталог состояния ещё не создан: ' + input.stateDir,
+        cursor: input.after ?? 0,
+        waitedMs: now() - started,
+      };
+    await sleep();
   }
   const wanted = new Set<WaitKind>(input.until?.length ? input.until : waitKinds);
   wanted.add('release-ready');
@@ -180,7 +209,7 @@ export async function waitFor(input: {
     }
     // Прочитанное состояние перечитывается только после чужой фиксации.
     let mark = -1;
-    let cached = { ready: false, active: false, leaseUntil: 0 };
+    let cached = { ready: false, active: false, leaseUntil: 0, starting: undefined as StartMarker };
     for (;;) {
       if (input.signal?.aborted) return finish('aborted');
       const events = store.events(cursor, 500);
@@ -221,11 +250,17 @@ export async function waitFor(input: {
           ready: releaseReady(view),
           active: view.attempts().some((a) => a.status === 'active'),
           leaseUntil: view.controller()?.leaseUntil ?? 0,
+          starting: view.local('run-start', WORKSPACE_OWNER, 'marker'),
         }));
       }
+      // Run запускается (регистрация, пробы, ревью плана) — очередь не стоит.
+      const starting =
+        !!cached.starting &&
+        Date.parse(cached.starting.until) > now() &&
+        processAlive(cached.starting.pid);
       if (cached.ready) return finish('release-ready');
       // Никто не работает: нет живой роли controller и активных попыток.
-      if (!events.length && !cached.active && !(cached.leaseUntil > now()))
+      if (!events.length && !cached.active && !starting && !(cached.leaseUntil > now()))
         return finish('stopped');
       if (now() - started >= input.timeoutMs) return finish('timeout');
       if (input.onTick && now() - lastTick >= (input.tickMs ?? 60_000)) {
@@ -236,7 +271,7 @@ export async function waitFor(input: {
           /* продление — удобство, не условие ожидания */
         }
       }
-      await new Promise((r) => setTimeout(r, input.pollMs ?? 1000));
+      await sleep();
     }
   } finally {
     store.close();

@@ -1058,6 +1058,11 @@ export class Harness {
    * провести ревью плана, если его нет, согласовать и вести очередь до
    * простоя. Результаты доставляются получателю с идемпотентным ключом.
    */
+  /**
+   * Запуск очереди. Метка запуска (ревью final M2) — в состоянии до
+   * регистрации, проб и ревью плана: `harness wait` не считает очередь
+   * остановленной, пока процесс run жив и не взял роль controller.
+   */
   async run(input: {
     graph: WorkGraph;
     context?: ContextSnapshot;
@@ -1074,6 +1079,19 @@ export class Harness {
     /** Граф принят регистрацией (до выдачи попыток): постановку записывает CLI. */
     onRegistered?: (graphId: string) => void;
   }) {
+    this.engine.recordRunStart(process.pid, Math.max(30 * 60_000, this.policy.runTimeoutMs));
+    try {
+      return await this.runQueue(input);
+    } finally {
+      try {
+        this.engine.clearRunStart(process.pid);
+      } catch {
+        /* метка — подсказка ожиданию, не условие run */
+      }
+    }
+  }
+
+  private async runQueue(input: Parameters<Harness['run']>[0]) {
     // Пауза обновления, умершего до изменений (нет ни процесса, ни
     // незавершённого возврата), выдачу больше не держит: run её снимает.
     this.engine.clearStaleUpdatePause();

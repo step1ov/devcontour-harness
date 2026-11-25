@@ -6055,6 +6055,28 @@ export class Engine {
     );
   }
 
+  /** Метка запуска run (ревью final M2): процесс `pid` готовит очередь. */
+  recordRunStart(pid: number, ttlMs: number) {
+    const now = this.now();
+    this.tx('lead.recorded', (tx) =>
+      tx.putLocal('run-start', WORKSPACE_OWNER, 'marker', {
+        pid,
+        at: iso(now),
+        until: iso(now + ttlMs),
+      }),
+    );
+  }
+
+  /** Снять метку запуска своего процесса. */
+  clearRunStart(pid: number) {
+    this.tx('lead.recorded', (tx) => {
+      const marker = tx.local('run-start', WORKSPACE_OWNER, 'marker');
+      // Снять — значит истечь сейчас: удаления локальной записи у хранилища нет.
+      if (marker?.pid === pid)
+        tx.putLocal('run-start', WORKSPACE_OWNER, 'marker', { ...marker, until: iso(this.now()) });
+    });
+  }
+
   /** Записать ответ пробы списка процессов: его читают и другие процессы. */
   recordProcessList(status: 'available' | 'unavailable' | 'unknown' | 'not-isolated') {
     return this.tx('lead.recorded', (tx) => {
