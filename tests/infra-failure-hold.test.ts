@@ -62,17 +62,35 @@ test('registry pull: обрыв реестра в выводе шага окру
   assert.equal(classifyFailure(new TaskFailure('unknown', other), other), 'unknown');
 });
 
-/** Gate `browser` печатает отказ pnpm «Command "playwright" not found» и падает. */
-function toolSetup(writerFiles?: Record<string, string>) {
+/** Инструмент, которого точно нет на машине теста (проба `command -v` его не найдёт). */
+const MISSING = 'pw-harness-missing-tool';
+
+/**
+ * Gate `browser` печатает `output` в stderr и падает; исполнитель пишет
+ * `files` и удаляет `remove`. Без `output` — отказ pnpm «Command not found».
+ */
+function toolSetup(
+  options: {
+    files?: Record<string, string>;
+    remove?: string[];
+    output?: string;
+    base?: Record<string, string>;
+  } = {},
+) {
+  const output =
+    options.output ?? ` ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL  Command "${MISSING}" not found`;
   return setup({
-    files: { 'package.json': '{"name":"app","private":true}\n' },
+    files: { 'package.json': '{"name":"app","private":true}\n', ...options.base },
     scenario: {
-      writer: writerFiles ? implement(writerFiles) : implement(),
+      writer: {
+        ...(options.files ? implement(options.files) : implement()),
+        ...(options.remove ? { remove: options.remove } : {}),
+      },
       reviewer: approve(),
     },
     graph: (g: any) => {
       g.orders[0].gates = ['unit', 'browser'];
-      g.orders[0].writeScope = ['src', 'package.json'];
+      g.orders[0].writeScope = ['src', 'package.json', 'scripts'];
     },
     policy: (p: any) => {
       p.harnessMode = 'light';
@@ -83,9 +101,7 @@ function toolSetup(writerFiles?: Record<string, string>) {
       p.repositories[0].gates.push({
         id: 'browser',
         kind: 'check',
-        command: nodeGate(
-          'console.error(\' ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL  Command "playwright" not found\'); process.exit(1)',
-        ),
+        command: nodeGate(`console.error(${JSON.stringify(output)}); process.exit(1)`),
       });
     },
   });
@@ -106,7 +122,7 @@ test('runner: gate не нашёл инструмент — environment gate-def
   const a = attempts[0]!;
   assert.equal(a.failureKind, 'environment');
   assert.equal(a.environmentCause, 'gate-definition');
-  assert.match(a.error ?? '', /GATE_TOOL_MISSING: .*Command "playwright" not found/);
+  assert.match(a.error ?? '', /GATE_TOOL_MISSING: .*Command "pw-harness-missing-tool" not found/);
   assert.equal(work.attempt, 0, 'попытка не засчитана');
   assert.equal(work.environmentHold?.gate, 'browser', 'gate удержан до хода ведущего');
   // Строка удержания называет инструмент, а не «печатать выжимку».
@@ -120,12 +136,64 @@ test('runner: gate не нашёл инструмент — environment gate-def
 
 test('runner: исполнитель менял package.json — отказ инструмента засчитан как провал gate', async () => {
   const ctx = toolSetup({
-    'src/greet.js': "exports.greet = (name) => 'Hello, ' + name + '!';\n",
-    'package.json': '{"name":"app","private":true,"devDependencies":{}}\n',
+    files: {
+      'src/greet.js': "exports.greet = (name) => 'Hello, ' + name + '!';\n",
+      'package.json': '{"name":"app","private":true,"devDependencies":{}}\n',
+    },
   });
   await runAll(ctx);
   const a = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
   assert.equal(a.failureKind, 'gate', a.error);
   assert.match(a.error ?? '', /GATE_TOOL_MISSING: .*провал засчитан/);
   ctx.store.close();
+});
+
+/** Первая попытка засчитана как провал gate с пометкой GATE_TOOL_MISSING и причиной. */
+async function counted(ctx: ReturnType<typeof setup>, why: RegExp) {
+  await runAll(ctx);
+  const a = ctx.engine.read((v) => v.attempts('add-greeting')[0]!);
+  assert.equal(a.failureKind, 'gate', a.error);
+  assert.equal(a.environmentCause, undefined);
+  assert.match(a.error ?? '', why);
+  ctx.store.close();
+}
+
+test('ревью C HIGH-1: смешанный вывод без отчёта — ENOENT и упавшее утверждение — провал засчитан', async () => {
+  await counted(
+    toolSetup({
+      output: `ok 1 - handles missing binary # Error: spawn ${MISSING} ENOENT\nnot ok 2 - greet\nAssertionError [ERR_ASSERTION]: 'Hi' !== 'Hello'`,
+    }),
+    /Код выхода 1/,
+  );
+});
+
+test('ревью C HIGH-1: исполнитель добавил spawn недостающей программы — провал засчитан', async () => {
+  await counted(
+    toolSetup({
+      output: `Error: spawn ${MISSING} ENOENT`,
+      files: {
+        'src/greet.js': "exports.greet = (name) => 'Hello, ' + name + '!';\n",
+        'src/run.js': `require('child_process').spawn('${MISSING}', ['status']);\n`,
+      },
+    }),
+    /добавило вызов pw-harness-missing-tool/,
+  );
+});
+
+test('ревью C HIGH-1: исполнитель удалил обёртку gate — провал засчитан', async () => {
+  await counted(
+    toolSetup({
+      base: { 'scripts/e2e.sh': '#!/bin/sh\nexit 0\n' },
+      output: 'sh: 1: scripts/e2e.sh: not found',
+      remove: ['scripts/e2e.sh'],
+    }),
+    /трогает scripts\/e2e\.sh/,
+  );
+});
+
+test('ревью C HIGH-1: строку напечатал код, а инструмент есть — проба его находит, провал засчитан', async () => {
+  await counted(
+    toolSetup({ output: ' ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL  Command "node" not found' }),
+    /проба harness нашла инструмент/,
+  );
 });

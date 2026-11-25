@@ -234,7 +234,7 @@ const under = (raw: string, rawPrefix: string) => {
 };
 
 /** Пути в argv gate, относительные корню репозитория (с учётом `cwd`). */
-function commandPaths(gate: Pick<GatePolicy, 'command' | 'cwd'>) {
+export function gateCommandPaths(gate: Pick<GatePolicy, 'command' | 'cwd'>) {
   const out = new Set<string>();
   for (const raw of gate.command) {
     for (const arg of [raw, raw.includes('=') ? raw.slice(raw.indexOf('=') + 1) : '']) {
@@ -258,7 +258,7 @@ export function implicitInput(
   gate: Pick<GatePolicy, 'command' | 'cwd'>,
   files: readonly string[],
 ): string | undefined {
-  const named = commandPaths(gate);
+  const named = gateCommandPaths(gate);
   return files.find(
     (f) =>
       repo.protectedPaths.some((p) => under(f, p)) ||

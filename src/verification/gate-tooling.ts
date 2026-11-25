@@ -1,49 +1,169 @@
+import { posix } from 'node:path';
+import type { GatePolicy } from '../contracts/index.ts';
+import { changedPaths, gateCommandPaths, isInstallInput } from './applicability.ts';
+
 /**
- * Отказ инструмента gate (alpha.71, C1): команда gate не нашла свою
- * программу или браузер, либо менеджер пакетов отказал по своему окружению.
- * Чинится командой gate или окружением, а не кодом задачи: попытка не
- * засчитана, gate удержан до хода ведущего (`gate-definition`).
+ * Отказ инструмента gate (alpha.71, C1; ревью C HIGH-1): команда gate не
+ * нашла свою программу или браузер, либо менеджер пакетов отказал по своему
+ * окружению. Чинится командой gate или окружением, а не кодом задачи —
+ * только когда это единственное объяснение провала, проба harness
+ * подтвердила отсутствие инструмента и изменение задачи его не касалось
+ * (`toolMissingVerdict`). Иначе — засчитанный провал.
  */
 
 /** Код в начале текста такого отказа (после кода `gate-definition`). */
 export const GATE_TOOL_MISSING = 'GATE_TOOL_MISSING';
 
-const signatures: RegExp[] = [
+/** Найденный признак: строка, имя инструмента или путь браузера; код pnpm — без пробы. */
+export interface ToolMissing {
+  line: string;
+  /** Имя программы (или путь, как его назвала оболочка). */
+  name?: string;
+  /** Путь исполняемого файла браузера Playwright. */
+  path?: string;
+  /** Отказ pnpm по каталогу состояния: подтверждён своим кодом. */
+  code?: 'ERR_PNPM_UNSAFE_TASK_RUN_STATE_PATH';
+}
+
+const signatures: { re: RegExp; take: (m: RegExpExecArray) => Omit<ToolMissing, 'line'> }[] = [
   // pnpm exec/run: `[ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL] Command "playwright" not found`.
-  /\bCommand "[^"\n]{1,200}" not found\b/,
+  { re: /\bCommand "([^"\n]{1,200})" not found\b/, take: (m) => ({ name: m[1]! }) },
   // sh/bash/zsh/env: программа не найдена.
-  /^(?:\/\S+\/)?(?:sh|bash|dash|zsh)(?::\s*(?:line )?\d+)?:\s*\S{1,200}:\s*(?:command )?not found\s*$/m,
-  /\bzsh: command not found: \S+/,
-  /^env: [^\s:]{1,200}: No such file or directory\s*$/m,
-  /\bspawn \S{1,200} ENOENT\b/,
+  {
+    re: /^(?:\/\S+\/)?(?:sh|bash|dash|zsh)(?::\s*(?:line )?\d+)?:\s*(\S{1,200}):\s*(?:command )?not found\s*$/m,
+    take: (m) => ({ name: m[1]! }),
+  },
+  { re: /\bzsh: command not found: (\S+)/, take: (m) => ({ name: m[1]! }) },
+  { re: /^env: ([^\s:]{1,200}): No such file or directory\s*$/m, take: (m) => ({ name: m[1]! }) },
+  { re: /\bspawn (\S{1,200}) ENOENT\b/, take: (m) => ({ name: m[1]! }) },
   // Playwright: браузер не установлен.
-  /\bExecutable doesn't exist at \S+[\s\S]{0,400}\bplaywright install\b/,
+  {
+    re: /\bExecutable doesn't exist at (\S+)[\s\S]{0,400}\bplaywright install\b/,
+    take: (m) => ({ path: m[1]! }),
+  },
   // pnpm отказывается от каталога состояния задач (временный каталог хоста).
-  /\bERR_PNPM_UNSAFE_TASK_RUN_STATE_PATH\b/,
+  {
+    re: /\bERR_PNPM_UNSAFE_TASK_RUN_STATE_PATH\b/,
+    take: () => ({ code: 'ERR_PNPM_UNSAFE_TASK_RUN_STATE_PATH' as const }),
+  },
 ];
 
-/** Первая строка с признаком отказа инструмента, или undefined. */
-export function toolMissingLine(text: string): string | undefined {
-  for (const re of signatures) {
+/** Первый признак отказа инструмента в тексте, или undefined. */
+export function toolMissing(text: string): ToolMissing | undefined {
+  for (const { re, take } of signatures) {
     const m = re.exec(text);
-    if (m) return m[0].split('\n')[0]!.trim().slice(0, 300);
+    if (m) return { line: m[0].split('\n')[0]!.trim().slice(0, 300), ...take(m) };
   }
   return undefined;
 }
 
+/** Строка признака отказа инструмента, или undefined. */
+export const toolMissingLine = (text: string) => toolMissing(text)?.line;
+
+/** Счётчики упавших случаев в выводе исполнителей тестов. */
+const failingCounts =
+  /^#\s*fail\s+[1-9]|^ℹ fail [1-9]|\b[1-9]\d* (?:failing|failed)\b|Tests:\s+[1-9]\d* failed|^not ok \d+/im;
+
 /**
- * Отказ инструмента — единственное объяснение провала: признак есть в
- * выводе, а каждый упавший testcase (если они названы) несёт признак в своём
- * тексте. Упавший testcase без признака — провал кода, как прежде.
+ * Отказ инструмента — единственное объяснение провала: с отчётом — признак
+ * у каждого упавшего testcase; без отчёта (`summary` — выжимка провала) —
+ * признак в выводе и никакого другого сигнала: упавших тестов, строки
+ * утверждения, которая сама не признак, счётчиков упавших случаев.
  */
 export function toolMissingFailure(
   output: string,
   failures: { total: number; texts: string[] } | undefined,
-): string | undefined {
+  summary?: { tests?: string[] | undefined; assertion?: string | undefined },
+): ToolMissing | undefined {
   if (failures && failures.total > 0) {
     if (failures.texts.length < failures.total) return undefined;
-    const lines = failures.texts.map(toolMissingLine);
-    return lines.every(Boolean) ? lines[0] : undefined;
+    const found = failures.texts.map(toolMissing);
+    return found.every(Boolean) ? found[0] : undefined;
   }
-  return toolMissingLine(output);
+  const found = toolMissing(output);
+  if (!found) return undefined;
+  if (summary?.tests?.length) return undefined;
+  if (summary?.assertion && !toolMissing(summary.assertion)) return undefined;
+  if (failingCounts.test(output)) return undefined;
+  return found;
+}
+
+/** Файлы, через которые gate зовёт инструмент: обёртки, make, конфиги тестов. */
+const wrapper =
+  /(^|\/)(?:Makefile|GNUmakefile|[^/]+\.mk|[^/]+\.(?:sh|bash|zsh)|(?:playwright|vitest|jest|cypress)\.config\.[^/]+|\.tool-versions|\.nvmrc|\.node-version)$/;
+
+const escape = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * Решение по признаку отказа инструмента: удержать (`held`) или засчитать
+ * с причиной. Удержание — только когда: проба в той же среде после gate
+ * подтвердила отсутствие (`command -v` с `node_modules/.bin` дерева и
+ * каталога gate или `test -x` пути браузера; отказ pnpm по каталогу
+ * состояния подтверждён своим кодом); diff база..SHA прочитан и не трогал
+ * манифесты, lockfiles, файлы из команды gate, обёртки и конфиги тестов,
+ * файл с именем инструмента; добавленные строки изменения не называют
+ * инструмент. Неуверенность — засчитанный провал.
+ */
+export async function toolMissingVerdict(input: {
+  tool: ToolMissing;
+  gate: Pick<GatePolicy, 'command' | 'cwd'>;
+  cwd: string;
+  gateCwd: string;
+  base: string | undefined;
+  sha: string;
+  /** Код выхода пробы или undefined (проба не исполнилась). */
+  probe(argv: string[]): Promise<number | undefined>;
+  /** Файлы, куда изменение добавило строку, распознанную `isCall`. */
+  addedCalls?(isCall: (line: string) => boolean): Promise<string[]>;
+}): Promise<{ held: boolean; why: string }> {
+  const { tool } = input;
+  if (!tool.code) {
+    const argv = tool.path
+      ? ['test', '-x', tool.path]
+      : [
+          'sh',
+          '-c',
+          'PATH="$1/node_modules/.bin:$2/node_modules/.bin:$PATH" command -v -- "$3"',
+          'tool-probe',
+          input.cwd,
+          input.gateCwd,
+          tool.name ?? '',
+        ];
+    const code = tool.path || tool.name ? await input.probe(argv) : undefined;
+    if (code === undefined) return { held: false, why: 'проба инструмента не исполнилась' };
+    if (code === 0) return { held: false, why: 'проба harness нашла инструмент' };
+  }
+  if (input.base && input.base !== input.sha) {
+    const changed = await changedPaths(input.cwd, [{ from: input.base, to: input.sha }]);
+    if (!changed.complete) return { held: false, why: 'diff изменения неизвестен' };
+    if (changed.files.some(isInstallInput))
+      return { held: false, why: 'изменение задачи меняет манифесты или lockfile' };
+    const named = gateCommandPaths(input.gate);
+    const own = tool.name?.includes('/')
+      ? posix.normalize(posix.join(input.gate.cwd ?? '.', tool.name))
+      : undefined;
+    const touched = changed.files.find(
+      (f) =>
+        wrapper.test(f) ||
+        named.some((n) => f === n || f.startsWith(n + '/')) ||
+        f === own ||
+        (tool.name !== undefined && posix.basename(f) === posix.basename(tool.name)),
+    );
+    if (touched)
+      return {
+        held: false,
+        why: `изменение задачи трогает ${touched}, через который gate зовёт инструмент`,
+      };
+    if (tool.name && input.addedCalls) {
+      const name = posix.basename(tool.name);
+      const word = new RegExp(`(^|[^\\w.-])${escape(name)}($|[^\\w.-])`);
+      const added = await input.addedCalls((line) => word.test(line));
+      if (added.length)
+        return {
+          held: false,
+          why: `изменение задачи добавило вызов ${name} (${added.join(', ')})`,
+        };
+    }
+  }
+  return { held: true, why: '' };
 }
