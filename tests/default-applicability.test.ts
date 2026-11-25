@@ -537,8 +537,11 @@ test('ревью B H2: file:/link: и tsconfig extends/references/paths — пу
       '{\n  // общий конфиг\n  "extends": "../../tooling/tsconfig/base.json",\n  "references": [{ "path": "../b" }],\n  "compilerOptions": { "baseUrl": ".", "paths": { "@shared/*": ["../../shared/src/*"] }, },\n}\n',
     'packages/a/sub/package.json': '{"name":"a-sub","dependencies":{"c":"workspace:*"}}\n',
     'packages/b/package.json': '{"name":"b"}\n',
+    'packages/b/tsconfig.json': '{}\n',
     'packages/c/package.json': '{"name":"c"}\n',
+    'tooling/tsconfig/base.json': '{"compilerOptions":{"strict":true}}\n',
     'packages/t/package.json': '{"name":"@repo/tsconfig"}\n',
+    'packages/t/base.json': '{"compilerOptions":{}}\n',
     'packages/d/package.json': '{"name":"d"}\n',
     'packages/d/tsconfig.build.json': '{"extends":"@repo/tsconfig/base.json"}\n',
     'packages/e/package.json': '{"name":"e","devDependencies":{"y":"file:../../../outside"}}\n',
@@ -569,7 +572,8 @@ test('ревью B H2: file:/link: и tsconfig extends/references/paths — пу
   );
   // Ревью B L3: фильтр каталога pnpm — и вложенные проекты с их зависимостями.
   const under = packageClosure(g, [{ under: 'packages/a' }], 64);
-  assert.ok(under.ok && under.dirs.includes('packages/a/sub') && under.dirs.includes('packages/c'));
+  // packages/a/sub лежит под packages/a; его зависимость c — в замыкании.
+  assert.ok(under.ok && under.dirs.includes('packages/a') && under.dirs.includes('packages/c'));
   const deepest = packageClosure(g, [{ dir: 'packages/a/src' }], 64);
   assert.ok(deepest.ok && !deepest.dirs.includes('packages/c'), 'cwd — только свой пакет');
 });
@@ -703,4 +707,50 @@ test('ревью B M2: получатель сверяет запись derived 
   );
   assert.match((await check(honest, onA)) ?? '', /не зелёный SHA gate/);
   assert.equal(await check(honest, base), undefined);
+});
+
+test('ревью B2 L2: все tsconfig дерева пакета, цепочки extends через каталоги и пакеты; пакет-цель — с его зависимостями; ненайденная цель — без применимости', async () => {
+  const r = repo({
+    'pnpm-workspace.yaml': 'packages:\n  - "packages/*"\n',
+    'package.json': '{"name":"root","private":true}\n',
+    'tooling/tsconfig/base.json': '{"extends":"../../config/x.json"}\n',
+    'config/x.json': '{"compilerOptions":{}}\n',
+    'packages/a/package.json': '{"name":"a"}\n',
+    'packages/a/tsconfig.json': '{"extends":"../../tooling/tsconfig/base.json"}\n',
+    'packages/a/test/tsconfig.json':
+      '{"compilerOptions":{"baseUrl":".","paths":{"@shared/*":["../../../shared/src/*"]}}}\n',
+    'packages/t/package.json': '{"name":"@repo/tsconfig","dependencies":{"u":"workspace:*"}}\n',
+    'packages/t/base.json': '{}\n',
+    'packages/u/package.json': '{"name":"u"}\n',
+    'packages/d/package.json': '{"name":"d"}\n',
+    'packages/d/tsconfig.json': '{"extends":"@repo/tsconfig/base.json"}\n',
+    'packages/e/package.json': '{"name":"e"}\n',
+    'packages/e/tsconfig.json': '{"extends":"./missing-base.json"}\n',
+    'packages/f/package.json': '{"name":"f"}\n',
+    'packages/f/tsconfig.json': '{"extends":"@tsconfig/node20/tsconfig.json"}\n',
+  });
+  const g = await workspaceGraphAt(r.dir, r.git('rev-parse', 'HEAD'));
+  assert.ok(Array.isArray(g), JSON.stringify(g));
+  const a = packageClosure(g, [{ name: 'a' }], 64);
+  assert.ok(a.ok, JSON.stringify(a));
+  assert.deepEqual(a.dirs, [
+    'config/x.json',
+    'packages/a',
+    'shared/src',
+    'tooling/tsconfig/base.json',
+  ]);
+  // extends через пакет workspace — пакет с его зависимостями.
+  const d = packageClosure(g, [{ name: 'd' }], 64);
+  assert.deepEqual(d.ok && d.dirs, ['packages/d', 'packages/t', 'packages/u']);
+  // Ненайденная цель цепочки — без применимости.
+  assert.match((packageClosure(g, [{ name: 'e' }], 64) as { reason: string }).reason, /не найден/);
+  // Пакет registry (не workspace) закрепляет lockfile — применимость остаётся.
+  assert.deepEqual(
+    packageClosure(g, [{ name: 'f' }], 64).ok && packageClosure(g, [{ name: 'f' }], 64),
+    {
+      ok: true,
+      packages: ['f'],
+      dirs: ['packages/f'],
+    },
+  );
 });

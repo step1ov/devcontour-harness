@@ -198,50 +198,61 @@ export function looseJson(text: string): unknown {
 }
 
 /**
- * Что пакет читает вне себя по `tsconfig*.json` (ревью B, H2): цели
- * `extends` (относительные и по имени пакета), `references[].path`,
- * `compilerOptions.paths` (до первого `*`, от `baseUrl`). Цель за
- * пределами репозитория или неразобранный файл — `problem`.
+ * Ссылки одного tsconfig (ревью B, H2; ревью B2 L2): цели `extends`
+ * (относительные — путь от каталога файла, иначе спецификатор пакета),
+ * `references[].path` и `compilerOptions.paths` (до первого `*`, от
+ * `baseUrl`). Цель за пределами репозитория или неразобранный файл —
+ * `problem`.
  */
-function tsconfigReads(
+function tsconfigLinks(
   file: string,
   text: string,
-): { reads: string[]; packages: string[]; problem?: string } {
+): {
+  extends: string[];
+  packages: string[];
+  references: string[];
+  paths: string[];
+  problem?: string;
+} {
   const value = looseJson(text);
   if (!value || typeof value !== 'object' || Array.isArray(value))
-    return { reads: [], packages: [], problem: `${file} не разобран` };
+    return { extends: [], packages: [], references: [], paths: [], problem: `${file} не разобран` };
   const config = value as {
     extends?: unknown;
     references?: unknown;
     compilerOptions?: { baseUrl?: unknown; paths?: unknown };
   };
   const base = posix.dirname(file);
-  const reads: string[] = [];
-  const packages: string[] = [];
+  const out = {
+    extends: [] as string[],
+    packages: [] as string[],
+    references: [] as string[],
+    paths: [] as string[],
+  };
   let problem: string | undefined;
-  const local = (rel: string, from: string) => {
+  const local = (rel: string, from: string, list: string[]) => {
     const path = posix.normalize(posix.join(from, rel)).replace(/\/$/, '');
     if (posix.isAbsolute(rel) || path === '..' || path.startsWith('../'))
       problem ??= `${file}: ${rel} вне репозитория`;
-    else reads.push(path === '' ? '.' : path);
+    else list.push(path === '' ? '.' : path);
   };
   const extendsList = Array.isArray(config.extends) ? config.extends : [config.extends];
   for (const e of extendsList) {
     if (typeof e !== 'string') continue;
-    if (e.startsWith('.') || e.startsWith('/')) local(e, base);
-    else packages.push(e);
+    if (e.startsWith('.') || e.startsWith('/')) local(e, base, out.extends);
+    else out.packages.push(e);
   }
   if (Array.isArray(config.references))
     for (const r of config.references)
       if (r && typeof r === 'object' && typeof (r as { path?: unknown }).path === 'string')
-        local((r as { path: string }).path, base);
+        local((r as { path: string }).path, base, out.references);
   const options = config.compilerOptions;
   const baseUrl = typeof options?.baseUrl === 'string' ? posix.join(base, options.baseUrl) : base;
   if (options?.paths && typeof options.paths === 'object')
     for (const targets of Object.values(options.paths as Record<string, unknown>))
       for (const t of Array.isArray(targets) ? targets : [])
-        if (typeof t === 'string') local(t.split('*')[0]! || '.', baseUrl);
-  return { reads, packages, ...(problem ? { problem } : {}) };
+        if (typeof t === 'string') local(t.split('*')[0]! || '.', baseUrl, out.paths);
+  return { ...out, ...(problem ? { problem } : {}) };
 }
 
 /** Предел пакетов workspace, сверх которого граф не строится. */
@@ -305,12 +316,15 @@ export async function workspaceGraphAt(
     return 'git ls-tree: ' + (error instanceof Error ? error.message : String(error)).slice(0, 200);
   }
   const blobs = new Map<string, string>();
+  /** Все файлы дерева (цели `extends` tsconfig могут называться как угодно). */
+  const all = new Map<string, string>();
   for (const entry of listing.split('\0')) {
     const tab = entry.indexOf('\t');
     if (tab < 0) continue;
     const [, type, oid] = entry.slice(0, tab).split(' ');
     const path = entry.slice(tab + 1);
     if (type !== 'blob') continue;
+    if (!path.split('/').includes('node_modules')) all.set(path, oid!);
     if (
       path === 'pnpm-workspace.yaml' ||
       path === 'package.json' ||
@@ -363,21 +377,18 @@ export async function workspaceGraphAt(
     .sort();
   if (dirs.length > WORKSPACE_PACKAGE_LIMIT)
     return `пакетов workspace больше ${WORKSPACE_PACKAGE_LIMIT}`;
-  // tsconfig*.json в корне каталога каждого пакета (ревью B, H2).
+  // tsconfig*.json во всём дереве каждого пакета, кроме node_modules (ревью B2 L2).
   const tsconfigs = new Map(
     dirs.map((d) => [
       d,
       [...blobs.keys()].filter(
-        (p) => p.startsWith(d + '/') && /^tsconfig[^/]*\.json$/.test(p.slice(d.length + 1)),
+        (p) => p.startsWith(d + '/') && /^tsconfig[^/]*\.json$/.test(posix.basename(p)),
       ),
     ]),
   );
   let texts: Map<string, string>;
   try {
-    texts = await read([
-      ...dirs.map((d) => d + '/package.json'),
-      ...[...tsconfigs.values()].flat(),
-    ]);
+    texts = await read(dirs.map((d) => d + '/package.json'));
   } catch (error) {
     return 'package.json: ' + (error instanceof Error ? error.message : String(error));
   }
@@ -403,12 +414,6 @@ export async function workspaceGraphAt(
         else reads.push(path);
       }
     }
-    for (const file of tsconfigs.get(dir) ?? []) {
-      const t = tsconfigReads(file, texts.get(file) ?? '');
-      reads.push(...t.reads);
-      readsPackages.push(...t.packages);
-      problem ??= t.problem;
-    }
     const scripts =
       pkg.scripts && typeof pkg.scripts === 'object'
         ? Object.fromEntries(
@@ -426,6 +431,80 @@ export async function workspaceGraphAt(
       ...(readsPackages.length ? { readsPackages: [...new Set(readsPackages)].sort() } : {}),
       ...(problem ? { problem } : {}),
     });
+  }
+  // Цепочки tsconfig (ревью B2 L2): каждый tsconfig пакета, цели его
+  // `extends` (относительные и через пакеты workspace) и `references` —
+  // до конца цепочки. Цель, которой нет в дереве, — без применимости.
+  const fileCache = new Map<string, string | undefined>();
+  const fileText = async (path: string) => {
+    if (fileCache.has(path)) return fileCache.get(path);
+    const oid = all.get(path);
+    const text = oid ? (await gitBlobs(cwd, [oid])).get(oid)?.toString('utf8') : undefined;
+    fileCache.set(path, text);
+    return text;
+  };
+  const existing = (candidates: string[]) => candidates.find((c) => all.has(c));
+  const byName = new Map(out.flatMap((p) => (p.name ? [[p.name, p] as const] : [])));
+  for (const pkg of out) {
+    const reads = new Set(pkg.reads ?? []);
+    const readsPackages = new Set(pkg.readsPackages ?? []);
+    let problem = pkg.problem;
+    const queue = [...(tsconfigs.get(pkg.dir) ?? [])];
+    const seen = new Set<string>();
+    try {
+      while (queue.length && !problem) {
+        const file = queue.shift()!;
+        if (seen.has(file) || seen.size > 200) continue;
+        seen.add(file);
+        if (!file.startsWith(pkg.dir + '/')) reads.add(file);
+        const text = await fileText(file);
+        if (text === undefined) {
+          problem = `${file} не найден`;
+          break;
+        }
+        const links = tsconfigLinks(file, text);
+        if (links.problem) {
+          problem = links.problem;
+          break;
+        }
+        for (const e of links.extends) {
+          const target = existing([e, e + '.json', e + '/tsconfig.json']);
+          if (!target) problem ??= `${file}: extends ${e} не найден в дереве`;
+          else queue.push(target);
+        }
+        for (const spec of links.packages) {
+          const owner = [...byName.keys()]
+            .filter((n) => spec === n || spec.startsWith(n + '/'))
+            .sort((a, b) => b.length - a.length)[0];
+          // Пакет не из workspace (registry) — его закрепляет lockfile.
+          if (!owner) continue;
+          const rest = spec.slice(owner.length).replace(/^\//, '');
+          const dir = byName.get(owner)!.dir;
+          const target = rest
+            ? existing([`${dir}/${rest}`, `${dir}/${rest}.json`, `${dir}/${rest}/tsconfig.json`])
+            : existing([`${dir}/tsconfig.json`]);
+          if (!target) problem ??= `${file}: extends ${spec} не найден в пакете ${owner}`;
+          else {
+            readsPackages.add(owner);
+            queue.push(target);
+          }
+        }
+        for (const r of links.references) {
+          const target = r.endsWith('.json') ? existing([r]) : existing([`${r}/tsconfig.json`]);
+          if (!target) problem ??= `${file}: reference ${r} не найден в дереве`;
+          else {
+            reads.add(r);
+            queue.push(target);
+          }
+        }
+        for (const p of links.paths) reads.add(p);
+      }
+    } catch (error) {
+      problem ??= 'tsconfig: ' + (error instanceof Error ? error.message : String(error));
+    }
+    if (reads.size) pkg.reads = [...reads].sort();
+    if (readsPackages.size) pkg.readsPackages = [...readsPackages].sort();
+    if (problem) pkg.problem = problem;
   }
   return out;
 }
@@ -475,7 +554,9 @@ export function packageClosure(
     const p = queue.shift()!;
     if (seen.has(p.dir)) continue;
     seen.set(p.dir, p);
-    for (const d of p.dependencies) {
+    // Зависимости и пакеты, через которые наследуется tsconfig (ревью B2 L2:
+    // вместе с их собственными зависимостями).
+    for (const d of [...p.dependencies, ...(p.readsPackages ?? [])]) {
       const dep = byName.get(d);
       if (dep && !seen.has(dep.dir)) queue.push(dep);
     }
@@ -498,11 +579,14 @@ export function packageClosure(
       return owner ? [byName.get(owner)!.dir] : [];
     }),
   );
-  const dirs = [
+  let dirs = [
     ...new Set([...all.map((p) => p.dir), ...all.flatMap((p) => p.reads ?? []), ...named]),
   ]
     .filter((d) => d !== '.')
     .sort();
+  // Путь внутри другого пути замыкания уже покрыт им.
+  const covered = (d: string) => dirs.some((o) => o !== d && d.startsWith(o + '/'));
+  dirs = dirs.filter((d) => !covered(d));
   if (all.some((p) => (p.reads ?? []).includes('.')))
     return { ok: false, reason: 'пакет читает весь репозиторий (путь .)' };
   if (dirs.length > limit) return { ok: false, reason: `путей в замыкании больше ${limit}` };
