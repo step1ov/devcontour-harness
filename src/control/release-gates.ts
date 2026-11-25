@@ -29,8 +29,42 @@ type GatesData = Awaited<ReturnType<typeof checkGates>>;
 export const gatesBasis = (policy: ExecutionPolicy, repo: Repo, harnessVersion: string) =>
   new Map(repo.gates.map((g) => [g.id, gateBasis(policy, repo, g, harnessVersion)]));
 
+/** Провал среды, а не кода: причина gate или отсутствующий инструмент. */
+export const environmentOf = (g: GatesData['gates'][number]): string | undefined =>
+  g.status === 'failed' ? g.environment : undefined;
+
+/**
+ * Отказ по провалу полного прогона — по виду провала (ревью final M3):
+ * код — работой (и `when.always` для gate, читающего файлы вне пакета не
+ * через зависимость workspace, ревью final M1); среда или инструмент —
+ * исправить среду или gate и повторить `harness gates`.
+ */
+export function failedRunLine(
+  repoId: string,
+  runId: string,
+  short: string,
+  failed: { gate: string; environment?: string }[],
+): string {
+  const env = failed.filter((g) => g.environment);
+  const code = failed.filter((g) => !g.environment);
+  const list = (gs: typeof failed) =>
+    gs.map((g) => (g.environment ? `${g.gate} [среда: ${g.environment}]` : g.gate)).join(', ');
+  const head = `полный прогон gates ${repoId} ${runId} на ${short} не прошёл: ${list(failed) || 'итог не PASS'}`;
+  const parts = [
+    code.length
+      ? `провал кода (${list(code)}) исправьте обычной работой; gate, который читает файлы вне своего пакета не через зависимость workspace, отметьте "when": {"always": true} — иначе работа, задевшая только чужие файлы, его снова не исполнит`
+      : '',
+    env.length
+      ? `провал среды или инструмента (${list(env)}) правкой кода не снять: исправьте окружение или определение gate и повторите harness gates`
+      : '',
+  ].filter(Boolean);
+  return parts.length ? `${head}. ${parts.join('; ')}` : head;
+}
+
 /** Записать прогон `harness gates` в состояние движка: digest файла итога и основание gates. */
 export function recordGatesRun(engine: Engine, policy: ExecutionPolicy, data: GatesData) {
+  // Прерванный прогон (отмена, предел времени) — не итог (ревью final M3), как у CLI gates.
+  if (data.interrupted) return;
   const repo = policy.repositories.find((r) => r.id === data.repositoryId);
   if (!repo) return;
   let bytes: Buffer;
@@ -46,7 +80,16 @@ export function recordGatesRun(engine: Engine, policy: ExecutionPolicy, data: Ga
     digest: sha256(bytes),
     passed: data.passed,
     gates: data.gates.flatMap((g) =>
-      basis.has(g.gate) ? [{ gate: g.gate, status: g.status, basis: basis.get(g.gate)! }] : [],
+      basis.has(g.gate)
+        ? [
+            {
+              gate: g.gate,
+              status: g.status,
+              basis: basis.get(g.gate)!,
+              ...(environmentOf(g) ? { environment: environmentOf(g)! } : {}),
+            },
+          ]
+        : [],
     ),
   });
 }
@@ -73,9 +116,17 @@ export function fullGatesProblem(
     .sort((a, b) => a.at.localeCompare(b.at))
     .at(-1);
   if (!run) return `нет полного прогона gates ${repo.id} на цели выпуска ${short}: ${next}`;
-  const failed = run.gates.filter((g) => g.status !== 'passed').map((g) => g.gate);
+  const failed = run.gates.filter((g) => g.status !== 'passed');
   if (failed.length || !run.passed)
-    return `полный прогон gates ${repo.id} ${run.id} на ${short} не прошёл: ${failed.join(', ') || 'итог не PASS'}`;
+    return failedRunLine(
+      repo.id,
+      run.id,
+      short,
+      failed.map((g) => ({
+        gate: g.gate,
+        ...(g.environment ? { environment: g.environment } : {}),
+      })),
+    );
   let digest: string | undefined;
   try {
     digest = sha256(readFileSync(join(stateDir, 'gates-at', run.id, GATES_RESULT_FILE)));

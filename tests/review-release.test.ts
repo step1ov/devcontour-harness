@@ -982,3 +982,48 @@ test('ревью A1 M2, L2: большая постановка обрезает
   const two = await releaseContract(ctxOf, 'app', f.app, f.head);
   assert.notEqual(two.digest, one.digest);
 });
+
+test('ревью final M3: отказ review-release по виду провала — код (работой, when.always), инструмент (среда), отмена (повторить, без записи)', async () => {
+  const refusal = async (
+    patch: (p: Record<string, any>) => void,
+    input: (f: ReturnType<typeof fixture>) => ReleaseReviewInput = () => ({}),
+  ) => {
+    const f = fixture(patch);
+    ready(f.engine, graphOf({ a: [] }));
+    accept(f.engine, f.base, f.head);
+    let message = '';
+    await f.reviewBare(input(f)).catch((e: unknown) => {
+      assert.ok(e instanceof HarnessError && e.code === 'NOT_READY', String(e));
+      message = e.message;
+    });
+    const runs = f.engine.read(
+      (v) => v.local('gates-runs', WORKSPACE_OWNER, `app@${f.head}`)?.runs,
+    );
+    return { message, runs };
+  };
+  const code = await refusal(
+    (p) => (p.repositories[0].gates[0].command = [process.execPath, '-e', 'process.exit(1)']),
+  );
+  assert.match(code.message, /провал кода \(unit\) исправьте обычной работой/);
+  assert.match(code.message, /"when": \{"always": true\}/);
+  assert.doesNotMatch(code.message, /исправьте окружение/);
+  const tool = await refusal(
+    (p) => (p.repositories[0].gates[0].command = ['sh', '-c', 'harness-no-such-tool-xyz --run']),
+  );
+  assert.match(tool.message, /\[среда: [a-z-]+\]/, tool.message);
+  assert.match(tool.message, /исправьте окружение или определение gate и повторите harness gates/);
+  assert.doesNotMatch(tool.message, /провал кода/);
+  const abort = new AbortController();
+  setTimeout(() => abort.abort(new Error('отменено')), 400);
+  const cancelled = await refusal(
+    (p) =>
+      (p.repositories[0].gates[0].command = [
+        process.execPath,
+        '-e',
+        'setTimeout(() => {}, 20000)',
+      ]),
+    () => ({ signal: abort.signal }),
+  );
+  assert.match(cancelled.message, /прерван .* это не провал кода: повторите review-release/);
+  assert.equal(cancelled.runs, undefined, 'прерванный прогон не записан');
+});

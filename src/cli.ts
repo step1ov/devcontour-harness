@@ -2354,10 +2354,8 @@ async function run(
           ...optional('role', v.role),
           ...optional('author', author),
           ...optional('repositoryId', v.repository),
-          signal: AbortSignal.any([
-            abort.signal,
-            AbortSignal.timeout(b.policy.runTimeoutMs + 5000),
-          ]),
+          // Пределы шагов (прогон gates и reviewer) — свои у каждого (ревью final M3).
+          signal: abort.signal,
         });
         // Постановки выпуска нет (alpha.71, A1): заметка в stderr, ответ прежний.
         const missing = h.engine.read((view) => briefMissingLine(view));

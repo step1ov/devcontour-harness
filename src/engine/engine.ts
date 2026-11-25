@@ -6034,8 +6034,7 @@ export class Engine {
       },
       {
         isolation: strictSandbox(this.policy) ? 'os' : 'none',
-        ...((processListSeen.status ??
-          view.local('process-list', WORKSPACE_OWNER, 'probe')?.status)
+        ...((processListSeen.status ?? view.local('process-list', WORKSPACE_OWNER, 'probe')?.status)
           ? {
               processList: (processListSeen.status ??
                 view.local('process-list', WORKSPACE_OWNER, 'probe')?.status)!,
@@ -6052,8 +6051,7 @@ export class Engine {
    */
   holdLifted(work: WorkState, view: ExecutionView): boolean {
     return (
-      !!work.environmentHold &&
-      !this.environmentGateHolds(view).some((x) => x.workId === work.id)
+      !!work.environmentHold && !this.environmentGateHolds(view).some((x) => x.workId === work.id)
     );
   }
 

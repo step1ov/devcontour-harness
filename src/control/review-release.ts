@@ -11,6 +11,7 @@ import { releaseDocsLine, releaseDocsOpen, releaseDocsState } from './release-do
 import {
   HarnessError,
   type CodeReviewRecord,
+  type ExecutionPolicy,
   type ExecutionView,
   type GraphState,
   type WorkState,
@@ -39,8 +40,26 @@ export interface ReleaseReviewInput {
   base?: string;
   /** Принятая цель; нет — target ref репозитория. */
   head?: string;
+  /** Отмена человеком (сигнал); пределы времени шагов review-release задаёт сам. */
   signal?: AbortSignal;
 }
+
+/**
+ * Предел полного прогона gates в review-release (ревью final M3): свой, не
+ * общий с reviewer — сумма пределов gates репозитория (не меньше предела
+ * попытки) и минута на подготовку.
+ */
+export const fullGatesBudgetMs = (
+  policy: ExecutionPolicy,
+  repo: ExecutionPolicy['repositories'][number],
+) =>
+  Math.max(
+    policy.runTimeoutMs,
+    repo.gates.reduce((sum, g) => sum + g.timeoutMs, 0),
+  ) + 60_000;
+
+const withTimeout = (signal: AbortSignal | undefined, ms: number) =>
+  signal ? AbortSignal.any([signal, AbortSignal.timeout(ms)]) : AbortSignal.timeout(ms);
 
 /** Предел одного файла топологии в запросе. */
 export const RELEASE_TOPOLOGY_FILE_LIMIT = 64 * 1024;
@@ -273,25 +292,29 @@ export async function reviewRelease(
     ctx.engine.read((v) =>
       fullGatesProblem(v, ctx.stateDir, ctx.policy, repo, sha, ctx.engine.version),
     );
-  if (problem())
-    recordGatesRun(
-      ctx.engine,
-      ctx.policy,
-      await checkGates({
-        policy: ctx.policy,
-        baseDir: '',
-        repoPath: (r) => ctx.repoPath(r.path),
-        stateDir: ctx.stateDir,
-        repositoryId: repo.id,
-        rev: sha,
-        ...(input.signal ? { signal: input.signal } : {}),
-      }),
-    );
+  if (problem()) {
+    const run = await checkGates({
+      policy: ctx.policy,
+      baseDir: '',
+      repoPath: (r) => ctx.repoPath(r.path),
+      stateDir: ctx.stateDir,
+      repositoryId: repo.id,
+      rev: sha,
+      signal: withTimeout(input.signal, fullGatesBudgetMs(ctx.policy, repo)),
+    });
+    // Прерванный прогон не записывается и не провал кода (ревью final M3).
+    if (run.interrupted)
+      throw new HarnessError(
+        'NOT_READY',
+        `review-release: полный прогон gates ${repo.id} на ${sha.slice(0, 12)} прерван (${run.interrupted}) — это не провал кода: повторите review-release (или harness gates --sha ${sha})`,
+      );
+    recordGatesRun(ctx.engine, ctx.policy, run);
+  }
   const gates = problem();
   if (gates)
     throw new HarnessError(
       'NOT_READY',
-      `review-release: ${gates}. Приёмка выпуска опирается на полный прогон всех gates на цели (без неприменимости и переноса): исправьте провал обычной работой и повторите review-release`,
+      `review-release: ${gates}. Приёмка выпуска опирается на полный прогон всех gates на цели (без неприменимости и переноса); после исправления повторите review-release`,
     );
   return reviewBranch(
     ctx,
@@ -301,7 +324,8 @@ export async function reviewRelease(
       ...(input.role ? { role: input.role } : {}),
       ...(input.author ? { author: input.author } : {}),
       repositoryId: repo.id,
-      ...(input.signal ? { signal: input.signal } : {}),
+      // Свой предел reviewer — после прогона gates, не остаток общего (ревью final M3).
+      signal: withTimeout(input.signal, ctx.policy.runTimeoutMs + 5000),
     },
     {
       contract: async ({ path, head: sha }) => {

@@ -1679,6 +1679,11 @@ export const localSchemas = {
                 gate: idSchema,
                 status: z.string().min(1).max(40),
                 basis: digestSchema,
+                /**
+                 * Провал среды, а не кода (ревью final M3): причина gate
+                 * (`sandbox-process-list`, `gate-definition` — нет инструмента…).
+                 */
+                environment: z.string().min(1).max(100).optional(),
               }),
             )
             .max(500),
