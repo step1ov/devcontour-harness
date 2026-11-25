@@ -22,7 +22,8 @@ question, the release is ready, or the queue stops (no controller and no
 attempt). The result names what happened, the next step from `explain`
 (`next.actor`, `next.action`, `next.message`) and a short status line. Exit
 codes: 0 accepted, 10 release-ready, 11 question, 12 held, 13 failed, 14
-stopped, 15 timeout. It reads the state read-only and does not query the
+stopped, 15 timeout. They are outcomes, not errors (`ok: true`); the JSON
+`kind` is authoritative. It reads the state read-only and does not query the
 controller. Act on `next`, then wait again.
 
 Before a long cycle, first run the cheap decisive gates

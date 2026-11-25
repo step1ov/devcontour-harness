@@ -534,7 +534,10 @@ harness wait --state <state> --policy <policy> [--until accepted,failed,held,que
 на чтение раз в секунду; controller не спрашивает. Ответ: `kind`, событие,
 `workId`, следующий шаг из `explain` (`next`) и строка состояния (`status`).
 Коды выхода: 0 accepted, 10 release-ready, 11 question, 12 held, 13 failed,
-14 stopped, 15 timeout. `--until` сужает ожидаемые исходы; готовность
+14 stopped, 15 timeout. Это исходы ожидания, а не ошибки: ответ при любом из
+них — `ok: true`, и решает поле `kind` JSON-ответа; код выхода — только
+удобство для скриптов. Ошибки (нет каталога, неверный флаг) — обычные коды
+2–4 с `ok: false`. `--until` сужает ожидаемые исходы; готовность
 выпуска, остановка и предел времени кончают ожидание всегда.
 
 ## Разделы инструкции: `harness guide` (alpha.71)
