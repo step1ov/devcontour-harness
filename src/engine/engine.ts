@@ -4960,7 +4960,11 @@ export class Engine {
         : text;
     return this.tx('lead.recorded', (tx) => {
       const prev = tx.local('release-brief', WORKSPACE_OWNER, 'briefs')?.items ?? [];
-      if (prev.some((b) => b.graphId === graphId && b.digest === digest)) return false;
+      // Та же постановка после итога прежнего выпуска (ревью A1 L1)
+      // записывается заново: она — постановка нынешнего выпуска.
+      const done = tx.local('lead', WORKSPACE_OWNER, 'log')?.release?.doneAt;
+      if (prev.some((b) => b.graphId === graphId && b.digest === digest && !(done && b.at < done)))
+        return false;
       const at = new Date(this.now()).toISOString();
       tx.putLocal('release-brief', WORKSPACE_OWNER, 'briefs', {
         items: [

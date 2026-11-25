@@ -1071,6 +1071,8 @@ export class Harness {
      * доверенных receipt нет.
      */
     source?: WorkSource;
+    /** Граф принят регистрацией (до выдачи попыток): постановку записывает CLI. */
+    onRegistered?: (graphId: string) => void;
   }) {
     // Пауза обновления, умершего до изменений (нет ни процесса, ни
     // незавершённого возврата), выдачу больше не держит: run её снимает.
@@ -1134,6 +1136,7 @@ export class Harness {
       },
     });
     const graph = registered.graph;
+    input.onRegistered?.(graph.id);
     // База выпуска (alpha.69): target ref репозиториев графа при первой
     // регистрации выпуска; записанная не переписывается.
     await this.recordReleaseBases(

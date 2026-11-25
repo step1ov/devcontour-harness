@@ -47,6 +47,7 @@ import {
   releaseBaseOf,
   briefMissingLine,
   releaseContract,
+  RELEASE_CONTRACT_LIMIT,
   RELEASE_TOPOLOGY_FILE_LIMIT,
   reviewRelease,
   type ReleaseReviewInput,
@@ -962,4 +963,22 @@ test('A1 (Relay): документ-постановка из закреплён�
     'необязательный документ — не постановка',
   );
   assert.doesNotMatch(contract.prompt, /BRIEF_MISSING/);
+});
+
+test('ревью A1 M2, L2: большая постановка обрезается в своём пределе — топология и её проверка в запросе целиком; правка за обрезкой меняет digest', async () => {
+  const f = fixture();
+  ready(f.engine, graphOf({ a: [] }));
+  const ctxOf = { engine: f.engine, policy: f.policy };
+  const big = 'Сценарий. '.repeat(70_000);
+  f.engine.recordBrief('g1', big + 'конец A');
+  const one = await releaseContract(ctxOf, 'app', f.app, f.head);
+  assert.match(one.prompt, /\[обрезано: \d+ символов\]/);
+  assert.ok(one.prompt.length < RELEASE_CONTRACT_LIMIT + 1000);
+  assert.ok(one.prompt.includes('--- deploy/Caddyfile\n' + CADDY), 'топология целиком');
+  assert.match(one.prompt, /Topology check: compare the production routing/);
+  assert.match(one.prompt, /\(f\) The diff base\.\.head follows\.$/);
+  // Правка за пределом обрезки и записи (512 KiB) — другой digest договора.
+  f.engine.recordBrief('g1', big + 'конец B');
+  const two = await releaseContract(ctxOf, 'app', f.app, f.head);
+  assert.notEqual(two.digest, one.digest);
 });

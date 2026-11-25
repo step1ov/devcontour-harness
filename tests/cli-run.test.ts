@@ -400,3 +400,48 @@ test('T27: CLI передаёт источник политики барьеру
   assert.match(JSON.stringify(second.json.error), /policy\.json изменился после загрузки/);
   assert.deepEqual(applied(), first, 'применённой осталась прежняя политика');
 });
+
+test('ревью A1 L3: run --graph записывает постановку <граф>.brief.md, только когда run принял граф', () => {
+  const p = project();
+  const graph = JSON.parse(readFileSync(join(p.app, 'graph.json'), 'utf8')) as {
+    orders: { role: string }[];
+  };
+  graph.orders[0]!.role = 'nobody';
+  writeFileSync(join(p.app, 'bad.json'), JSON.stringify(graph));
+  writeFileSync(join(p.app, 'bad.brief.md'), 'Постановка отклонённого графа\n');
+  writeFileSync(join(p.app, 'graph.brief.md'), 'Постановка: приветствие по имени\n');
+  const briefs = () => {
+    const store = new SqliteExecutionStore(join(p.state, 'state.sqlite'), 'test', {
+      readOnly: true,
+    });
+    try {
+      return store.read(
+        (v) => v.local('release-brief', '@workspace', 'briefs')?.items.map((b) => b.text) ?? [],
+      );
+    } finally {
+      store.close();
+    }
+  };
+  const bad = p.harness(
+    'run',
+    '--graph',
+    'bad.json',
+    '--policy',
+    'policy.json',
+    '--state',
+    p.state,
+  );
+  assert.notEqual(bad.status, 0, 'граф отклонён');
+  assert.deepEqual(briefs(), [], 'постановка отклонённого графа не записана');
+  const run = p.harness(
+    'run',
+    '--graph',
+    'graph.json',
+    '--policy',
+    'policy.json',
+    '--state',
+    p.state,
+  );
+  assert.equal(run.status, 0, run.stderr);
+  assert.deepEqual(briefs(), ['Постановка: приветствие по имени\n']);
+});

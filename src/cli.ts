@@ -1425,15 +1425,20 @@ async function run(
       try {
         const { graph, ctx } = await graphAndContext();
         // Постановка графа (`<граф>.brief.md` рядом с графом, alpha.71 A1) —
-        // в состояние: её читает договор выпуска.
+        // в состояние, когда run принял граф (ревью A1 L3): её читает договор выпуска.
         const briefPath = v.graph
           ? need('graph').replace(/(\.draft)?\.json$/, '.brief.md')
           : undefined;
-        if (briefPath && briefPath !== need('graph') && existsSync(briefPath))
-          h.engine.recordBrief(graph.id, readFileSync(briefPath, 'utf8'));
+        const brief =
+          briefPath && briefPath !== need('graph') && existsSync(briefPath)
+            ? readFileSync(briefPath, 'utf8')
+            : undefined;
         const sink = sinkOf(v.sink, h, b.baseDir);
         const data = await h.run({
           graph,
+          ...(brief !== undefined
+            ? { onRegistered: (id: string) => void h.engine.recordBrief(id, brief) }
+            : {}),
           author: parseWith(authorSchema, v.author ?? 'external', 'author'),
           ...(ctx ? { context: ctx } : {}),
           ...(sink ? { sink } : {}),
