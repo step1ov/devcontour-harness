@@ -20,6 +20,7 @@ import {
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
   roleBinding,
+  WORKSPACE_OWNER,
   selectReviewer,
   mcpEnvironment,
   HarnessError,
@@ -3290,11 +3291,41 @@ export class Runner {
     );
     // Снимок провайдеров текущей попытки — закреплённый в хранилище до реализации.
     const providers = this.engine.read((v) => v.attempt(attempt.id)?.dependencies);
+    // Gate, упавший в записанном полном прогоне (ревью final M1), выводом
+    // применимости не пропускается, пока снова не пройдёт в попытке: его
+    // замыкание пакетов, видимо, неполно (файлы вне пакета не через
+    // зависимость workspace), и работа-исправление иначе его не исполнит.
+    const fullRunFailed = this.engine.read((v) => {
+      const at = new Map<string, string>();
+      for (const { key, value } of v.locals('gates-runs', WORKSPACE_OWNER))
+        if (key.startsWith(repo.id + '@'))
+          for (const run of value.runs)
+            for (const g of run.gates)
+              if (g.status === 'failed' && !g.environment && run.at > (at.get(g.gate) ?? ''))
+                at.set(g.gate, run.at);
+      return at;
+    });
+    const repoAttempts = fullRunFailed.size
+      ? this.engine.read((v) => v.attempts().filter((x) => x.repositoryId === repo.id))
+      : [];
+    const passedSince = (gateId: string, since: string) =>
+      repoAttempts.some((x) =>
+        x.evidence.some(
+          (e) =>
+            e.kind === 'test' &&
+            e.gate === gateId &&
+            e.consumer === undefined &&
+            e.passed &&
+            e.createdAt > since,
+        ),
+      );
     const diffs = new Map<string, ChangedPaths>();
     const changed = new Map<string, ChangedPaths>();
     const moved = new Map<string, string | undefined>();
     for (const gate of gates) {
       if (!conditions.has(gate.id) || proof.has(gate.id)) continue;
+      const failedAt = fullRunFailed.get(gate.id);
+      if (failedAt && !passedSince(gate.id, failedAt)) continue;
       const basis = gateBasis(this.policy, repo, gate, this.engine.version);
       const passed = greens.filter((x) =>
         x.evidence.some(

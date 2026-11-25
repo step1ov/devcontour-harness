@@ -122,8 +122,15 @@ The lead session rules (`lead begin`, roles of your commands, notes) are in
   Before the review, `review-release` needs a full `harness gates` run on
   the target: all gates, with no skips and no carry-over (alpha.71). If there
   is none, it ran on another target, or a gate definition changed since,
-  `review-release` runs it itself and refuses when a gate fails. Fix the
-  failure with a work. `release done` refuses without a passing full run.
+  `review-release` runs it itself and refuses when a gate fails. The refusal
+  says which kind: a code failure is fixed with a work; an environment or
+  tool failure (`[среда: …]`) needs the environment or the gate definition
+  fixed and `harness gates` rerun; an interrupted run is simply rerun. A gate
+  that failed in the full run is no longer skipped by derived applicability
+  until it passes again in an attempt, so the fix work runs it. If that gate
+  reads files outside its package not through a workspace dependency, mark
+  it `"when": {"always": true}` in the policy so later works keep running
+  it. `release done` refuses without a passing full run.
   `release done` refuses in both modes until the latest round on the current
   target is approved without blocking findings (only an explicit
   `release.review: advisory` makes it a warning); open non-blocking notes do

@@ -754,3 +754,63 @@ test('ревью B2 L2: все tsconfig дерева пакета, цепочк�
     },
   );
 });
+
+test('ревью final M1: gate, упавший в записанном полном прогоне, не пропускается выводом, пока снова не пройдёт в попытке', async () => {
+  const tasks: [string, Record<string, string>][] = [
+    ['t1', { 'packages/b/x.js': '1\n' }],
+    ['t2', { 'shared/x.js': '2\n' }],
+  ];
+  const ctx = setup({
+    files: {
+      'src/greet.js': greet,
+      'pnpm-workspace.yaml': 'packages:\n  - "packages/*"\n',
+      'package.json': '{"name":"root","private":true}\n',
+      'packages/b/package.json': '{"name":"b","scripts":{"check":"node -e 0"}}\n',
+      'shared/x.js': '0\n',
+    },
+    scenario: { writer: tasks.map(([, files]) => implement(files)), reviewer: approve() },
+    policy: (p: any) => {
+      p.harnessMode = 'light';
+      p.integrationReuse = 'off';
+      p.repositories[0].gates.push({
+        id: 'gate-b',
+        kind: 'check',
+        command: ['npm', 'run', '--silent', 'check'],
+        cwd: 'packages/b',
+        dependsOn: [],
+      });
+    },
+    graph: (g: any) => {
+      const base = g.orders[0];
+      g.orders = tasks.map(([id], i) => ({
+        ...structuredClone(base),
+        id,
+        source: { ...base.source, ref: id },
+        title: 'Задача ' + id,
+        writeScope: ['packages', 'shared'],
+        gates: ['unit', 'gate-b'],
+        dependsOn: i ? [tasks[i - 1]![0]] : [],
+      }));
+    },
+  });
+  // Полный прогон review-release: gate-b упал (читает shared/ мимо зависимостей).
+  ctx.engine.recordGatesRun('app', 'f'.repeat(40), {
+    id: 'GA-full',
+    at: '2099-01-01T00:00:00.000Z',
+    digest: 'd'.repeat(64),
+    passed: false,
+    gates: [
+      { gate: 'unit', status: 'passed', basis: 'b'.repeat(64) },
+      { gate: 'gate-b', status: 'failed', basis: 'b'.repeat(64) },
+    ],
+  });
+  await runAll(ctx);
+  const kinds = ctx.engine.read((v) => {
+    const a = v.attempts('t2').find((x) => x.status === 'succeeded')!;
+    return (['candidate', 'integration'] as const).map(
+      (phase) => a.evidence.findLast((x) => x.gate === 'gate-b' && x.phase === phase)?.kind,
+    );
+  });
+  assert.deepEqual(kinds, ['test', 'test'], 'работа, задевшая только shared/, исполняет gate-b');
+  ctx.store.close();
+});
