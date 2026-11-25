@@ -7,6 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { toolchainBaseline } from '../environment/toolchain-pin.ts';
 import {
+  lstat,
   mkdir,
   mkdtemp,
   readFile,
@@ -16,7 +17,7 @@ import {
   symlink,
   writeFile,
 } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, join, relative, resolve, posix } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
   roleBinding,
   selectReviewer,
@@ -600,6 +601,8 @@ export class Runner {
       changed: (change) => this.livenessChanged(change),
     });
     this.sweep.start();
+    // Брошенные копии проверок прежнего controller (ревью A1 L4).
+    void this.sweepProbeCopies();
   }
   private stopLead() {
     if (this.leaseTimer) clearInterval(this.leaseTimer);
@@ -3669,50 +3672,111 @@ export class Runner {
 
   /**
    * Одноразовая копия проверяемого коммита для проверок reviewer (alpha.71,
-   * A4): detached-дерево `sha` во временном каталоге controller, сверенное
-   * (HEAD — `sha`, чистое), с каталогами `node_modules` проверяемого дерева
-   * ссылками (установленные зависимости кандидата). `dispose` убирает его
-   * при любом исходе; отказ создания — проверки идут, как прежде, в
-   * проверяемом дереве только для чтения.
+   * A4; ревью A1 M3, L4): отдельный клон `--shared` (объекты — из
+   * проверяемого репозитория, своя `.git`) во временном каталоге controller,
+   * detached на `sha` и сверенный (HEAD — `sha`, чистое дерево). Каждый
+   * игнорируемый элемент проверяемого дерева (`node_modules`, `.env`,
+   * `vendor/`, `dist/` …) — ссылка на него, и ссылка записана в
+   * `.git/info/exclude` копии: `git status` копии чист, как у кандидата.
+   * Подмодули копия не повторяет — тогда копии нет, проверки идут в
+   * проверяемом дереве только для чтения, причина — в `skipped`. Отказ
+   * создания — так же, с причиной. `dispose` убирает копию при любом исходе.
    */
   async probeCopy(
     cwd: string,
     sha: string,
     dir: string,
-  ): Promise<{ cwd: string; dispose: () => Promise<void> } | undefined> {
-    const tree = await mkdtemp(join(controllerTemp.dir(), 'hx-probe-'));
-    const checkout = join(tree, 'tree');
+  ): Promise<{ cwd: string; links: string[]; dispose: () => Promise<void> } | { skipped: string }> {
+    let tree: string | undefined;
     const dispose = async () => {
-      await git(cwd, 'worktree', 'remove', '--force', checkout).catch(() => undefined);
-      // Каталог создан выше этим вызовом (mkdtemp под временным каталогом controller).
-      await rm(tree, { recursive: true, force: true }).catch(() => undefined);
+      // Каталог создан этим вызовом (mkdtemp под временным каталогом controller).
+      if (tree) await rm(tree, { recursive: true, force: true }).catch(() => undefined);
+    };
+    const skipped = async (reason: string) => {
+      await dispose();
+      await writeFile(
+        join(dir, 'probe-copy.json'),
+        JSON.stringify({ sha, skipped: reason }, null, 2),
+      ).catch(() => undefined);
+      return { skipped: reason };
     };
     try {
-      await git(cwd, 'worktree', 'add', '--detach', checkout, sha);
+      if (await git(cwd, 'ls-tree', sha, '.gitmodules').catch(() => ''))
+        return await skipped(
+          'submodules: копия не повторяет подмодули — проверки в дереве только для чтения',
+        );
+      tree = await mkdtemp(join(controllerTemp.dir(), 'hx-probe-'));
+      const checkout = join(tree, 'tree');
+      await git(tree, 'clone', '--quiet', '--shared', '--no-checkout', cwd, checkout);
+      await git(checkout, 'remote', 'remove', 'origin').catch(() => undefined);
+      await git(checkout, 'checkout', '--quiet', '--detach', sha);
       if (
         (await git(checkout, 'rev-parse', 'HEAD')) !== sha ||
         (await git(checkout, 'status', '--porcelain', '--untracked-files=all'))
       )
         throw new Error('копия проверок не на проверяемом коммите');
-      const modules = (
+      // Игнорируемые элементы кандидата (каталог — целиком): ссылки в копии.
+      const links = (
         await git(cwd, 'ls-files', '--others', '--ignored', '--exclude-standard', '--directory')
       )
         .split('\n')
         .map((p) => p.replace(/\/$/, ''))
-        .filter((p) => p && posix.basename(p) === 'node_modules' && !p.includes('/node_modules/'));
-      for (const m of modules) {
+        .filter((p) => p && !p.split('/').includes('.git'));
+      const linked: string[] = [];
+      for (const m of links) {
+        if (existsSync(join(checkout, m))) continue;
         await mkdir(dirname(join(checkout, m)), { recursive: true });
-        await symlink(join(cwd, m), join(checkout, m)).catch(() => undefined);
+        if (
+          await symlink(join(cwd, m), join(checkout, m)).then(
+            () => true,
+            () => false,
+          )
+        )
+          linked.push(m);
       }
+      if (linked.length)
+        await writeFile(
+          join(checkout, '.git', 'info', 'exclude'),
+          linked.map((m) => '/' + m.replace(/([*?[\]\\!#])/g, '\\$1')).join('\n') + '\n',
+          { flag: 'a' },
+        );
+      if (await git(checkout, 'status', '--porcelain', '--untracked-files=all'))
+        throw new Error('ссылки на игнорируемые файлы видны git status копии');
       await writeFile(
         join(dir, 'probe-copy.json'),
-        JSON.stringify({ sha, cwd: checkout, links: modules }, null, 2),
+        JSON.stringify({ sha, cwd: checkout, links: linked }, null, 2),
       ).catch(() => undefined);
-      return { cwd: checkout, dispose };
-    } catch {
-      await dispose();
-      return undefined;
+      return { cwd: checkout, links: linked, dispose };
+    } catch (error) {
+      return skipped('copy-failed: ' + ((error as Error)?.message ?? String(error)).slice(0, 500));
     }
+  }
+
+  /**
+   * Брошенные копии проверок (`hx-probe-*`) прежнего controller (ревью A1
+   * L4): старше предела попытки — убираются; регистрации деревьев прежних
+   * версий (копия через `git worktree`) — `git worktree prune`.
+   */
+  async sweepProbeCopies(now = Date.now()) {
+    const root = controllerTemp.dir();
+    const maxAge = this.policy.runTimeoutMs + 10 * 60_000;
+    const names = await readdir(root).catch(() => [] as string[]);
+    for (const name of names) {
+      if (!/^hx-probe-[A-Za-z0-9_-]+$/.test(name)) continue;
+      const path = join(root, name);
+      const st = await lstat(path).catch(() => undefined);
+      if (!st?.isDirectory() || now - st.mtimeMs < maxAge) continue;
+      await rm(path, { recursive: true, force: true }).catch(() => undefined);
+    }
+    for (const repo of this.policy.repositories)
+      await git(this.repoPath(repo), 'worktree', 'prune').catch(() => undefined);
+  }
+
+  /** Остаток бюджета проверок логического ревью позволяет новый вызов. */
+  private probeBudgetLeft(shared?: { deadline: number; spentMs: number }) {
+    const limits = probeLimits(this.policy);
+    const deadline = shared?.deadline ?? Date.now() + this.policy.runTimeoutMs - limits.reserveMs;
+    return limits.budgetMs - (shared?.spentMs ?? 0) >= 1000 && deadline - Date.now() >= 1000;
   }
 
   private async reviewProbe(
@@ -4229,8 +4293,16 @@ export class Runner {
       await mkdir(callDir, { recursive: true });
       // Проверки reviewer — в одноразовой записываемой копии того же
       // коммита (alpha.71, A4): проверяемое дерево только для чтения.
-      const copy = this.probesWanted(attempt, work)
-        ? await this.probeCopy(cwd, sha, callDir)
+      // Бюджет проверок исчерпан — копии не делается (ревью A1 L4).
+      const made =
+        this.probesWanted(attempt, work) && this.probeBudgetLeft(shared)
+          ? await this.probeCopy(cwd, sha, callDir)
+          : undefined;
+      const copy = made && 'cwd' in made ? made : undefined;
+      const probeCopyNote = made
+        ? 'cwd' in made
+          ? { status: 'copy' as const, links: made.links.slice(0, 50) }
+          : { status: 'read-only' as const, reason: made.skipped }
         : undefined;
       let probe: Awaited<ReturnType<Runner['reviewProbe']>>;
       let response: Awaited<ReturnType<Runner['call']>>;
@@ -4365,6 +4437,9 @@ export class Runner {
           // Ответ вне схемы сохраняется как есть (замаскированным) для разбора.
           ...(result ? {} : { raw: response.output ?? null }),
           ...(probes ? { probes } : {}),
+          // Где шли проверки reviewer (ревью A1 L4): копия или, с причиной,
+          // проверяемое дерево только для чтения.
+          ...(probe && probeCopyNote ? { probeCopy: probeCopyNote } : {}),
           ...(passes ? { passes } : {}),
         },
         redact,
