@@ -14,17 +14,22 @@ process), do not loop `status`. Block on the next event that matters instead:
 
 ```sh
 $H wait --state <manifest.paths.state> --policy .harness/policy.json \
-  [--until accepted,failed,held,question] [--timeout 30m]
+  [--after <cursor from the previous wait>] [--until accepted,failed,held,question] [--timeout 30m]
 ```
 
 It returns when a work is accepted, fails or is held, a writer asks a
 question, the release is ready, or the queue stops (no controller and no
-attempt). The result names what happened, the next step from `explain`
-(`next.actor`, `next.action`, `next.message`) and a short status line. Exit
-codes: 0 accepted, 10 release-ready, 11 question, 12 held, 13 failed, 14
-stopped, 15 timeout. They are outcomes, not errors (`ok: true`); the JSON
-`kind` is authoritative. It reads the state read-only and does not query the
-controller. Act on `next`, then wait again.
+attempt). A failure that harness retries by itself is not reported. The
+result names what happened, the next step from `explain` (`next.actor`,
+`next.action`, `next.message`), a short status line and `cursor`. Act on
+`next`, then wait again with `--after <cursor>`: events that arrived while
+you acted (or in the same moment as the reported one) come next, none is
+lost. The first `wait` without `--after` first reports what already waits
+for you (a failure, a hold or a question nobody acted on). Exit codes: 0
+accepted, 10 release-ready, 11 question, 12 held, 13 failed, 14 stopped, 15
+timeout, 16 aborted (signal). They are outcomes, not errors (`ok: true`);
+the JSON `kind` is authoritative. It reads the state read-only, does not
+query the controller and keeps an open lead session alive while waiting.
 
 Before a long cycle, first run the cheap decisive gates
 («перед долгим циклом сначала прогоните дешёвые решающие gates»):

@@ -574,6 +574,28 @@ export function recordLeadCommand(
 }
 
 /**
+ * Продлить активную сессию ведущего на её аренду без записи в журнал
+ * (`harness wait`, ревью D/E LOW-3): ожидание ведущего — тоже его работа.
+ * Нет активной сессии — ничего; возвращает, продлена ли.
+ */
+export function leadRenew(engine: Engine): boolean {
+  return engine.recordLead((log, now) =>
+    log.session && activeAt(log, now)
+      ? {
+          log: {
+            ...log,
+            session: {
+              ...log.session,
+              until: iso(Math.max(Date.parse(log.session.until), now + log.session.ttlMs)),
+            },
+          },
+          result: true,
+        }
+      : { log, result: false },
+  );
+}
+
+/**
  * Открыта ли сейчас сессия ведущего (`lead begin` без `lead end`, аренда не
  * истекла; alpha.68, P6-17). `retry` без `--by` внутри открытой сессии —
  * отказ: ведущий называет роль явно (`--by lead` или `--by operator`).

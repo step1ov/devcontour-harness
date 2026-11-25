@@ -1,14 +1,21 @@
-// `harness wait` (alpha.71, E1): ожидание следующего значимого события
-// вместо цикла `status`. Читает журнал событий и запись состояния только на
-// чтение (WAL: новые фиксации видны), раз в `pollMs`; controller не
-// спрашивает. Итог — что случилось, следующий шаг из explain и строка
-// состояния.
+// `harness wait` (alpha.71, E1; ревью D/E HIGH-1): ожидание следующего
+// значимого события вместо цикла `status`. Курсор — номер события: ответ
+// несёт `cursor` сразу после сообщённого события, следующий `wait --after
+// <cursor>` продолжает с него — ни одно событие между вызовами и в одной
+// пачке не теряется. Без `--after` wait сначала сообщает уже ждущее
+// (отказ, удержание, вопрос, на которые ещё никто не ответил). Читает журнал
+// событий и состояние только на чтение (WAL); состояние перечитывается, лишь
+// когда его фиксировало другое соединение; controller не спрашивает.
 
 import { join, resolve } from 'node:path';
 import type { ExecutionPolicy, ExecutionView, RunEvent } from '../contracts/index.ts';
+import type { stopDiagnosisSchema } from '../contracts/diagnosis.ts';
+import type { z } from 'zod';
 import { HarnessError } from '../contracts/index.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import { diagnoseState } from '../explain/diagnose.ts';
+
+type StopDiagnosis = z.infer<typeof stopDiagnosisSchema>;
 
 /** Значимые события ожидания. */
 export const waitKinds = [
@@ -21,8 +28,8 @@ export const waitKinds = [
 ] as const;
 export type WaitKind = (typeof waitKinds)[number];
 
-/** Коды выхода `harness wait` — у каждого исхода свой. */
-export const WAIT_EXIT_CODES: Record<WaitKind | 'timeout', number> = {
+/** Коды выхода `harness wait` — исходы ожидания, не ошибки (`ok: true`). */
+export const WAIT_EXIT_CODES: Record<WaitKind | 'timeout' | 'aborted', number> = {
   accepted: 0,
   'release-ready': 10,
   question: 11,
@@ -30,17 +37,20 @@ export const WAIT_EXIT_CODES: Record<WaitKind | 'timeout', number> = {
   failed: 13,
   stopped: 14,
   timeout: 15,
+  aborted: 16,
 };
 
 export interface WaitData {
-  kind: WaitKind | 'timeout';
-  /** Событие, которым кончилось ожидание (нет — состояние уже было таким). */
+  kind: WaitKind | 'timeout' | 'aborted';
+  /** Событие, которым кончилось ожидание (нет — сообщено состояние). */
   event?: { seq: number; type: string; at: string };
   workId?: string;
   /** Следующий шаг по explain: кто действует, что сделать. */
   next?: { actor: string | null; action: string; message: string };
   /** Короткая строка состояния: работы по статусам и попытки в работе. */
   status: string;
+  /** Номер события, с которого продолжит `wait --after <cursor>`. */
+  cursor: number;
   waitedMs: number;
 }
 
@@ -59,8 +69,24 @@ export function waitStatusLine(view: ExecutionView): string {
   return parts.filter(Boolean).join('; ');
 }
 
-/** Значимое ли событие и что оно значит по текущему состоянию. */
-function classify(event: RunEvent, view: ExecutionView): WaitKind | undefined {
+/** Остановка explain, которую снимет только человек, — и её вид. */
+export function pendingKind(
+  d: StopDiagnosis,
+  view: ExecutionView,
+): 'failed' | 'held' | 'question' | undefined {
+  if (d.retryPlanned || d.actor === 'controller' || d.actor === null) return undefined;
+  if (d.action === 'none' || d.action === 'wait') return undefined;
+  if (d.cause === 'needs-input' || d.action === 'answer-input' || d.action === 'apply-input')
+    return 'question';
+  const w = d.workId ? view.work(d.workId) : undefined;
+  if (!w || w.status === 'done' || w.status === 'cancelled') return undefined;
+  if (w.environmentHold || d.cause === 'needs-lead' || d.action === 'fix-environment')
+    return 'held';
+  return w.status === 'failed' ? 'failed' : 'held';
+}
+
+/** Значимое ли событие по текущему состоянию (отказ уточняет explain). */
+function classify(event: RunEvent, view: ExecutionView): WaitKind | 'failure' | undefined {
   switch (event.type) {
     case 'work.accepted':
       return 'accepted';
@@ -72,8 +98,7 @@ function classify(event: RunEvent, view: ExecutionView): WaitKind | undefined {
       return 'stopped';
     case 'attempt.failed': {
       const w = event.workId ? view.work(event.workId) : undefined;
-      if (!w || w.status !== 'failed') return undefined;
-      return w.environmentHold ? 'held' : 'failed';
+      return w && w.status === 'failed' ? 'failure' : undefined;
     }
     default:
       return undefined;
@@ -90,20 +115,20 @@ const releaseReady = (view: ExecutionView) => {
   );
 };
 
-/** Никто не работает: нет живой роли controller и нет активных попыток. */
-const idle = (view: ExecutionView, now: number) =>
-  !view.attempts().some((a) => a.status === 'active') &&
-  !((view.controller()?.leaseUntil ?? 0) > now);
-
 export async function waitFor(input: {
   stateDir: string;
   policy: ExecutionPolicy;
   baseDir: string;
   /** Какие исходы ждать; `release-ready`, `stopped` и таймаут кончают ожидание всегда. */
   until?: readonly WaitKind[];
+  /** Курсор прошлого `wait`: события строго после него. Нет — с конца журнала, сначала ждущее. */
+  after?: number;
   timeoutMs: number;
   pollMs?: number;
   signal?: AbortSignal;
+  /** Раз в `tickMs` (по умолчанию минута): продление сессии ведущего (CLI). */
+  onTick?: () => void;
+  tickMs?: number;
   now?: () => number;
 }): Promise<WaitData> {
   const now = input.now ?? Date.now;
@@ -118,61 +143,102 @@ export async function waitFor(input: {
   const wanted = new Set<WaitKind>(input.until?.length ? input.until : waitKinds);
   wanted.add('release-ready');
   wanted.add('stopped');
-  let after = 0;
-  try {
-    // Ожидание — событий после начала: прежние уже прочитаны ведущим.
-    for (let batch = store.events(after, 500); batch.length; batch = store.events(after, 500))
-      after = batch.at(-1)!.seq;
-    let found: { kind: WaitKind; event?: RunEvent } | undefined;
-    for (;;) {
-      const events = store.events(after, 500);
-      if (events.length) after = events.at(-1)!.seq;
-      found = store.read((view) => {
-        for (const e of events) {
-          const kind = classify(e, view);
-          if (kind && wanted.has(kind)) return { kind, event: e };
-        }
-        if (releaseReady(view)) return { kind: 'release-ready' as const };
-        if (!events.length && idle(view, now())) return { kind: 'stopped' as const };
-        return undefined;
-      });
-      if (found) break;
-      if (now() - started >= input.timeoutMs || input.signal?.aborted) break;
-      await new Promise((r) => setTimeout(r, input.pollMs ?? 1000));
-    }
-    const status = store.read((view) => waitStatusLine(view));
-    const workId = found?.event?.workId;
-    const base = {
-      status,
-      waitedMs: now() - started,
-      ...(found?.event
-        ? { event: { seq: found.event.seq, type: found.event.type, at: found.event.at } }
-        : {}),
-      ...(workId ? { workId } : {}),
-    };
-    if (!found) return { kind: 'timeout', ...base };
-    store.close();
-    // Следующий шаг — из explain (только чтение) по работе события.
-    const explain = await diagnoseState({
+  const explain = (workId?: string) =>
+    diagnoseState({
       stateDir: input.stateDir,
       policy: input.policy,
       baseDir: input.baseDir,
       ...(workId ? { workId } : {}),
     }).catch(() => undefined);
-    const d =
-      explain?.diagnoses.find((x) => !workId || x.workId === workId) ?? explain?.diagnoses[0];
-    return {
-      kind: found.kind,
-      ...base,
-      ...(d
-        ? { next: { actor: d.actor, action: d.action, message: d.message.slice(0, 500) } }
-        : {}),
-    };
-  } finally {
-    try {
-      store.close();
-    } catch {
-      /* уже закрыто */
+  const nextOf = (d: StopDiagnosis | undefined) =>
+    d ? { next: { actor: d.actor, action: d.action, message: d.message.slice(0, 500) } } : {};
+  let cursor = input.after ?? store.lastEventSeq();
+  let lastTick = started;
+  const finish = (kind: WaitData['kind'], extra: Partial<WaitData> = {}): WaitData => ({
+    kind,
+    ...extra,
+    status: store.read((view) => waitStatusLine(view)),
+    cursor,
+    waitedMs: now() - started,
+  });
+  try {
+    // Без курсора — сначала то, что уже ждёт человека (например, отказ до начала wait).
+    if (input.after === undefined) {
+      const stops = await explain();
+      const found = store.read((view) => {
+        for (const d of stops?.diagnoses ?? []) {
+          const kind = pendingKind(d, view);
+          if (kind && wanted.has(kind)) return { kind, d };
+        }
+        return undefined;
+      });
+      if (found)
+        return finish(found.kind, {
+          ...(found.d.workId ? { workId: found.d.workId } : {}),
+          ...nextOf(found.d),
+        });
     }
+    // Прочитанное состояние перечитывается только после чужой фиксации.
+    let mark = -1;
+    let cached = { ready: false, active: false, leaseUntil: 0 };
+    for (;;) {
+      if (input.signal?.aborted) return finish('aborted');
+      const events = store.events(cursor, 500);
+      for (const e of events) {
+        const kind = store.read((view) => classify(e, view));
+        const event = { seq: e.seq, type: e.type, at: e.at };
+        const work = e.workId ? { workId: e.workId } : {};
+        if (kind === 'failure') {
+          // Отказ и ремонт harness — разные транзакции (ревью D/E LOW-2): отказ
+          // проверяется опросом позже; назначенный повтор (работа уже не
+          // failed) или повтор, который explain планирует, — не отказ для ведущего.
+          await new Promise((r) => setTimeout(r, input.pollMs ?? 1000));
+          if (!store.read((view) => view.work(e.workId!)?.status === 'failed')) {
+            cursor = e.seq;
+            continue;
+          }
+          const stops = await explain(e.workId);
+          const d = stops?.diagnoses.find((x) => x.workId === e.workId);
+          const pending = d ? store.read((view) => pendingKind(d, view)) : undefined;
+          if (pending && wanted.has(pending)) {
+            cursor = e.seq;
+            return finish(pending, { event, ...work, ...nextOf(d) });
+          }
+        } else if (kind && wanted.has(kind)) {
+          // Курсор — сразу за сообщённым событием: остаток пачки прочтёт следующий wait.
+          cursor = e.seq;
+          const stops = await explain(e.workId);
+          const d =
+            stops?.diagnoses.find((x) => !e.workId || x.workId === e.workId) ?? stops?.diagnoses[0];
+          return finish(kind, { event, ...work, ...nextOf(d) });
+        }
+        cursor = e.seq;
+      }
+      const changed = store.changeMark();
+      if (changed !== mark || events.length) {
+        mark = changed;
+        cached = store.read((view) => ({
+          ready: releaseReady(view),
+          active: view.attempts().some((a) => a.status === 'active'),
+          leaseUntil: view.controller()?.leaseUntil ?? 0,
+        }));
+      }
+      if (cached.ready) return finish('release-ready');
+      // Никто не работает: нет живой роли controller и активных попыток.
+      if (!events.length && !cached.active && !(cached.leaseUntil > now()))
+        return finish('stopped');
+      if (now() - started >= input.timeoutMs) return finish('timeout');
+      if (input.onTick && now() - lastTick >= (input.tickMs ?? 60_000)) {
+        lastTick = now();
+        try {
+          input.onTick();
+        } catch {
+          /* продление — удобство, не условие ожидания */
+        }
+      }
+      await new Promise((r) => setTimeout(r, input.pollMs ?? 1000));
+    }
+  } finally {
+    store.close();
   }
 }

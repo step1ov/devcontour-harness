@@ -115,6 +115,7 @@ import {
   leadCommandEntry,
   leadEnd,
   leadNote,
+  leadRenew,
   leadCommandActor,
   leadSessionOpen,
   leadTtlMs,
@@ -665,7 +666,7 @@ const presenters: Partial<Record<CliCommand, (data: never) => string>> = {
   update: updateText,
   wait: (d: WaitData) =>
     [
-      `${d.kind}${d.workId ? ` ${d.workId}` : ''}${d.event ? ` (${d.event.type} #${d.event.seq})` : ''}`,
+      `${d.kind}${d.workId ? ` ${d.workId}` : ''}${d.event ? ` (${d.event.type} #${d.event.seq})` : ''}; cursor ${d.cursor}`,
       d.next ? `дальше: ${d.next.actor ?? '—'} ${d.next.action}: ${d.next.message}` : '',
       d.status,
     ]
@@ -1480,6 +1481,18 @@ async function run(
         v.timeout === undefined
           ? 30 * 60_000
           : parseDurationFlag('timeout', v.timeout, { minMs: 1000, maxMs: 24 * 3_600_000 });
+      const after =
+        v.after === undefined
+          ? undefined
+          : /^\d+$/.test(v.after)
+            ? Number(v.after)
+            : (() => {
+                throw new HarnessError(
+                  'INVALID_INPUT',
+                  '--after: номер события (cursor прошлого wait)',
+                  [{ path: ['--after'], message: v.after }],
+                );
+              })();
       const abort = new AbortController();
       const stop = () => abort.abort(new Error('Ожидание прервано сигналом'));
       process.once('SIGINT', stop);
@@ -1490,8 +1503,19 @@ async function run(
           policy: b.policy,
           baseDir: b.baseDir,
           ...(until.length ? { until: until as WaitKind[] } : {}),
+          ...(after !== undefined ? { after } : {}),
           timeoutMs,
           signal: abort.signal,
+          // Ожидание ведущего продлевает его активную сессию (ревью D/E LOW-3).
+          onTick: () => {
+            if (!existsSync(bindingFile(state))) return;
+            const h = open(state, binding(state), false);
+            try {
+              leadRenew(h.engine);
+            } finally {
+              h.close();
+            }
+          },
         });
         return { command, data, code: WAIT_EXIT_CODES[data.kind] };
       } finally {

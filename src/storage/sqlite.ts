@@ -484,6 +484,22 @@ export class SqliteExecutionStore implements ExecutionStore {
     }
   }
 
+  /** Номер последнего события (0 — событий нет): `harness wait` начинает с него. */
+  lastEventSeq(): number {
+    const row = this.db.prepare('SELECT max(seq) AS seq FROM events').get() as
+      { seq: number | null } | undefined;
+    return row?.seq ?? 0;
+  }
+
+  /**
+   * Метка изменений чужими соединениями (`PRAGMA data_version`): та же —
+   * никто ничего не фиксировал с прошлого вызова, прочитанное можно не
+   * перечитывать (`harness wait`).
+   */
+  changeMark(): number {
+    return (this.db.prepare('PRAGMA data_version').get() as { data_version: number }).data_version;
+  }
+
   events(after = 0, limit = 500): RunEvent[] {
     const rows = this.db
       .prepare('SELECT data FROM events WHERE seq>? ORDER BY seq LIMIT ?')

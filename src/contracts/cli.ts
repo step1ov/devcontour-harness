@@ -1881,7 +1881,7 @@ export const cliCommands = {
       'Ждать следующего значимого события (alpha.71): принятие, отказ или удержание работы, вопрос исполнителя, готовность выпуска, остановка очереди; итог — что случилось, следующий шаг из explain и строка состояния. Читает журнал событий только на чтение, controller не опрашивает',
     writes: false,
     idempotency:
-      'Только чтение. Ждёт событий после своего начала; уже готовый выпуск или очередь без controller и попыток — сразу. Коды выхода — исходы ожидания, не ошибки: 0 accepted, 10 release-ready, 11 question, 12 held, 13 failed, 14 stopped, 15 timeout; решает поле `kind` JSON-ответа (`ok: true` при любом исходе), коды — для скриптов',
+      'Только чтение состояния (продлевает лишь активную сессию ведущего). Без --after сначала сообщает уже ждущее, затем ждёт событий после конца журнала; с --after <cursor> — событий после курсора; ответ несёт cursor сразу за сообщённым событием. Уже готовый выпуск или очередь без controller и попыток — сразу. Коды выхода — исходы ожидания, не ошибки: 0 accepted, 10 release-ready, 11 question, 12 held, 13 failed, 14 stopped, 15 timeout, 16 aborted (сигнал); решает поле `kind` JSON-ответа (`ok: true` при любом исходе), коды — для скриптов',
     args: [
       state,
       {
@@ -1901,6 +1901,13 @@ export const cliCommands = {
         value: 'duration',
         required: false,
         description: 'Предел ожидания: Nm, Nh или Ns; по умолчанию 30m',
+      },
+      {
+        name: '--after',
+        value: 'number',
+        required: false,
+        description:
+          'Курсор прошлого wait (`data.cursor`): события строго после него. Без него wait сначала сообщает уже ждущее (отказ, удержание, вопрос), затем ждёт новых',
       },
     ],
     refusals: ['NOT_FOUND'],
@@ -2552,7 +2559,16 @@ export const guideDataSchema = z.strictObject({
 
 /** Итог `harness wait` (alpha.71, E1). */
 export const waitDataSchema = z.strictObject({
-  kind: z.enum(['accepted', 'failed', 'held', 'question', 'release-ready', 'stopped', 'timeout']),
+  kind: z.enum([
+    'accepted',
+    'failed',
+    'held',
+    'question',
+    'release-ready',
+    'stopped',
+    'timeout',
+    'aborted',
+  ]),
   event: z
     .strictObject({ seq: z.number().int().positive(), type: z.string(), at: isoTimeSchema })
     .optional(),
@@ -2565,6 +2581,8 @@ export const waitDataSchema = z.strictObject({
     })
     .optional(),
   status: z.string().max(500),
+  /** Номер события, с которого продолжит `wait --after <cursor>` (ревью D/E HIGH-1). */
+  cursor: z.number().int().min(0),
   waitedMs: z.number().int().min(0),
 });
 
