@@ -10,17 +10,20 @@ import type {
   WorkState,
 } from '../contracts/execution.ts';
 import type { RecoveryPolicy } from './decisions.ts';
+import { MAX_NEUTRAL_FAILURES } from '../contracts/repair-policy.ts';
 
 type AttemptFacts = Pick<
   AttemptState,
   'id' | 'workId' | 'status' | 'failureKind' | 'blocked' | 'writerBlocked' | 'interrupted'
 > &
-  Partial<Pick<AttemptState, 'writerSplit' | 'failureFingerprint' | 'evidence'>>;
+  Partial<
+    Pick<AttemptState, 'writerSplit' | 'failureFingerprint' | 'evidence' | 'environmentCause'>
+  >;
 type WorkFacts = Pick<
   WorkState,
   'id' | 'status' | 'attempt' | 'approvedDigest' | 'rework' | 'leadRecovery' | 'recovery'
 > &
-  Partial<Pick<WorkState, 'recoveryHistory'>>;
+  Partial<Pick<WorkState, 'recoveryHistory' | 'neutralFailures'>>;
 
 /**
  * Засчитанный отказ — о самой работе: окружение, провайдер, отказ до работы,
@@ -43,9 +46,23 @@ export const countedFailure = (a: AttemptFacts) =>
 /** Предел попыток, к которому относятся диагностики и сбросы (`rework.budgets`). */
 export const epochOf = (w: Pick<WorkState, 'rework'>) => w.rework?.budgets ?? 0;
 
-/** Технический разбор: ведущий сам даёт новый предел по нему. */
-export const technicalCause = (d: Pick<LeadDiagnosis, 'cause' | 'hypothesis'>) =>
-  d.cause === 'coverage' || d.cause === 'approach' || (d.cause === 'other' && !!d.hypothesis);
+/**
+ * Технический разбор: ведущий сам даёт новый предел по нему. `environment`
+ * с доказательством исправления (например, прошедший `harness smoke`) —
+ * технический с alpha.71 (P8-4(b), решение владельца): попытки, съеденные
+ * отказами окружения, ведущий возвращает сам, в пределе `leadResets`.
+ */
+export const technicalCause = (
+  d: Pick<LeadDiagnosis, 'cause' | 'hypothesis'> & Partial<Pick<LeadDiagnosis, 'evidence'>>,
+) =>
+  d.cause === 'coverage' ||
+  d.cause === 'approach' ||
+  (d.cause === 'other' && !!d.hypothesis) ||
+  (d.cause === 'environment' && (d.evidence?.length ?? 0) > 0);
+
+/** Предел незасчитанных отказов работы исчерпан (`MAX_NEUTRAL_FAILURES`). */
+export const neutralFailuresExhausted = (w: Pick<WorkState, 'neutralFailures'>) =>
+  (w.neutralFailures ?? 0) >= MAX_NEUTRAL_FAILURES;
 
 /** Гипотезы сравниваются без регистра, пунктуации по краям и лишних пробелов. */
 export const normalizedHypothesis = (s: string) =>
@@ -59,6 +76,24 @@ function sinceAccepted(work: WorkFacts, attempts: readonly AttemptFacts[]) {
   const own = attempts.filter((a) => a.workId === work.id && a.status !== 'active');
   const last = own.findLastIndex((a) => a.status === 'succeeded');
   return own.slice(last + 1);
+}
+
+/**
+ * Отказы окружения текущей редакции после последнего засчитанного отказа
+ * (до 20 последних): их разбирает ведущий, когда попытки съел предел
+ * незасчитанных отказов (alpha.71, P8-4(b)). Последний из них — отказ без
+ * повтора (`environmentCause`) — пусто: это правка gate, решает человек.
+ */
+export function environmentFailures(work: WorkFacts, attempts: readonly AttemptFacts[]) {
+  const own = sinceAccepted(work, attempts);
+  const lastCounted = own.findLastIndex(countedFailure);
+  const env = own
+    .slice(lastCounted + 1)
+    .filter((a) => a.status === 'failed' && a.failureKind === 'environment' && !a.interrupted);
+  // Отказ без повтора (gate зовёт ps в песочнице, gate-definition) — правка
+  // gate, а не сбой среды: его исчерпание по-прежнему решает человек.
+  if (env.at(-1)?.environmentCause) return [];
+  return env.map((a) => a.id).slice(-20);
 }
 
 /** Засчитанные отказы текущей редакции — по порядку. */
@@ -140,6 +175,12 @@ export function repeatedDefect(
   return undefined;
 }
 
+/** Повтор дефекта, последний отказ которого ещё не разобран: автоматического повтора нет. */
+export const repeatedDefectPending = (work: WorkFacts, attempts: readonly AttemptFacts[]) => {
+  const defect = repeatedDefect(work, attempts);
+  return defect && pendingFailures(work, attempts).includes(defect.runs[1]) ? defect : undefined;
+};
+
 export const latestDiagnosis = (work: WorkFacts) => work.leadRecovery?.diagnoses.at(-1);
 
 /** Разбор свежий: разбирает последний засчитанный отказ текущей редакции. */
@@ -148,8 +189,13 @@ export function freshDiagnosis(
   attempts: readonly AttemptFacts[],
 ): LeadDiagnosis | undefined {
   const d = latestDiagnosis(work);
+  if (!d || d.epoch !== epochOf(work)) return undefined;
   const last = lastCountedFailure(work, attempts);
-  return d && last && d.epoch === epochOf(work) && d.failures.includes(last) ? d : undefined;
+  if (last && d.failures.includes(last)) return d;
+  // Разбор окружения последнего отказа окружения после последнего
+  // засчитанного (предел незасчитанных отказов, alpha.71).
+  const env = environmentFailures(work, attempts).at(-1);
+  return d.cause === 'environment' && env && d.failures.includes(env) ? d : undefined;
 }
 
 /** Сбросы ведущего текущего предела попыток. */
@@ -234,8 +280,12 @@ export function exhaustedStep(
   const fresh = freshDiagnosis(work, attempts);
   if (!fresh) {
     const pending = pendingFailures(work, attempts);
-    return pending.length
-      ? { actor: 'lead', step: 'diagnose', failures: pending }
+    if (pending.length) return { actor: 'lead', step: 'diagnose', failures: pending };
+    // Попытки съел предел незасчитанных отказов окружения: разбор окружения
+    // с доказательством исправления — ход ведущего (alpha.71, P8-4(b)).
+    const env = neutralFailuresExhausted(work) ? environmentFailures(work, attempts) : [];
+    return env.length
+      ? { actor: 'lead', step: 'diagnose', failures: env }
       : { actor: 'user', why: 'nothing' };
   }
   if ((work.leadRecovery?.resets ?? []).some((r) => r.diagnosis === fresh.id))

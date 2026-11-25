@@ -11,7 +11,7 @@ import {
   writerBlockedStop,
 } from '../contracts/repair-policy.ts';
 import { RECOVERY_THRESHOLD, isNeutral } from './property-recovery.ts';
-import { pendingFailures, repeatedDefect } from '../projections/lead-recovery.ts';
+import { repeatedDefectPending } from '../projections/lead-recovery.ts';
 import { blockingRequest } from './input-requests.ts';
 import type { LeadHold } from '../projections/lead-recovery.ts';
 
@@ -262,9 +262,8 @@ export function repairDecision(
 
   // Тот же дефект дважды подряд без разбора (alpha.71, C3): автоматического
   // повтора нет — разбор ведущего с новой гипотезой, затем попытка с чистого дерева.
-  const attempts = view.attempts(work.id);
-  const defect = repeatedDefect(work, attempts);
-  if (defect && pendingFailures(work, attempts).includes(defect.runs[1]))
+  const defect = repeatedDefectPending(work, view.attempts(work.id));
+  if (defect)
     return {
       action: 'stop',
       workId: work.id,

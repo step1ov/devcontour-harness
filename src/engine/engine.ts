@@ -156,6 +156,7 @@ import {
   freshDiagnosis,
   leadHold,
   normalizedHypothesis,
+  environmentFailures,
   pendingFailures,
   repeatedDefect,
   type LeadHold,
@@ -6342,11 +6343,25 @@ export class Engine {
           `Идёт попытка ${w.activeRunId}: разбор — после её окончания`,
         );
       const attempts = tx.attempts(workId);
-      const failures = pendingFailures(w, attempts);
+      const counted = pendingFailures(w, attempts);
+      // Попытки съел предел незасчитанных отказов окружения (alpha.71,
+      // P8-4(b)): ведущий разбирает их причиной `environment` с
+      // доказательством исправления (например, прошедший harness smoke).
+      const environment =
+        !counted.length && input.cause === 'environment' && neutralExhausted(w)
+          ? environmentFailures(w, attempts)
+          : [];
+      const failures = counted.length ? counted : environment;
       if (!failures.length)
         throw new HarnessError(
           'NOT_READY',
           'Засчитанных отказов без разбора нет: отказы окружения, провайдера, вопросы и остановки разбора не требуют',
+        );
+      if (environment.length && !(input.evidence ?? []).some((e) => e.trim()))
+        throw new HarnessError(
+          'INVALID_INPUT',
+          '--evidence обязательна для разбора отказов окружения: чем подтверждено, что окружение исправлено (например, harness smoke --writer-probe прошёл)',
+          [{ path: ['--evidence'], message: 'required' }],
         );
       // Разбор хранится и показывается в панели и журнале: секреты (токены,
       // ключи, учётные данные в URL) маскируются до записи, как у заметок ведущего.
@@ -6423,7 +6438,7 @@ export class Engine {
         },
       });
       const rp = recoveryPolicyOf(this.policy);
-      const exhausted = w.attempt >= this.policy.maxAttempts;
+      const exhausted = w.attempt >= this.policy.maxAttempts || neutralExhausted(w);
       const hold = rp.enabled ? leadHold(next, attempts, rp, this.policy.maxAttempts) : undefined;
       const step = exhausted
         ? exhaustedStep(next, attempts, rp, Boolean(this.budgetBlockOf(w.id, tx)))

@@ -31,6 +31,7 @@ import {
   exhaustedStep,
   leadHold,
   leadResetLine,
+  repeatedDefectPending,
   type LeadHold,
 } from '../projections/lead-recovery.ts';
 import type { EvidenceLink, StopInput, StopPhase } from '../projections/stop.ts';
@@ -490,6 +491,14 @@ export function stopInputsIn(
                 retryRoute: h.engine.retryRouteOf(work, v),
               }
             : {}),
+          // Предел незасчитанных отказов окружения исчерпан (alpha.71, P8-4(b)):
+          // ход по исчерпанию — из того же правила, что у отказа без повтора.
+          ...(work.status === 'failed' &&
+          work.failureKind === 'environment' &&
+          !lastNoRetryCause(attempts) &&
+          (work.neutralFailures ?? 0) >= MAX_NEUTRAL_FAILURES
+            ? { retryRoute: h.engine.retryRouteOf(work, v) }
+            : {}),
           ...((held) => {
             if (!held) return {};
             const holder = v.work(held.workId);
@@ -586,9 +595,12 @@ export function stopInputsIn(
         },
         maxAttempts: options.maxAttempts,
         repair: {
-          sameFailureRepairs: fingerprint
-            ? identical - 1
-            : repairRepeats(kind, lastContextLimit(attempts), lastNoRetryCause(attempts)),
+          // Тот же дефект дважды подряд без разбора (alpha.71): повторы этой
+          // причины исчерпаны — автоматического повтора нет.
+          sameFailureRepairs:
+            fingerprint && !repeatedDefectPending(work, attempts)
+              ? identical - 1
+              : repairRepeats(kind, lastContextLimit(attempts), lastNoRetryCause(attempts)),
           groupRepairsUsed: job?.repairs ?? 0,
           groupRepairBudget: job ? options.repairBudget : 0,
           ...(outlook ? { outlook } : {}),
@@ -797,6 +809,7 @@ function outlookOf(
       identical - 1 < repeats &&
       !acceptanceGap(ctx.v, w) &&
       !repeatedTestcase(ctx.v, w, options.maxAttempts) &&
+      !repeatedDefectPending(w, attempts) &&
       !ctx.leadHold(w) &&
       (w.neutralFailures ?? 0) < MAX_NEUTRAL_FAILURES &&
       w.attempt < options.maxAttempts &&

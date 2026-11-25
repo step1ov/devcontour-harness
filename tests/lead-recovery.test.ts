@@ -700,3 +700,60 @@ test('A68-1a: дополнение свежего разбора — без вт
   retryAuto(e);
   assert.equal(e.claim('c1')?.attempt, 3);
 });
+
+test('recovery (P8-4(b), alpha.71): предел незасчитанных отказов окружения — ведущий разбирает environment с доказательством и сбрасывает сам, в пределе leadResets', () => {
+  const ctx = setup({ mode: 'lead', leadResets: 1 });
+  const e = ctx.engine;
+  for (let i = 0; i < 3; i++) {
+    failOnce(e, 'environment');
+    if (i < 2) retryAuto(e);
+  }
+  assert.equal(work(e).neutralFailures, 3);
+  refused(() => e.retry('a', undefined, 'lead'), 'ATTEMPTS_EXHAUSTED', /ход ведущего/);
+  assert.deepEqual((({ actor, action }) => ({ actor, action }))(explain(ctx)), {
+    actor: 'lead',
+    action: 'diagnose',
+  });
+  // Без доказательства исправления окружения разбор не принимается.
+  refused(() => e.diagnose('a', { cause: 'environment' }), 'INVALID_INPUT', /--evidence/);
+  const d = e.diagnose('a', {
+    cause: 'environment',
+    evidence: ['harness smoke --writer-probe прошёл после сбоя pull (Docker EOF)'],
+  });
+  assert.equal(d.next, 'lead-reset');
+  const r = e.retry('a', { reason: 'окружение исправлено', diagnosis: d.diagnosis.id }, 'lead');
+  assert.equal(r.reset?.performed, true);
+  assert.equal(work(e).neutralFailures, undefined, 'предел незасчитанных отказов восстановлен');
+  assert.equal(work(e).leadRecovery?.resets.at(-1)?.by, 'lead');
+  // Тот же путь второй раз — сверх leadResets: решает человек.
+  for (let i = 0; i < 3; i++) {
+    failOnce(e, 'environment');
+    if (i < 2) retryAuto(e);
+  }
+  const again = e.diagnose('a', { cause: 'environment', evidence: ['smoke снова зелёный'] });
+  assert.equal(again.next, 'user-reset');
+  refused(
+    () => e.retry('a', { reason: 'ещё раз', diagnosis: again.diagnosis.id }, 'lead'),
+    'ATTEMPTS_EXHAUSTED',
+    /Сбросы ведущего этого предела потрачены/,
+  );
+});
+
+test('recovery (P8-4(b), alpha.71): засчитанные попытки исчерпаны, разбор environment с доказательством — сброс ведущего; без доказательства — человек', () => {
+  const ctx = setup({ mode: 'lead', diagnoseAfter: 3 });
+  const e = ctx.engine;
+  for (let i = 0; i < 3; i++) {
+    failOnce(e);
+    if (i < 2) retryAuto(e);
+  }
+  const d = e.diagnose('a', {
+    cause: 'environment',
+    evidence: ['gate упал на Docker pull EOF; harness smoke --writer-probe после сбоя прошёл'],
+  });
+  assert.equal(d.next, 'lead-reset');
+  assert.equal(
+    e.retry('a', { reason: 'окружение исправлено', diagnosis: d.diagnosis.id }, 'lead').reset
+      ?.performed,
+    true,
+  );
+});
