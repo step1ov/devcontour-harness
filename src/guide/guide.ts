@@ -13,6 +13,8 @@ export const skillsRoot = fileURLToPath(new URL('../../skills/', import.meta.url
 
 /** Темы `harness guide` в порядке маршрута. */
 export const guideTopics = [
+  // Правила сессии ведущего — первыми (ревью D/E MEDIUM-2): их читает каждая сессия.
+  'session',
   'setup',
   'plan',
   'review',
@@ -83,8 +85,10 @@ export function guideIndex(root = skillsRoot): string {
     '`$H` is the CLI of the exact installed version (`guide setup`, step 1).',
     'Before it is installed, read the same text from `guide/<topic>.md` next',
     'to this file.',
-    'Route: setup → plan → review → run (block on `$H wait`, not a `status`',
-    'loop) → recovery when it stops → release.',
+    'Every session, new or resumed, starts with `$H guide session` (lead begin,',
+    'who your commands speak for, notes; resuming). Route: setup → plan →',
+    'review → run (block on `$H wait`, not a `status` loop) → recovery when it',
+    'stops → release.',
     '',
     ...rows,
   ].join('\n');

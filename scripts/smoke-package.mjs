@@ -153,6 +153,7 @@ for (const required of [
   'profiles/node-checks.json',
   'profiles/layers/lean.json',
   'skills/harness/SKILL.md',
+  'skills/harness/guide/session.md',
   'skills/harness/guide/run.md',
   'skills/harness/guide/recovery.md',
   'skills/harness-setup/SKILL.md',

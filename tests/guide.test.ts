@@ -34,6 +34,20 @@ test('guide: каждая тема — непустой раздел со сво
     assert.ok(s.headings.length > 0, t);
     guideDataSchema.parse({ topic: s.topic, title: s.title, headings: s.headings, text: s.text });
   }
+  // Ревью D/E MEDIUM-2: правила сессии — в теме, которую оглавление велит читать первой.
+  assert.match(skill, /Every session, new or resumed, starts with `\$H guide session`/);
+  assert.equal(guideTopics[0], 'session');
+  for (const rule of [
+    /\$H lead begin --state/,
+    /Inside\s+your open session `retry` needs an explicit role/,
+    /`input-answer` without `--actor` is always the operator's/,
+    /\$H lead note/,
+    /\$H lead end --state/,
+    /### 10\. New session[^]*0\. `\$H lead begin/,
+  ])
+    assert.match(texts.session!, rule);
+  for (const t of guideTopics.filter((x) => x !== 'session'))
+    assert.doesNotMatch(texts[t]!, /At the start of your session: `\$H lead begin/, t);
   assert.match(texts.run!, /\$H wait --state/);
   assert.match(texts.run!, /do not loop `status`/);
   assert.match(texts.recovery!, /explain/);

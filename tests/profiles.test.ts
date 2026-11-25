@@ -433,7 +433,7 @@ test('Skills и шаблоны: шаблоны проходят validate; инс
     policy: JSON.parse(readFileSync(join(root, 'templates/policy.json'), 'utf8')),
   });
   // alpha.71 (E3): SKILL.md — оглавление, текст — в разделах `skills/harness/guide/`.
-  const guideFiles = ['setup', 'plan', 'review', 'run', 'recovery', 'release'].map(
+  const guideFiles = ['session', 'setup', 'plan', 'review', 'run', 'recovery', 'release'].map(
     (t) => `skills/harness/guide/${t}.md`,
   );
   const head = readFileSync(join(root, 'skills/harness/SKILL.md'), 'utf8');

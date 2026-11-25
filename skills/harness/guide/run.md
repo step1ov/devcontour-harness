@@ -1,4 +1,4 @@
-<!-- harness guide run: Run the graph, wait for events, probe the writer, new sessions -->
+<!-- harness guide run: Run the graph, wait for events, probe the writer, notes -->
 
 ### 7. Run
 
@@ -97,35 +97,6 @@ WebFetch/WebSearch); external tool servers configured in the profile stay
 outside the boundary. Changing `network` needs
 a new plan review. A browser that aborts under the macOS
 sandbox (`process-abort`) cannot run inside the writer at all.
-
-### 10. New session
-
-Nothing is asked again:
-
-1. `$H init --repository <repo> --plan` returns the saved manifest
-   (decisions, `paths.state`) with `status: complete` and writes nothing.
-2. `$H status --state <paths.state>` — `NOT_FOUND` means "never run".
-3. `$H explain --state <paths.state> --policy <repo>/.harness/policy.json`.
-4. Read `.harness/work/*.json` and the notes.
-5. With a task-source connector (`connector.json` next to the policy),
-   `$H doctor --policy <repo>/.harness/policy.json` also checks the source
-   version. When `warnings` carries its compatibility line, tell the operator
-   that line once: the writer works without the full task context until the
-   source is updated. Product questions you record in the task source as
-   question documents appear in `$H view` (`sourceQuestions`) after the next
-   `source-snapshot` or `run --source`; the owner answers them there.
-6. Updates, one line to the user: `$H update --check --state <paths.state>`
-   (it reaches only the npm registry, no telemetry;
-   offline it answers «Не удалось проверить обновления» and nothing else
-   changes). With `"mode": "off"` in `.harness/updates.json` skip the call and
-   say nothing. Quote `data.line` as is: «Доступна harness … — что нового: …;
-   обновить — …», «Обновлений нет», or «Нужно ваше решение: …» (a format
-   change: never apply it yourself; ask the user and, with their yes, run the
-   `data.check.command`). Apply an `available` pair only when the user asks
-   or the mode is `auto`: `$H update --apply --state <paths.state> --wait 30`
-   — it never installs during a run, copies the state, checks the new version
-   and goes back by itself on failure; report `data.line`. Do not run it in
-   the middle of your own `run`.
 
 ### 11. Notes
 

@@ -135,7 +135,7 @@ prepare fits a reasonable time.
   (`profiles/*.json`); `--profile ./file.json --repository <dir>` resolves a
   profile kept in the repository. Profile resolution only reads manifests and
   never runs project commands.
-- **Lead log**: `$H lead begin|note|end`, `$H lead outline --file`, `$H release done --summary` (see «Lead log»).
+- **Lead log**: `$H lead begin|note|end`, `$H lead outline --file`, `$H release done --summary` (see `$H guide session`, «Lead log»).
 - **Queue control**: `$H status`, `pause`, `resume`, `cancel`, `retry`
   (bounded by the policy), `deliver` (repeats delivery without models or Git
   integration); with a connector, `source-deliver --reprove` re-proves the

@@ -548,7 +548,7 @@ harness wait --state <state> --policy <policy> [--after <cursor>] [--until accep
 
 ## Разделы инструкции: `harness guide` (alpha.71)
 
-`harness guide <setup|plan|review|run|recovery|release|relay>` печатает
+`harness guide <session|setup|plan|review|run|recovery|release|relay>` печатает
 раздел инструкции ведущего текстом (`--json` — конвертом с заголовками).
 Источник — `skills/harness/guide/<topic>.md` пакета (тема `relay` — раздел
 «Task source» skill установки); `skills/harness/SKILL.md` — оглавление,

@@ -31,15 +31,18 @@ section with `$H guide <topic>` (plain text, read-only) and follow it.
 `$H` is the CLI of the exact installed version (`guide setup`, step 1).
 Before it is installed, read the same text from `guide/<topic>.md` next
 to this file.
-Route: setup → plan → review → run (block on `$H wait`, not a `status`
-loop) → recovery when it stops → release.
+Every session, new or resumed, starts with `$H guide session` (lead begin,
+who your commands speak for, notes; resuming). Route: setup → plan →
+review → run (block on `$H wait`, not a `status` loop) → recovery when it
+stops → release.
 
+- `$H guide session` — Read first in every session: lead begin, who your commands speak for, notes, release outline, resuming. Sections: Lead log: tell the operator what you are doing; 10. New session.
 - `$H guide setup` — Install, check the machine, prepare the repository; policy, profiles and other inputs. Sections: Route for an existing repository; 0. What to ask the user; 1. Install the exact package outside the project; 2. Check the machine; Lead inside a Codex sandbox; 3. Prepare the repository; Other inputs.
 - `$H guide plan` — Plan the work graph and validate it. Sections: 4. Plan the graph; 5. Validate.
 - `$H guide review` — Plan review and approval; independent review of code written outside the harness. Sections: 6. Review and approve the plan; Review of code written outside the harness.
-- `$H guide run` — Run the graph, wait for events, probe the writer, new sessions. Sections: 7. Run; 10. New session; 11. Notes.
+- `$H guide run` — Run the graph, wait for events, probe the writer, notes. Sections: 7. Run; 11. Notes.
 - `$H guide recovery` — When it stops: explain, diagnose, retries, holds and questions. Sections: 8. When it stops.
-- `$H guide release` — Report the result, lead log, release review and release done. Sections: 9. Report the result; Lead log: tell the operator what you are doing.
+- `$H guide release` — Report the result, release review and release done. Sections: 9. Report the result; Lead log: release review and release done.
 - `$H guide relay` — Task source: graph files or a connected task tracker (connector.json). Sections: 10. Task source.
 
 <!-- guide-index:end -->

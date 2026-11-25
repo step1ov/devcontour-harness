@@ -1,4 +1,4 @@
-<!-- harness guide release: Report the result, lead log, release review and release done -->
+<!-- harness guide release: Report the result, release review and release done -->
 
 ### 9. Report the result
 
@@ -99,45 +99,11 @@ name) — and wait for their yes; never push on your own, and never report
 `unknown` as pushed or as not pushed. After that push, `status` shows
 `pushed` without a fetch (the push updates the tracking ref).
 
-### Lead log: tell the operator what you are doing
+### Lead log: release review and release done
 
-The operator watches `$H view` while you work. Harness records your own
-harness commands there by itself (plan review, approve, retry, cancel,
-source-deliver, input answers, run start and end). Everything else you do —
-writing in the task source, checking the site in a browser, fixing the
-connector — is invisible unless you say it:
+The lead session rules (`lead begin`, roles of your commands, notes) are in
+`$H guide session`.
 
-- At the start of your session: `$H lead begin --state <state>` (a lease of
-  30 minutes; `--ttl` takes a unit — `90s`, `30m`, `2h`, a bare number is
-  refused; each of your records extends it). Your harness commands are
-  written to your log only while your session is active, or when they say
-  `--by lead` / `--actor lead` (`diagnose` is always yours); a command with `--actor operator` (or
-  `--by <human>`) is the operator's and does not extend your lease. Inside
-  your open session `retry` needs an explicit role: `--by lead` for your own
-  decision (with the recovery limits) or `--by operator` for a human's
-  decision you pass on; without `--by` it is refused (`INVALID_INPUT`).
-  `input-answer` without `--actor` is always the operator's, also inside your
-  session: an owner's answer you pass on stays the owner's. Your own
-  technical answer needs `--actor lead --reason "…"`.
-- **Declare the whole release first** — before the first graph, record the
-  release outline: stages × components with a rough size and who does them,
-  not only the next graph:
-  `$H lead outline --state <state> --file outline.json` (before the first
-  `run` the state directory is not bound yet: add `--policy <policy>` once —
-  it binds and creates the state like `run` does) with
-  `{"stages":[{"id":"infra","title":"Инфраструктура","kind":"infra","components":[{"id":"api-infra","title":"API: сборка и gates","size":"S","actor":"writers"}]},{"id":"product","title":"Продукт","kind":"product","components":[{"id":"site","title":"Сайт","size":"M","actor":"writers","works":["site-form"]}]},{"id":"deploy","title":"Выкладка","kind":"deploy","components":[{"id":"staging","title":"Стенд","size":"S","actor":"owner"}]}]}`
-  (`kind`: infra | product | deploy | other; `size`: S = 1, M = 1–2, L = 2–3 tasks,
-  counted as 1, 2 and 3 in the forecast,
-  or `tasks: N`; `actor`: writers | environment | owner; optional `works`
-  names the work IDs or task keys of a component). The forecast then counts
-  the unregistered parts as release volume instead of reading one graph as
-  100 %; without an outline `status`/`view` show `RELEASE_OUTLINE_MISSING`
-  (a hint — `run` is not blocked). When the plan changes, record it again
-  with `--reason "<why>"`: the view says «план вырос: +…» instead of an
-  unexplained drop.
-- At each step outside harness, one short line in plain words, the way you
-  would tell a non-developer: `$H lead note "Обновляю документ DOC-2 в источнике задач"
---state <state>` (up to 200 characters; no secrets, no paths, no logs).
 - When all code is accepted, run the **release acceptance review**
   (`<pkg>/docs/release-review.md`):
   `$H review-release --state <state>`. The release base is recorded at the
@@ -167,6 +133,3 @@ connector — is invisible unless you say it:
   Until then the view says «код принят, ведущий ещё работает: <your last
   note>» and progress stays below 100 %; it refuses while a work or rework is
   still open.
-- When you stop: `$H lead end --state <state>`. If approved works are ready
-  and nothing runs, it still ends the session but warns
-  `READY_WORKS_NOT_RUNNING` (`data.readyNotRunning`): start `$H run` first.
