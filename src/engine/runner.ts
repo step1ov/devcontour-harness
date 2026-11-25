@@ -2042,7 +2042,13 @@ export class Runner {
                       attempt,
                       history: this.history(attempt),
                       context,
-                      gates: gates.map((g) => ({ id: g.id, command: g.command })),
+                      // Команда и cwd gate — без окружения: значения и
+                      // секреты политики в подсказку не попадают (alpha.71).
+                      gates: gates.map((g) => ({
+                        id: g.id,
+                        command: g.command,
+                        ...(g.cwd ? { cwd: g.cwd } : {}),
+                      })),
                       inputPolicy: attempt.inputPolicy ?? inputPolicyOf(this.policy),
                       notes: [
                         ...this.notes(attempt, false),

@@ -147,12 +147,19 @@ export const ENVIRONMENT_BLOCK_WRITER_TEXT =
   'Environment blocks: if a step that the project rules (AGENTS.md, skills, templates) make mandatory is blocked by this environment — no network or registry, a local server cannot listen, a tool or browser cannot start, a path is read-only, a source of the task is unreachable — do not stop before coding and do not spend the attempt on probing the toolchain first. Implement the work order first with what you have, run every check you can, and keep your edits in the worktree. The harness gates run acceptance outside your sandbox. Then: if the blocked step was only a self-check and the work is complete, return completed=true and name the unrun step, the exact error and why in the summary. If the blocked step is needed to finish the work and the input policy lets you ask, return completed=false with an inputRequest: impact "technical", the blocked step and the exact error in the question, concrete options (for example: the lead enables the step in the policy, the step moves to a harness gate, the rule is waived for this task), severity at least the input threshold; if the policy does not let you ask, return completed=false and name the blocked step and the exact error in the summary — the lead decides. Never return completed=false for an environment reason without having written the code you could write.';
 
 /** Запрос исполнителю или reviewer: исходные критерии, область, прежние находки, контекст. */
+/**
+ * Самопроверка исполнителя (alpha.71): те же команды gates области, что
+ * исполнит harness, — до сдачи. Доверенная проверка остаётся за harness.
+ */
+export const WRITER_SELF_CHECK_TEXT =
+  'Self-check before you hand back: run each gate command above yourself from the worktree root (in its cwd when one is given), in the listed order, and return completed=true only when they all pass locally. Fix what fails instead of handing back a red gate. If a gate cannot run in your environment (a service, browser or port is unavailable), say which gate and the exact error in the summary. The harness runs the same gates again as the trusted check; your run only saves an attempt.';
+
 export function prompt(input: {
   work: WorkState;
   attempt: AttemptState;
   history: AttemptState[];
   context?: ContextSnapshot;
-  gates: { id: string; command: string[] }[];
+  gates: { id: string; command: string[]; cwd?: string }[];
   review?: { sha: string; phase: string; diff: string };
   /** Обязательный корпус и решение разбора, под которым выдан повтор. */
   notes?: string[];
@@ -207,6 +214,7 @@ export function prompt(input: {
         JSON.stringify(attempt.dependencies)
       : '',
     'Gates that prove this work: ' + JSON.stringify(input.gates),
+    review ? '' : WRITER_SELF_CHECK_TEXT,
     (review && input.findings
       ? 'Historical attempt errors and gate observations (diagnostic context only). Only controller-issued ids in the review findings sections below may appear in `previous`; do not derive ids from this history: '
       : 'Previous attempts, with the findings each review left. Address every finding that is still open first and say what you changed for it: ') +
