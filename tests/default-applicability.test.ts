@@ -656,24 +656,51 @@ test('ревью B M2: получатель сверяет запись derived 
   const onA = commit('packages/a/x.js');
   const bGate = gate({ id: 'b-check', command: ['pnpm', '--filter', 'b', 'check'] });
   const repoPolicy = { gates: [bGate], protectedPaths: [] };
-  const record = (to: string, files: string[], patterns: string[]) => ({
-    id: 'e-' + to.slice(0, 6) + patterns.length,
+  const record = (to: string, files: string[], patterns: string[], sha = to, from = base) => ({
+    id: 'e-' + to.slice(0, 6) + patterns.length + sha.slice(0, 4),
     gate: 'b-check',
+    phase: 'candidate',
+    sha,
     notApplicable: {
       gateDigest: 'd'.repeat(64),
       patterns,
-      ranges: [{ from: base, to }],
+      ranges: [{ from, to }],
       count: files.length,
       files,
       pathsDigest: sha256(files.join('\0')),
       derived: { packages: ['b'] },
     },
   });
+  const check = async (e: ReturnType<typeof record>, anchor?: string) =>
+    (
+      await derivedRecordChecks(
+        r.dir,
+        repoPolicy,
+        [e],
+        { base, candidate: e.sha },
+        anchor ? () => anchor : undefined,
+      )
+    ).get(e.id);
   const honest = record(onC, ['packages/c/x.js'], ['packages/a', 'packages/b']);
-  const narrow = record(onA, ['packages/a/x.js'], ['packages/b']);
-  const touched = record(onA, ['packages/a/x.js'], ['packages/a', 'packages/b']);
-  const checks = await derivedRecordChecks(r.dir, repoPolicy, [honest, narrow, touched]);
-  assert.equal(checks.get(honest.id), undefined, 'честная запись подтверждена');
-  assert.match(checks.get(narrow.id) ?? '', /не замыкание пакетов gate/);
-  assert.match(checks.get(touched.id) ?? '', /применим/);
+  assert.equal(await check(honest), undefined, 'честная запись подтверждена');
+  assert.match(
+    (await check(record(onA, ['packages/a/x.js'], ['packages/b']))) ?? '',
+    /не замыкание пакетов gate/,
+  );
+  assert.match(
+    (await check(record(onA, ['packages/a/x.js'], ['packages/a', 'packages/b']))) ?? '',
+    /применим/,
+  );
+  // Ревью B2 M1: старая посторонняя пара (кончается не на SHA записи) — отказ.
+  assert.match(
+    (await check(record(onC, ['packages/c/x.js'], ['packages/a', 'packages/b'], onA))) ?? '',
+    /кончаются на .* а не на SHA записи/,
+  );
+  // Зелёный SHA — не предок базы или не тот, что знает получатель, — отказ.
+  assert.match(
+    (await check(record(onC, ['packages/c/x.js'], ['packages/a', 'packages/b'], onC, onA))) ?? '',
+    /не предок базы/,
+  );
+  assert.match((await check(honest, onA)) ?? '', /не зелёный SHA gate/);
+  assert.equal(await check(honest, base), undefined);
 });

@@ -641,7 +641,21 @@ export function coverageChanges(
 export async function derivedRecordChecks(
   cwd: string,
   repo: { gates: readonly GatePolicy[]; protectedPaths: readonly string[] },
-  evidence: readonly { id: string; gate: string; notApplicable?: GateApplicability | undefined }[],
+  evidence: readonly {
+    id: string;
+    gate: string;
+    phase: string;
+    sha: string;
+    notApplicable?: GateApplicability | undefined;
+  }[],
+  /**
+   * SHA результата (ревью B2 M1): `base` — база попытки (зелёный SHA —
+   * её предок), `candidate` — кандидат (первая пара интеграции кончается
+   * на нём); `anchorFor` — зелёный SHA gate под тем же основанием, если
+   * получатель знает его сам: тогда `from` обязан совпасть.
+   */
+  shas: { base: string; candidate: string },
+  anchorFor?: (gate: string) => string | undefined,
 ): Promise<Map<string, string | undefined>> {
   const out = new Map<string, string | undefined>();
   const graphs = new Map<string, Awaited<ReturnType<typeof workspaceGraphAt>>>();
@@ -653,6 +667,47 @@ export async function derivedRecordChecks(
     const to = record.ranges.at(-1)?.to;
     if (!gate || !binding || !to) {
       out.set(e.id, `gate ${e.gate} не привязан к пакету по политике получателя`);
+      continue;
+    }
+    // Пары записи — не наблюдение исполнителя на веру (ревью B2 M1): последняя
+    // кончается на SHA записи, у всех один зелёный SHA, у интеграции первая
+    // пара кончается на кандидате; зелёный SHA — предок базы и (если
+    // получатель знает) тот самый зелёный SHA gate.
+    const ranges = record.ranges;
+    const from = ranges[0]!.from;
+    const shape =
+      to !== e.sha
+        ? `пары записи кончаются на ${to.slice(0, 12)}, а не на SHA записи ${e.sha.slice(0, 12)}`
+        : ranges.some((r) => r.from !== from)
+          ? 'у пар записи разный зелёный SHA'
+          : e.phase === 'integration'
+            ? ranges.length !== 2 || ranges[0]!.to !== shas.candidate
+              ? 'пары интеграции — не зелёный SHA..кандидат и зелёный SHA..интеграция'
+              : undefined
+            : ranges.length !== 1 || to !== shas.candidate
+              ? 'пара кандидата — не зелёный SHA..кандидат'
+              : undefined;
+    if (shape) {
+      out.set(e.id, shape);
+      continue;
+    }
+    const anchor = anchorFor?.(e.gate);
+    if (anchor !== undefined && anchor !== from) {
+      out.set(
+        e.id,
+        `зелёный SHA записи ${from.slice(0, 12)} — не зелёный SHA gate ${anchor.slice(0, 12)}`,
+      );
+      continue;
+    }
+    const ancestor = await gitRawOutput(cwd, 'merge-base', '--is-ancestor', from, shas.base).then(
+      () => true,
+      () => false,
+    );
+    if (!ancestor) {
+      out.set(
+        e.id,
+        `зелёный SHA записи ${from.slice(0, 12)} — не предок базы ${shas.base.slice(0, 12)}`,
+      );
       continue;
     }
     if (!graphs.has(to)) graphs.set(to, await workspaceGraphAt(cwd, to));
