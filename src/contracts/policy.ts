@@ -166,11 +166,17 @@ const gatePathPattern = z
  * Условие применимости gate задачи: gate исполняется, только когда настоящий
  * diff фазы (из Git, не заявление исполнителя) задевает один из путей или
  * неявный вход gate; иначе пишется запись `not-applicable`, которая не PASS.
+ * `{ always: true }` (alpha.71) — gate исполняется всегда: отказ от
+ * применимости по умолчанию для gate пакета workspace (`packageBinding`).
  * Необязательное поле без умолчания: политика без него сохраняет digest.
  */
-export const gateWhenSchema = z.strictObject({
-  paths: z.array(gatePathPattern).min(1).max(64),
-});
+export const gateWhenSchema = z.union([
+  z.strictObject({ paths: z.array(gatePathPattern).min(1).max(64) }),
+  z.strictObject({ always: z.literal(true) }),
+]);
+/** Явные `when.paths` gate, или undefined (нет `when` или `when.always`). */
+export const whenPaths = (gate: { when?: z.infer<typeof gateWhenSchema> | undefined }) =>
+  gate.when && 'paths' in gate.when ? gate.when.paths : undefined;
 const gateWhen = gateWhenSchema.optional();
 export const gateSchema = z.discriminatedUnion('kind', [
   z.strictObject({
@@ -1278,14 +1284,14 @@ export function policyIssues(policy: ExecutionPolicy): Issue[] {
       );
     // Условие путей: хотя бы один test gate исполняется всегда, и генеративный
     // gate условным не бывает (его seed и отчёт свойств — доказательство).
-    else if (!repo.gates.some((g) => g.kind === 'test' && !g.when))
+    else if (!repo.gates.some((g) => g.kind === 'test' && !whenPaths(g)))
       add(
         'INVALID_INPUT',
         ['repositories', r, 'gates'],
         'Нужен хотя бы один test gate без when: все test gates не могут быть условными',
       );
     repo.gates.forEach((g, i) => {
-      if (g.when && g.property)
+      if (whenPaths(g) && g.property)
         add(
           'INVALID_INPUT',
           ['repositories', r, 'gates', i, 'when'],

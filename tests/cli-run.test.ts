@@ -378,14 +378,15 @@ test('T27: CLI передаёт источник политики барьеру
   graph.orders[0]!.source.revision = '2';
   graph.orders[0]!.goal += ' Вторая редакция.';
   writeFileSync(graphPath, JSON.stringify(graph));
-  // Ревью плана процесса 2 (вызов reviewer 3) переписывает файл политики после её загрузки.
+  // Ревью плана процесса 2 (вызов reviewer 2: план и кандидат процесса 1;
+  // ревью интеграции того же дерева перенесено, alpha.71) переписывает файл
+  // политики после её загрузки.
   const changed = { ...policy, maxAttempts: 6 };
   writeFileSync(
     join(p.root, 'scenario.json'),
     JSON.stringify({
       writer: implement(),
       reviewer: [
-        approve(),
         approve(),
         approve(),
         { ...approve(), files: { 'policy.json': JSON.stringify(changed, null, 2) } },

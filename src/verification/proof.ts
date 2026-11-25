@@ -5,8 +5,16 @@ import {
   type GateApplicability,
   type GatePolicy,
   type WorkOrder,
+  whenPaths,
 } from '../contracts/index.ts';
-import { pathApplicability, type ChangedPaths } from './applicability.ts';
+import {
+  derivationAllowed,
+  pathApplicability,
+  type ChangedPaths,
+  type GateCondition,
+} from './applicability.ts';
+
+const isGatePolicy = (g: { id: string } | GatePolicy): g is GatePolicy => 'command' in g;
 
 type Requirement = WorkOrder['requirements'][number];
 
@@ -168,7 +176,27 @@ export function uncoveredGates(
     const missing: string[] = [];
     for (const gate of repository?.gates ?? []) {
       const skipped = skips.filter((e) => e.gate === gate.id);
-      if (!skipped.length || !('when' in gate) || !gate.when) {
+      // Условие набора: явные `when.paths` или (alpha.71) каталоги пакетов
+      // из записей применимости по умолчанию — их объединение (шире — чаще
+      // исполняется).
+      const explicit = 'when' in gate ? whenPaths(gate) : undefined;
+      const derived =
+        !explicit &&
+        'command' in gate &&
+        skipped.length > 0 &&
+        skipped.every((e) => e.notApplicable?.derived) &&
+        derivationAllowed(repository!.gates.filter(isGatePolicy), gate);
+      const condition: GateCondition | undefined = explicit
+        ? { paths: [...explicit] }
+        : derived
+          ? {
+              paths: [...new Set(skipped.flatMap((e) => e.notApplicable!.patterns))].sort(),
+              derived: {
+                packages: [...new Set(skipped.flatMap((e) => e.notApplicable!.derived!.packages))],
+              },
+            }
+          : undefined;
+      if (!skipped.length || !condition || !('command' in gate)) {
         if (!covered.has(gate.id)) missing.push(gate.id);
         continue;
       }
@@ -194,8 +222,12 @@ export function uncoveredGates(
       const applies =
         !changed ||
         !same ||
-        pathApplicability({ protectedPaths: repository?.protectedPaths ?? [] }, gate, changed)
-          .applies;
+        pathApplicability(
+          { protectedPaths: repository?.protectedPaths ?? [] },
+          gate,
+          changed,
+          condition,
+        ).applies;
       if (applies) missing.push(gate.id);
     }
     if (missing.length) result.push({ repositoryId, gates: missing });

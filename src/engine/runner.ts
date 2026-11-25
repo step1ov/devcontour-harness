@@ -57,6 +57,7 @@ import {
   infraViolations,
   strictSandbox,
   gateDigest,
+  gateApplicabilityLimits,
   harnessModeOf,
   integrationReuseOn,
   writeGuardActive,
@@ -166,10 +167,19 @@ import {
 import { failedFirst, gatePrerequisites, orderedScope } from '../verification/gate-scope.ts';
 import { REUSED_LABEL } from '../verification/integration-reuse.ts';
 import {
+  packageBinding,
+  packageClosure,
+  workspaceGraphAt,
+} from '../verification/workspace-graph.ts';
+import {
   changedPaths,
+  conditionalGate,
+  derivationAllowed,
+  explicitCondition,
   gateBasis,
   gateDecisions,
   proofGates,
+  type GateCondition,
   providerMovement,
   type ChangedPaths,
 } from '../verification/applicability.ts';
@@ -340,6 +350,9 @@ const ALREADY_SATISFIED_REVIEW_NOTE =
 
 /** Порядок области gates — общий с проверкой на SHA вне попытки (`orderedScope`). */
 const ordered = orderedScope;
+/** Первые каталоги списка для сводки записи неприменимости. */
+const listed = (dirs: readonly string[]) =>
+  dirs.slice(0, 10).join(', ') + (dirs.length > 10 ? ` и ещё ${dirs.length - 10}` : '');
 
 /**
  * Исполнитель очереди. Один действующий controller; попытка проходит
@@ -3181,9 +3194,33 @@ export class Runner {
     sha: string,
     base: string,
   ): Promise<GatePolicy[]> {
-    if (!gates.some((g) => g.when)) return gates;
+    if (!gates.some((g) => conditionalGate(repo.gates, g))) return gates;
     const candidate = phase === 'candidate' ? sha : attempt.candidateSha!;
     if (candidate === base) return gates;
+    // Условие gate: явные `when.paths` или (alpha.71) каталоги его пакетов
+    // workspace с зависимостями на SHA фазы — из объектов Git. Граф не
+    // прочитан, пакет не найден, script выходит за пакет — условия нет, gate
+    // исполняется. Смена манифестов — неявный вход: граф с зелёного SHA тот же.
+    const conditions = new Map<string, GateCondition>();
+    let graph: Awaited<ReturnType<typeof workspaceGraphAt>> | undefined;
+    for (const gate of gates) {
+      const explicit = explicitCondition(gate);
+      if (explicit) conditions.set(gate.id, explicit);
+      else if (derivationAllowed(repo.gates, gate)) {
+        graph ??= await workspaceGraphAt(cwd, sha);
+        if (typeof graph === 'string') continue;
+        const closure = packageClosure(
+          graph,
+          packageBinding(gate)!,
+          gateApplicabilityLimits.patterns,
+        );
+        if (closure.ok)
+          conditions.set(gate.id, {
+            paths: closure.dirs,
+            derived: { packages: closure.packages },
+          });
+      }
+    }
     const proof = this.engine.read((v) => proofGates(work.order, contractDocuments(work.order, v)));
     // Последний зелёный SHA условного gate: integration принятой попытки
     // этого репозитория, где gate прошёл под тем же основанием (`gateBasis`),
@@ -3202,7 +3239,7 @@ export class Runner {
     const changed = new Map<string, ChangedPaths>();
     const moved = new Map<string, string | undefined>();
     for (const gate of gates) {
-      if (!gate.when || proof.has(gate.id)) continue;
+      if (!conditions.has(gate.id) || proof.has(gate.id)) continue;
       const basis = gateBasis(this.policy, repo, gate, this.engine.version);
       const passed = greens.filter((x) =>
         x.evidence.some(
@@ -3249,6 +3286,7 @@ export class Runner {
       proof,
       changedFor: (gate) => changed.get(gate.id),
       providersMoved: (gate) => moved.get(gate.id),
+      conditionFor: (gate) => conditions.get(gate.id),
     });
     for (const d of decisions)
       if (!d.run && d.record)
@@ -3262,7 +3300,9 @@ export class Runner {
           exitCode: -1,
           log: '',
           digest: digestOf(d.record),
-          summary: `Не применим: diff фазы (${d.record.count} путей) не задел when.paths и неявные входы gate`,
+          summary: d.record.derived
+            ? `Не применим: diff фазы (${d.record.count} путей) не задел пакеты gate в workspace (${listed(d.record.patterns)}) и неявные входы`
+            : `Не применим: diff фазы (${d.record.count} путей) не задел when.paths и неявные входы gate`,
           notApplicable: d.record,
         });
     return decisions.filter((d) => d.run).map((d) => d.gate);
@@ -3286,7 +3326,7 @@ export class Runner {
     const run = this.propertyRun(attempt, gate, consumer);
     const property = gate.property || expectsReference(run.expected) ? run : undefined;
     const basis =
-      gate.when && !consumer
+      conditionalGate(this.repo(attempt.repositoryId).gates, gate) && !consumer
         ? {
             gateBasis: gateBasis(
               this.policy,

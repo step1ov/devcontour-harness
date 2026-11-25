@@ -176,7 +176,13 @@ test('integrationReuse: target не сдвинулся — каждый gate и�
     order: v.work('add-greeting')!.order,
   }));
   assert.deepEqual(runResultSchema.parse(JSON.parse(JSON.stringify(result))), result);
-  assert.ok(result.evidence.filter((e) => e.reusedEvidence).length === 2);
+  assert.ok(result.evidence.filter((e) => e.kind === 'test' && e.reusedEvidence).length === 2);
+  // Ревью интеграции того же дерева перенесено из кандидата (alpha.71).
+  assert.ok(
+    result.evidence.some(
+      (e) => e.kind === 'review' && e.phase === 'integration' && e.reusedEvidence,
+    ),
+  );
   const context: ReceiverContext = {
     order,
     graphId: graph.id,

@@ -41,7 +41,7 @@ export const gateApplicabilityLimits = {
 } as const;
 
 /**
- * Почему gate с `when.paths` не исполнялся: настоящий diff фазы (не заявление
+ * Почему gate с `when.paths` (или пакета workspace, `derived`) не исполнялся: настоящий diff фазы (не заявление
  * исполнителя) не задел ни одного его пути и ни одного неявного входа. Это не
  * PASS: запись вида `not-applicable` закрывает только обычный обязательный
  * gate, но не доказательство требования, свойства или testcase.
@@ -57,6 +57,14 @@ export const gateApplicabilitySchema = z.strictObject({
   count: z.number().int().min(0).max(gateApplicabilityLimits.changed),
   files: z.array(z.string().min(1).max(1000)).max(gateApplicabilityLimits.files),
   pathsDigest: digestSchema,
+  /**
+   * Решение по применимости по умолчанию (alpha.71): у gate нет `when.paths`,
+   * он привязан к пакету workspace (`packageBinding`), и `patterns` —
+   * каталоги его пакетов с зависимостями в workspace на SHA фазы. Неявные
+   * входы — как у `when.paths` и, кроме того, файлы корня репозитория (кроме
+   * `*.md`). `packages` — пакеты, к которым привязан gate.
+   */
+  derived: z.strictObject({ packages: z.array(z.string().min(1).max(214)).max(64) }).optional(),
 });
 export type GateApplicability = z.infer<typeof gateApplicabilitySchema>;
 

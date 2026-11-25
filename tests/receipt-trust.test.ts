@@ -16,6 +16,7 @@ import {
   acceptedProperty,
   maximalAttempt,
   notApplicableAttempt,
+  derivedNotApplicableAttempt,
   reusedAttempt,
 } from './receipt-fixtures.ts';
 
@@ -335,6 +336,16 @@ test('Каждое поле результата с неприменимым gat
   const { result, context } = f.done();
   f.store.close();
   assert.ok(result.evidence.some((e) => e.kind === 'not-applicable'));
+  const { failures, visited } = judge(result, context, '');
+  for (const p of visited) visitedAll.add(p);
+  assert.deepEqual(failures, []);
+});
+
+test('Каждое поле результата с gate пакета, неприменимым по умолчанию: удаление derived — отказ, пакеты и diff — сведение', () => {
+  const f = derivedNotApplicableAttempt();
+  const { result, context } = f.done();
+  f.store.close();
+  assert.ok(result.evidence.some((e) => e.notApplicable?.derived));
   const { failures, visited } = judge(result, context, '');
   for (const p of visited) visitedAll.add(p);
   assert.deepEqual(failures, []);

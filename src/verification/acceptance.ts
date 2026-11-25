@@ -411,13 +411,25 @@ export const receiptTrust = {
   'evidence[].notApplicable.files': ['informative', 'diff фазы — наблюдение Git исполнителя'],
   'evidence[].notApplicable.files[]': ['informative', 'diff фазы — наблюдение Git исполнителя'],
   'evidence[].notApplicable.pathsDigest': ['informative', 'diff фазы — наблюдение Git исполнителя'],
+  'evidence[].notApplicable.derived': [
+    'consistency',
+    'применимость по умолчанию: gate пакета без when, которому её разрешает политика получателя',
+  ],
+  'evidence[].notApplicable.derived.packages': [
+    'informative',
+    'пакеты привязки gate по наблюдению исполнителя',
+  ],
+  'evidence[].notApplicable.derived.packages[]': [
+    'informative',
+    'пакеты привязки gate по наблюдению исполнителя',
+  ],
   'evidence[].reusedEvidence': [
     'expected',
-    'только у записи test интеграции: PASS по правилу переноса и деревьям получателя (trees)',
+    'только у записи test или ревью интеграции: PASS по правилу переноса и деревьям получателя (trees)',
   ],
   'evidence[].reusedEvidence.evidenceId': [
     'consistency',
-    'решающая PASS-запись того же gate на кандидате в этом результате',
+    'решающая PASS-запись того же gate (или ревью) на кандидате в этом результате',
   ],
   'evidence[].reusedEvidence.phase': ['schema', 'литерал candidate'],
   'evidence[].reusedEvidence.sha': ['consistency', 'SHA кандидата результата'],

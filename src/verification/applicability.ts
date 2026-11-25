@@ -12,15 +12,19 @@ import {
   type GateApplicability,
   type GatePolicy,
   type WorkOrder,
+  whenPaths,
 } from '../contracts/index.ts';
 import { gitRawOutput } from '../environment/process.ts';
 import { gatePrerequisites } from './gate-scope.ts';
 import { REQUIREMENT_GATE } from './requirements.ts';
+import { packageBinding } from './workspace-graph.ts';
 
 /**
- * Применимость gate с `when.paths`. Решение принимает controller по
- * настоящему diff фазы из Git, а не по заявлению исполнителя. Правило
- * консервативное: всё, в чём нет уверенности, исполняет gate.
+ * Применимость gate с `when.paths` и (alpha.71) gate пакета workspace без
+ * `when` (`derivationAllowed`, условие — каталоги пакета с зависимостями в
+ * workspace). Решение принимает controller по настоящему diff фазы из Git, а
+ * не по заявлению исполнителя. Правило консервативное: всё, в чём нет
+ * уверенности, исполняет gate.
  */
 
 /** Изменённые пути фазы: объединение diff сравненных пар коммитов. */
@@ -303,29 +307,79 @@ export function gateBasis(
 export type PathDecision =
   { applies: true; reason: string } | { applies: false; record: GateApplicability };
 
-/** Применимость gate с `when` по diff (без правил области задачи). */
+/**
+ * Условие применимости gate: явные `when.paths` или (alpha.71) каталоги его
+ * пакетов workspace с зависимостями (`derived`).
+ */
+export interface GateCondition {
+  paths: string[];
+  derived?: { packages: string[] };
+}
+
+/** Условие gate по его определению: явные `when.paths`, или undefined. */
+export const explicitCondition = (gate: GatePolicy): GateCondition | undefined => {
+  const paths = whenPaths(gate);
+  return paths ? { paths: [...paths] } : undefined;
+};
+
+/** Файл корня репозитория, кроме `*.md`: общий конфиг сборки (tsconfig, eslint, turbo). */
+const rootFile = (f: string) => !f.includes('/') && !/\.md$/i.test(f);
+
+/**
+ * Gate исполняется всегда по своему определению: `when.always`, генеративный
+ * или без `when.paths` и без привязки к пакету (`packageBinding`).
+ */
+const unconditional = (gate: GatePolicy) =>
+  (gate.when !== undefined && !whenPaths(gate)) ||
+  (!whenPaths(gate) && (gate.property !== undefined || packageBinding(gate) === undefined));
+
+/**
+ * Применимость по умолчанию разрешена (alpha.71): у gate нет `when`, он не
+ * генеративный и привязан к пакету (`packageBinding`); test gate — только
+ * если в репозитории остаётся test gate, который исполняется всегда (как
+ * требует правило «хотя бы один test gate без when»).
+ */
+export function derivationAllowed(gates: readonly GatePolicy[], gate: GatePolicy) {
+  if (gate.when !== undefined || gate.property !== undefined) return false;
+  if (packageBinding(gate) === undefined) return false;
+  return gate.kind !== 'test' || gates.some((g) => g.kind === 'test' && unconditional(g));
+}
+
+/** Gate может быть неприменимым: явные `when.paths` или применимость по умолчанию. */
+export const conditionalGate = (gates: readonly GatePolicy[], gate: GatePolicy) =>
+  whenPaths(gate) !== undefined || derivationAllowed(gates, gate);
+
+/** Применимость gate с условием по diff (без правил области задачи). */
 export function pathApplicability(
   repo: { protectedPaths: readonly string[] },
   gate: GatePolicy,
   changed: ChangedPaths,
+  condition: GateCondition | undefined = explicitCondition(gate),
 ): PathDecision {
-  if (!gate.when) return { applies: true, reason: 'gate без when' };
+  if (!condition) return { applies: true, reason: 'gate без when' };
   if (!changed.complete) return { applies: true, reason: 'diff неизвестен: ' + changed.problem };
   if (!changed.files.length) return { applies: true, reason: 'изменений нет' };
-  const matched = matchingPaths(gate.when.paths, changed.files);
-  if (matched.length) return { applies: true, reason: 'изменён путь gate: ' + matched[0] };
-  const input = implicitInput(repo, gate, changed.files);
+  const matched = matchingPaths(condition.paths, changed.files);
+  if (matched.length)
+    return {
+      applies: true,
+      reason: (condition.derived ? 'изменён пакет gate: ' : 'изменён путь gate: ') + matched[0],
+    };
+  const input =
+    implicitInput(repo, gate, changed.files) ??
+    (condition.derived ? changed.files.find(rootFile) : undefined);
   if (input) return { applies: true, reason: 'изменён неявный вход gate: ' + input };
   return {
     applies: false,
     record: {
       gateDigest: gateDigest(gate),
-      patterns: [...gate.when.paths],
+      patterns: [...condition.paths],
       ranges: changed.ranges.map(({ from, to }) => ({ from, to })),
       count: changed.files.length,
       // Длинный путь (их пишет исполнитель) не перечисляется: он в `count` и `pathsDigest`.
       files: changed.files.filter((f) => f.length <= 1000).slice(0, gateApplicabilityLimits.files),
       pathsDigest: sha256(changed.files.join('\0')),
+      ...(condition.derived ? { derived: { packages: [...condition.derived.packages] } } : {}),
     },
   };
 }
@@ -409,6 +463,12 @@ export interface GateDecisionInput {
   providersMoved?(gate: GatePolicy): string | undefined;
   /** `proofGates` поручения. */
   proof: ReadonlySet<string>;
+  /**
+   * Условие gate (alpha.71): явные `when.paths` или каталоги пакетов
+   * workspace (`derived`); undefined — gate без условия исполняется. Без поля
+   * — только явные `when.paths` (`explicitCondition`).
+   */
+  conditionFor?(gate: GatePolicy): GateCondition | undefined;
 }
 
 export interface GateDecision {
@@ -419,7 +479,8 @@ export interface GateDecision {
 }
 
 /**
- * Решения по области фазы. Gate без `when` исполняется всегда. Условный
+ * Решения по области фазы. Gate без условия (`conditionFor`: явные
+ * `when.paths` или, alpha.71, пакеты workspace) исполняется всегда. Условный
  * исполняется, если: он доказывает требование или договор; среди предков
  * базы нет его зелёного SHA под тем же основанием (`changedFor`); с этого
  * зелёного SHA сдвинулась база провайдеров (`providersMoved`); diff
@@ -429,7 +490,8 @@ export interface GateDecision {
  */
 export function gateDecisions(input: GateDecisionInput): GateDecision[] {
   const decisions = input.scope.map((gate): GateDecision => {
-    if (!gate.when) return { gate, run: true, reason: 'gate без when' };
+    const condition = input.conditionFor ? input.conditionFor(gate) : explicitCondition(gate);
+    if (!condition) return { gate, run: true, reason: 'gate без when' };
     if (input.proof.has(gate.id))
       return { gate, run: true, reason: 'gate доказывает требование или договор поручения' };
     const changed = input.changedFor(gate);
@@ -441,10 +503,17 @@ export function gateDecisions(input: GateDecisionInput): GateDecision[] {
       };
     const moved = input.providersMoved?.(gate);
     if (moved) return { gate, run: true, reason: moved };
-    const path = pathApplicability(input.repo, gate, changed);
+    const path = pathApplicability(input.repo, gate, changed, condition);
     return path.applies
       ? { gate, run: true, reason: path.reason }
-      : { gate, run: false, reason: 'diff не задел пути gate', record: path.record };
+      : {
+          gate,
+          run: false,
+          reason: condition.derived
+            ? 'diff не задел пакеты gate: ' + condition.paths.join(', ')
+            : 'diff не задел пути gate',
+          record: path.record,
+        };
   });
   const ids = new Set(input.scope.map((g) => g.id));
   for (let grew = true; grew;) {
@@ -466,9 +535,10 @@ export function gateDecisions(input: GateDecisionInput): GateDecision[] {
 
 /**
  * Почему запись `not-applicable` не закрывает обязательный gate, или
- * undefined. Закрывает только обычный gate с `when` под тем же определением,
- * не доказательство требования или договора и не предпосылку исполненного
- * gate той же фазы.
+ * undefined. Закрывает только обычный gate с `when.paths` или (запись
+ * `derived`, alpha.71) gate, которому разрешена применимость по умолчанию
+ * (`derivationAllowed`), под тем же определением, не доказательство
+ * требования или договора и не предпосылку исполненного gate той же фазы.
  */
 export function notApplicableProblem(input: {
   gates: readonly GatePolicy[];
@@ -479,7 +549,14 @@ export function notApplicableProblem(input: {
   ran: readonly string[];
 }): string | undefined {
   const gate = input.gates.find((g) => g.id === input.gate);
-  if (!gate?.when) return `gate ${input.gate} без when не бывает неприменимым`;
+  if (!gate) return `gate ${input.gate} без when не бывает неприменимым`;
+  // Применимость по умолчанию (alpha.71): решение controller по пакетам
+  // workspace — только у gate, которому она разрешена определением.
+  if (!whenPaths(gate))
+    if (!input.record.notApplicable?.derived || gate.when !== undefined)
+      return `gate ${input.gate} без when не бывает неприменимым`;
+    else if (!derivationAllowed(input.gates, gate))
+      return `gate ${input.gate} не привязан к пакету workspace: применимость по умолчанию ему не разрешена`;
   if (input.proof.has(gate.id))
     return `gate ${gate.id} доказывает требование или договор: нужен PASS`;
   if (!input.record.notApplicable || input.record.notApplicable.gateDigest !== gateDigest(gate))
