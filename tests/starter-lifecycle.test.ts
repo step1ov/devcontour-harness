@@ -72,6 +72,9 @@ function project() {
   policy.environment = { values: { FIXTURE_SCENARIO: scenario } };
   policy.leaseMs = 5000;
   policy.maxAttempts = 1;
+  // Шаги и gate обеих фаз — предмет теста: перенос PASS кандидата на
+  // интеграцию при том же дереве (alpha.71, B2) выключен.
+  policy.integrationReuse = 'off';
   const repo = policy.repositories[0];
   repo.environment = { values: { LIFECYCLE_RESOURCES: resources } };
   repo.gates[0].command = [process.execPath, join(root, 'gate.cjs')];
