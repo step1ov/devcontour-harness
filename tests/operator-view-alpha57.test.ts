@@ -167,7 +167,7 @@ const events: OperatorActivityInput[] = [
 test('view r2: лента — события окна новыми сверху, кто и что простыми словами', () => {
   const view = operatorView(baseInput({ works: [work('w')], activity: events }));
   operatorViewSchema.parse(view);
-  assert.equal(view.viewRevision, 9);
+  assert.equal(view.viewRevision, 10);
   const a = view.activity!;
   assert.equal(a.length, events.length - 1, 'событие вне окна опущено');
   assert.ok(!a.some((x) => x.workId === 'old'));

@@ -1,4 +1,10 @@
 import { mkdir, writeFile, readFile, realpath } from 'node:fs/promises';
+import {
+  COMPOSE_READINESS_FILE,
+  SERVICE_PORT_KEYS,
+  servicePortKeys,
+  servicePortsFromFile,
+} from './compose-env.ts';
 import { basename, dirname, join, relative, sep } from 'node:path';
 import type { z } from 'zod';
 import {
@@ -28,7 +34,7 @@ import {
 import { containerIdentity, containerUse } from './container-identity.ts';
 import { ensurePortsFree } from './port-probe.ts';
 import { leaseScope } from './survivors.ts';
-import { redactor, type Redactor } from './redaction.ts';
+import { redactDeep, redactor, type Redactor } from './redaction.ts';
 import { maskedTail } from '../verification/failure-summary.ts';
 export { redactor } from './redaction.ts';
 
@@ -98,6 +104,9 @@ export function executionEnvironment(
     CI: '1',
   };
   const secretValues: string[] = [];
+  // Имена переменных с маскируемыми значениями — шагам, которые сами пишут
+  // диагностику (`harness env-up`): значения на диск не попадают (ревью 2).
+  const secretNames = new Set<string>();
   for (const profile of profiles) {
     if (!profile) continue;
     for (const key of profile.inherit) {
@@ -107,15 +116,20 @@ export function executionEnvironment(
       // объявлять каждый токен провайдера, — но только похожие на секрет:
       // по имени или длиной. Очень короткое общее значение (`FORCE_COLOR=1`,
       // `CI=true`) иначе вырезалось бы из каждой строки вывода.
-      if (source[key] && inheritedSecret(key, source[key])) secretValues.push(source[key]);
+      if (source[key] && inheritedSecret(key, source[key])) {
+        secretValues.push(source[key]);
+        secretNames.add(key);
+      }
     }
     Object.assign(env, profile.values);
     for (const [key, from] of Object.entries(profile.secrets)) {
       if (!source[from]) throw new Error(`Не задан секрет окружения: ${from} (для ${key})`);
       env[key] = source[from];
       secretValues.push(source[from]);
+      secretNames.add(key);
     }
   }
+  if (secretNames.size) env.HARNESS_SECRET_NAMES = [...secretNames].sort().join(',');
   // Переменные контура: исторические DEVCONTOUR_* — часть договора проверок
   // пользователей — и их псевдонимы HARNESS_* с теми же значениями.
   for (const [key, value] of Object.entries(devcontour)) {
@@ -428,6 +442,66 @@ export async function withEnvironment<T>(
   return phaseEnvironment(lifecycle, cwd, dir, execution, signal, action, measure, trusted);
 }
 
+/**
+ * Снять переменные портов сервисов (`HX_*`) с окружения фазы и с файла
+ * окружения попытки (`HARNESS_ATTEMPT_ENV_FILE`): порты прошлой фазы
+ * принадлежат снятому стеку.
+ */
+async function clearServicePorts(env: NodeJS.ProcessEnv) {
+  const file = env.HARNESS_ATTEMPT_ENV_FILE;
+  if (!file) return;
+  let text: string;
+  try {
+    text = await readFile(file, 'utf8');
+  } catch {
+    return;
+  }
+  try {
+    const data = JSON.parse(text) as Record<string, unknown>;
+    if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+    // Только порты, которые записал `env-up` (ревью 2): переменные политики
+    // с тем же префиксом остаются.
+    const keys = servicePortKeys(data);
+    if (!keys.length && !(SERVICE_PORT_KEYS in data)) return;
+    for (const k of keys) delete env[k];
+    const kept = Object.fromEntries(
+      Object.entries(data).filter(([k]) => !keys.includes(k) && k !== SERVICE_PORT_KEYS),
+    );
+    await writeFile(file, JSON.stringify(kept, null, 2) + '\n');
+  } catch {
+    /* файл не JSON — его пишет не harness: не трогаем */
+  }
+}
+
+/**
+ * Перемаскировать `compose-readiness.json` попытки маской controller — по
+ * разобранным строкам, а не по тексту JSON (экранирование не прячет секрет).
+ */
+async function remaskReadiness(execution: ReturnType<typeof executionEnvironment>) {
+  const file = execution.env.HARNESS_ATTEMPT_ENV_FILE;
+  if (!file) return;
+  const path = join(dirname(file), COMPOSE_READINESS_FILE);
+  const text = await readFile(path, 'utf8').catch(() => undefined);
+  if (text === undefined) return;
+  let data: unknown;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    data = execution.redact(text);
+  }
+  await writeFile(path, JSON.stringify(redactDeep(data, execution.redact), null, 2)).catch(
+    () => undefined,
+  );
+}
+
+/** Порты сервисов этой фазы (после setup и ready) — в окружение её gates. */
+async function refreshServicePorts(env: NodeJS.ProcessEnv) {
+  const file = env.HARNESS_ATTEMPT_ENV_FILE;
+  if (!file) return;
+  const text = await readFile(file, 'utf8').catch(() => undefined);
+  Object.assign(env, servicePortsFromFile(text));
+}
+
 /** Переменные, которые выбирают демон контейнеров (селекторы). */
 export const CONTAINER_SELECTOR_KEYS = [
   'DOCKER_HOST',
@@ -586,6 +660,10 @@ async function phaseEnvironment<T>(
   trusted?: TrustedTree,
 ): Promise<T> {
   if (!lifecycle) return action();
+  // Порты сервисов `harness env-up` (alpha.70, ревью 1): прежние фазы
+  // переменных не передают — до setup они снимаются с файла окружения
+  // попытки и с окружения фазы, после setup и ready — читаются заново.
+  await clearServicePorts(execution.env);
   await mkdir(dir, { recursive: true });
   // Каталог окружения фазы — вне worktree, рядом с receipt: шаги lifecycle
   // хранят в нём своё состояние (env-файлы, снимок ресурсов), а prepare и
@@ -651,11 +729,17 @@ async function phaseEnvironment<T>(
         )) ?? { pending: true };
         await saveReceipt(receiptFile);
       }
-      await runSteps(lifecycle.setup, cwd, join(dir, 'setup'), execution, signal);
+      await runSteps(lifecycle.setup, cwd, join(dir, 'setup'), execution, signal).finally(() =>
+        // Диагностика готовности `env-up` — ещё раз маской секретов политики.
+        remaskReadiness(execution),
+      );
     });
     await measure('ready', () =>
-      runSteps(lifecycle.ready, cwd, join(dir, 'ready'), execution, signal),
+      runSteps(lifecycle.ready, cwd, join(dir, 'ready'), execution, signal).finally(() =>
+        remaskReadiness(execution),
+      ),
     );
+    await refreshServicePorts(execution.env);
     result = await action();
   } catch (error) {
     // A thrown undefined/false must still fail the attempt after cleanup.

@@ -1,4 +1,6 @@
 import { z } from 'zod';
+import { reviewPassesRecordSchema } from './review-passes.ts';
+import { PROPOSAL_LIMITS, workProposalSchema, workResearchSchema } from './proposals.ts';
 import { STATE_VERSION } from './version.ts';
 import {
   digestSchema,
@@ -404,6 +406,13 @@ export const gateFailureSummarySchema = z.strictObject({
   /** Откуда имена тестов: отчёт gate, вывод команды или её собственный отчёт. */
   source: z.enum(['junit', 'output', 'command-report']).optional(),
   withheld: z.literal(true).optional(),
+  /**
+   * Провал объяснён только тем, что gate менял состояние git под границей
+   * записи (`GATE_GIT_WRITE`, 0.1.0-alpha.70): других признаков провала
+   * (упавших тестов, утверждения, сигнала) нет. По этой отметке, а не по
+   * тексту, итог на базе удерживает gate.
+   */
+  gitWrite: z.literal(true).optional(),
 });
 export type GateFailureSummary = z.infer<typeof gateFailureSummarySchema>;
 
@@ -446,6 +455,8 @@ export const evidenceRecordSchema = z.strictObject({
   findings: z.array(evidenceFindingSchema).optional(),
   /** Раунд ревью кода: область истории, вызов, протокол, переходы (docs/review-protocol.md). */
   reviewRound: reviewRoundSchema.optional(),
+  /** Второй проход ревью (0.1.0-alpha.70): режим, итог, снятые находки с основанием. */
+  reviewPasses: reviewPassesRecordSchema.optional(),
   tests: z
     .array(
       z.strictObject({
@@ -636,6 +647,15 @@ export const attemptStateSchema = z.strictObject({
    * незасчитанных отказов; повтора без ведущего нет.
    */
   writerBlocked: z.literal(true).optional(),
+  /**
+   * Исполнитель в начале попытки предложил разделить работу (0.1.0-alpha.70,
+   * `needs-lead` с причиной `writer-split`): ID предложения. Попытка не
+   * засчитана (тратится предел незасчитанных отказов); решает ведущий.
+   */
+  writerSplit: z
+    .string()
+    .regex(/^P-[0-9a-f]{12}$/)
+    .optional(),
   /** Итог исполнителя незавершённой попытки своими словами (до 500 знаков). */
   writerSummary: z.string().max(500).optional(),
   failureKind: failureKindSchema.optional(),
@@ -1026,6 +1046,18 @@ export const workStateSchema = z.strictObject({
    * сбросом; нет поля — диагностик и учтённых сбросов не было.
    */
   leadRecovery: leadRecoverySchema.optional(),
+  /**
+   * Предложения исполнителей ведущему (0.1.0-alpha.70, `workProposalSchema`):
+   * задачи-продолжения на остаток и разделения из разбора в начале попытки.
+   * Принимает или отклоняет только ведущий (или оператор).
+   */
+  proposals: z.array(workProposalSchema).max(PROPOSAL_LIMITS.perWork).optional(),
+  /**
+   * Исследование задачи (0.1.0-alpha.70, `workResearchSchema`): последнее
+   * записанное исполнителем; следующие попытки и зависящие работы начинают с
+   * него. Reviewer его не получает.
+   */
+  research: workResearchSchema.optional(),
   /**
    * Удержание gate по отказу окружения без повтора (0.1.0-alpha.66):
    * попытка этой работы упала `sandbox-process-list` на вызове `ps`, который

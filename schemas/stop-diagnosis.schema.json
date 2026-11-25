@@ -170,6 +170,10 @@
     },
     "runId": {
       "type": "string"
+    },
+    "reference": {
+      "type": "string",
+      "maxLength": 200
     }
   },
   "required": [

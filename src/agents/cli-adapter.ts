@@ -422,6 +422,7 @@ export function cliAdapter(
           // домашний каталог CLI; настоящий файл входа — нет.
           launch = guardedArgv(argv, [
             ...light.guard.map((subpath) => ({ subpath })),
+            ...(light.guardDenyRead ?? []).map((denyRead) => ({ denyRead })),
             ...(outDir ? [{ subpath: outDir }] : []),
             ...(runtimeHome ? [{ subpath: runtimeHome }] : []),
           ]);

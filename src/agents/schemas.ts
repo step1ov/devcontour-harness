@@ -10,6 +10,7 @@ import {
   criticalAreas,
   inputImpacts,
 } from '../contracts/input.ts';
+import { PROPOSAL_LIMITS } from '../contracts/proposals.ts';
 
 /**
  * JSON Schema структурированного ответа для CLI runtime. Codex требует
@@ -91,8 +92,94 @@ export const implementationOutputSchema = {
     discoveries: { type: 'array', maxItems: 20, items: discovery },
     inputRequest,
     assumptions: { type: 'array', maxItems: INPUT_LIMITS.assumptions, items: assumption },
+    followUpTasks: {
+      type: 'array',
+      maxItems: PROPOSAL_LIMITS.followUps,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          title: { type: 'string' },
+          goal: { type: 'string' },
+          acceptance: {
+            type: 'array',
+            maxItems: PROPOSAL_LIMITS.acceptance,
+            items: { type: 'string' },
+          },
+          reason: { type: 'string' },
+          evidence: { type: ['string', 'null'] },
+        },
+        required: ['title', 'goal', 'acceptance', 'reason', 'evidence'],
+      },
+    },
+    research: {
+      anyOf: [
+        { type: 'null' },
+        {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            summary: { type: 'string' },
+            files: {
+              type: 'array',
+              maxItems: 30,
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: { path: { type: 'string' }, why: { type: 'string' } },
+                required: ['path', 'why'],
+              },
+            },
+            approach: { type: ['string', 'null'] },
+            constraints: { type: ['string', 'null'] },
+          },
+          required: ['summary', 'files', 'approach', 'constraints'],
+        },
+      ],
+    },
+    triage: {
+      anyOf: [
+        { type: 'null' },
+        {
+          type: 'object',
+          additionalProperties: false,
+          properties: {
+            decision: { type: 'string', enum: ['implement', 'split', 'ask'] },
+            reason: { type: 'string' },
+            parts: {
+              type: ['array', 'null'],
+              maxItems: PROPOSAL_LIMITS.parts,
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                properties: {
+                  title: { type: 'string' },
+                  goal: { type: 'string' },
+                  acceptance: {
+                    type: 'array',
+                    maxItems: PROPOSAL_LIMITS.acceptance,
+                    items: { type: 'string' },
+                  },
+                },
+                required: ['title', 'goal', 'acceptance'],
+              },
+            },
+          },
+          required: ['decision', 'reason', 'parts'],
+        },
+      ],
+    },
   },
-  required: ['completed', 'summary', 'discoveries', 'inputRequest', 'assumptions'],
+  required: [
+    'completed',
+    'summary',
+    'discoveries',
+    'inputRequest',
+    'assumptions',
+    'followUpTasks',
+    'triage',
+    'research',
+  ],
 };
 
 export const reviewOutputSchema = {
@@ -247,4 +334,49 @@ export const technicalReviewOutputSchema = {
       },
     },
   },
+};
+
+/**
+ * Ответ второго прохода ревью (0.1.0-alpha.70, `refuteResultSchema`):
+ * вердикт по каждой блокирующей находке первого прохода и пропущенные
+ * блокирующие находки (только режим `always`). Свойства `approved` нет:
+ * второй проход не выносит вердикт сам — его выводит controller.
+ */
+export const refuteOutputSchema = {
+  type: 'object',
+  additionalProperties: false,
+  properties: {
+    summary: { type: 'string' },
+    verdicts: {
+      type: 'array',
+      maxItems: REVIEW_ITEMS_LIMIT,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          index: { type: 'integer', minimum: 0 },
+          verdict: { type: 'string', enum: ['confirmed', 'refuted'] },
+          basis: { type: 'string', pattern: FINDING_BASIS_PATTERN },
+        },
+        required: ['index', 'verdict', 'basis'],
+      },
+    },
+    missed: {
+      type: 'array',
+      maxItems: 50,
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          message: { type: 'string' },
+          path: { type: ['string', 'null'] },
+          line: { type: ['integer', 'null'], minimum: 1 },
+          rule: { type: ['string', 'null'] },
+          evidence: { type: ['string', 'null'] },
+        },
+        required: ['message', 'path', 'line', 'rule', 'evidence'],
+      },
+    },
+  },
+  required: ['summary', 'verdicts', 'missed'],
 };

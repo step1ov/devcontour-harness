@@ -163,7 +163,7 @@ test('F-X: никто не запущен — очередь стоит, пер�
   const view = viewOf(env);
   assert.ok(operatorViewSchema.safeParse(view).success);
   assert.equal(view.viewRevision, OPERATOR_VIEW_REVISION);
-  assert.equal(OPERATOR_VIEW_REVISION, 9);
+  assert.equal(OPERATOR_VIEW_REVISION, 10);
   assert.equal(view.progress.queue.paused, false);
   assert.equal(view.progress.queue.runner, 'not-running');
   assert.equal(view.progress.queue.restartBy, 'lead');

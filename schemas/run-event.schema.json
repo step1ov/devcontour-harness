@@ -1267,6 +1267,7 @@
                 "cleanup",
                 "resource-busy",
                 "writer-environment",
+                "writer-split",
                 "toolchain",
                 "other",
                 "none"

@@ -208,7 +208,12 @@ export interface ExecutionStore {
 /* RuntimeAdapter                                                      */
 /* ------------------------------------------------------------------ */
 
-export type RuntimeTask = 'implement' | 'review-code' | 'review-plan' | 'review-contract' | 'plan';
+/**
+ * Задача вызова. `review-refute` (0.1.0-alpha.70) — второй проход ревью:
+ * reviewer только читает, ответ — `refuteResultSchema`.
+ */
+export type RuntimeTask =
+  'implement' | 'review-code' | 'review-refute' | 'review-plan' | 'review-contract' | 'plan';
 
 export interface SandboxSpec {
   mode: 'os' | 'none';
@@ -233,7 +238,11 @@ export interface SandboxSpec {
    * своего CLI. Нет `guard` — без границы (`writeGuard.off` или
    * `isolation.mode: none`). Нет поля — прежняя изоляция.
    */
-  light?: { guard?: string[] };
+  light?: {
+    guard?: string[];
+    /** Закрыто на чтение (ревью 3: общий stash владельца). */
+    guardDenyRead?: string[];
+  };
 }
 
 export interface RuntimeRequest {
@@ -254,7 +263,16 @@ export interface RuntimeRequest {
    * Сессия всегда новая для reviewer и planner. `continue` разрешён только
    * writer той же попытки; reviewer не получает ID сессии writer.
    */
-  session: { kind: 'fresh' } | { kind: 'continue'; id: string };
+  session:
+    | { kind: 'fresh' }
+    | { kind: 'continue'; id: string }
+    /**
+     * Новая сессия writer, ответвлённая от сессии исследования работы
+     * (0.1.0-alpha.70, `claude --resume <id> --fork-session`): только writer
+     * и только у адаптера с `RuntimeCapabilities.sessionFork`. Reviewer —
+     * всегда `fresh`.
+     */
+    | { kind: 'fork'; id: string };
   sandbox: SandboxSpec;
   timeoutMs: number;
   env: Record<string, string>;
@@ -357,6 +375,12 @@ export interface RuntimeCapabilities {
    * по-прежнему отделена от содержательного отказа. Необязательное поле.
    */
   reviewProtocol?: 1;
+  /**
+   * Адаптер умеет ответвить новую сессию writer от сохранённой сессии
+   * исследования (`session.kind: fork`, 0.1.0-alpha.70). Нет поля — нет:
+   * исследование передаётся только текстом в стабильном префиксе запроса.
+   */
+  sessionFork?: boolean;
 }
 
 export interface RuntimeAdapter {

@@ -23,8 +23,15 @@ import {
   type ExecutionPolicy,
   type RuntimeAdapter,
   type RuntimeName,
+  type ReviewPassesRecord,
+  blockingOf,
+  mergePasses,
+  needsSecondPass,
+  refutePromptText,
+  refuteResultSchema,
+  reviewPassModeOf,
 } from '../contracts/index.ts';
-import { reviewOutputSchema } from '../agents/schemas.ts';
+import { refuteOutputSchema, reviewOutputSchema } from '../agents/schemas.ts';
 import { redactInspection } from '../agents/inspect.ts';
 import { chooseCheckoutRoot, checkoutPath } from '../environment/checkout-root.ts';
 import { credentialPaths } from '../environment/isolation.ts';
@@ -407,6 +414,7 @@ export async function reviewBranch(
   // Reviewer только читает: изменённое им дерево (файлы, HEAD) — отказ раунда,
   // проверяется до уборки дерева.
   let mutated: string | undefined;
+  let passes: ReviewPassesRecord | undefined;
   try {
     await git(path, 'worktree', 'add', '--detach', cwd, head);
     added = true;
@@ -454,6 +462,146 @@ export async function reviewBranch(
     const now = await git(cwd, 'rev-parse', 'HEAD').catch(() => '');
     if (dirty || now !== head)
       mutated = `reviewer изменил рабочее дерево обзора${now !== head ? ' (HEAD сдвинут)' : ''}`;
+    // Второй проход приёмки выпуска (alpha.70, умолчание `always`): свежий
+    // вызов reviewer опровергает блокирующие находки и ищет пропущенные —
+    // в своём detached-дереве head: его изменения не трогают первый проход.
+    if (release && response.status === 'ok' && !mutated) {
+      const first = reviewResultSchema.safeParse(response.output);
+      const choice2 = reviewPassModeOf(policy.review.passes, { kind: 'release' });
+      if (first.success && !reviewIssues(first.data, open).length) {
+        const blocking = blockingOf(first.data.findings);
+        const record0 = {
+          mode: choice2.mode,
+          source: choice2.source,
+          first: blocking.length,
+          confirmed: blocking.length,
+          refuted: [],
+          missed: 0,
+          overturned: false,
+        } satisfies Omit<ReviewPassesRecord, 'status'>;
+        if (
+          !needsSecondPass(choice2.mode, {
+            approved: first.data.approved,
+            blocking: blocking.length,
+          })
+        )
+          passes = choice2.mode === 'off' ? undefined : { ...record0, status: 'skipped' };
+        else {
+          const refuteCwd = cwd + '-refute';
+          let refute: Awaited<ReturnType<typeof measuredInvoke>> | undefined;
+          let refuteDirty = false;
+          // Уборка дерева второго прохода — на любом исходе, и при отмене или
+          // исчерпанном бюджете (ревью 3).
+          try {
+            refute = await git(path, 'worktree', 'add', '--detach', refuteCwd, head)
+              .then(() =>
+                measuredInvoke(
+                  engine,
+                  adapter,
+                  {
+                    callId: randomUUID(),
+                    task: 'review-refute',
+                    binding: choice.reviewer,
+                    cwd: refuteCwd,
+                    prompt: prompt + '\n\n' + refutePromptText(blocking, choice2.mode),
+                    outputSchema: refuteOutputSchema,
+                    session: { kind: 'fresh' },
+                    sandbox: {
+                      mode: policy.isolation.mode,
+                      writable: [],
+                      denied: hidden,
+                      ...(placement.root ? { checkouts: [placement.root] } : {}),
+                      readable: [refuteCwd, ...repos.map((r) => join(r, '.git'))],
+                      network: { domains: policy.isolation.domains },
+                    },
+                    timeoutMs: policy.runTimeoutMs,
+                    env: Object.fromEntries(
+                      Object.entries(execution.env).filter(
+                        (e): e is [string, string] => e[1] !== undefined,
+                      ),
+                    ),
+                    artifactDir: join(dir, 'refute'),
+                    secrets: [...(execution.redact.secrets ?? [])],
+                  },
+                  signal,
+                  {
+                    repositoryId: repo.id,
+                    subjectId: subject,
+                    subjectKind: 'other',
+                    stage: 'code-review-refute',
+                  },
+                ),
+              )
+              .catch((error: unknown) => {
+                if (signal.aborted) throw cancelled(signal);
+                if (error instanceof TaskFailure && error.kind === 'budget')
+                  throw new HarnessError('BUDGET_EXHAUSTED', error.message);
+                return undefined;
+              });
+            // Дерево второго прохода проверяется до уборки (ревью 2) — с index
+            // controller, так что флаги index дерева изменений не прячут; то же
+            // правило, что у ревью попытки: без игнорируемых файлов (ревью 3).
+            refuteDirty =
+              !!refute &&
+              (!!(await git(refuteCwd, 'status', '--porcelain', '--untracked-files=all').catch(
+                () => 'unknown',
+              )) ||
+                (await git(refuteCwd, 'rev-parse', 'HEAD').catch(() => '')) !== head);
+          } finally {
+            await git(path, 'worktree', 'remove', '--force', refuteCwd).catch(() => undefined);
+            // Дерево создано выше этим вызовом.
+            await rm(refuteCwd, { recursive: true, force: true }).catch(() => undefined);
+          }
+          const parsed2 =
+            refute?.status === 'ok' && !refuteDirty
+              ? refuteResultSchema.safeParse(refute.output)
+              : undefined;
+          if (!parsed2?.success)
+            passes = {
+              ...record0,
+              status: 'failed',
+              reason: refuteDirty
+                ? 'reviewer изменил своё дерево'
+                : refute
+                  ? refute.status !== 'ok'
+                    ? 'второй вызов: ' + refute.status
+                    : 'ответ второго прохода вне схемы'
+                  : 'второй вызов не выполнен',
+            };
+          else {
+            const reopened = first.data.previous.some(
+              (t) =>
+                t.status === 'open' &&
+                lastFindings.find((f) => f.id === t.id)?.severity === 'blocking',
+            );
+            const merged = mergePasses(
+              { approved: first.data.approved, findings: first.data.findings, reopened },
+              parsed2.data,
+              choice2.mode,
+            );
+            response = {
+              ...response,
+              output: {
+                ...first.data,
+                approved: merged.approved,
+                findings: merged.findings,
+              },
+            };
+            passes = {
+              ...record0,
+              status: 'ran',
+              confirmed: merged.confirmed,
+              refuted: merged.refuted.map((r) => ({
+                message: execution.redact(r.message).slice(0, 4000),
+                basis: execution.redact(r.basis).slice(0, 4000),
+              })),
+              missed: merged.missed,
+              overturned: !first.data.approved && merged.approved,
+            };
+          }
+        }
+      }
+    }
   } finally {
     if (added) await git(path, 'worktree', 'remove', '--force', cwd).catch(() => undefined);
     await rm(cwd, { recursive: true, force: true }).catch(() => undefined);
@@ -552,6 +700,7 @@ export async function reviewBranch(
     sameVendor: choice.sameVendor,
     reviewerBinding,
     ...(gates ? { gates } : {}),
+    ...(passes ? { passes } : {}),
     findings,
     artifact: join(dir, 'review.json'),
   });

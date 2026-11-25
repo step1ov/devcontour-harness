@@ -111,9 +111,9 @@ export function environmentCauseOf(
   if (
     kind === 'needs-lead' &&
     error instanceof TaskFailure &&
-    error.diagnosis === 'writer-environment'
+    (error.diagnosis === 'writer-environment' || error.diagnosis === 'writer-split')
   )
-    return 'writer-environment';
+    return error.diagnosis;
   if (kind !== 'environment') return 'none';
   if (error instanceof CleanupFailure)
     return error.original ? environmentCauseOf(error.original, full, kind) : 'cleanup';

@@ -7,6 +7,7 @@
 // раунды предмета с переходами прежних находок; запись — `code-reviews` с
 // `kind: release`. Приёмки и поручений нет: находки исправляют обычные работы.
 
+import { releaseDocsLine, releaseDocsOpen, releaseDocsState } from './release-docs.ts';
 import {
   HarnessError,
   type CodeReviewRecord,
@@ -114,6 +115,15 @@ export async function reviewRelease(
       [{ path: ['--base'], message: 'required' }],
     );
   const head = input.head ?? repo.targetRef;
+  // Шаг документации (alpha.70): до приёмки выпуска принята работа docs
+  // после корневых работ; `required` — отказ без неё.
+  const docs = ctx.engine.read((v) => releaseDocsState(v, ctx.policy));
+  const docsLine = releaseDocsLine(docs);
+  if (docs.mode === 'required' && releaseDocsOpen(docs) && docsLine)
+    throw new HarnessError(
+      'NOT_READY',
+      `review-release: ${docsLine}; release.docs: required — сначала примите работу документации (метка docs, зависит от корневых работ)`,
+    );
   return reviewBranch(
     ctx,
     {

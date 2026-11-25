@@ -418,6 +418,9 @@ test('H2-01: standaloneInstructions — T1–T5, T6 только с требов
     'Gates run on the candidate and integration commits of a task, never on its base. Put a new feature test in the same task as the behaviour it proves and bind it through a requirement (test gate, scenario, testId): it may fail before the implementation and must pass on the accepted commit. Never plan a task whose own gates are expected to fail.',
     'If a needed check is not configured, reference it anyway: do not drop it or replace it with a weaker gate or a typecheck. plan-check reports it in checkPlan; prepare the check (a policy gate, or a bootstrap task proven by existing gates) and verify it before the main implementation is approved. A project already failing on its base is a separate first task, not an expected red.',
     'Ask the user a short question for every real ambiguity of the goal instead of guessing; the answer goes into the brief, and a changed brief makes this draft stale.',
+    // alpha.70: ведущий не добавляет требований без источника.
+    'Add no requirement without a source. For every acceptance criterion you write, cite where it comes from in criteriaSources: { "criterion": <index in acceptance>, "kind": "brief" | "owner-answer" | "review-finding" | "context", "ref": <brief section, question id, finding id or document> }. A criterion you cannot trace to the brief, an owner answer, a review finding or pinned context is a new requirement: ask the user instead of adding it. Plan review flags unsourced criteria.',
+    'Documentation step: when the plan finishes a release, add one task labelled "docs" (labels: ["docs"]) that depends on every root task (the tasks nothing else depends on) and updates the user and operator documentation for what the release changed; it runs after them and before the release review.',
   ]);
   const requirements = [
     {
@@ -427,13 +430,13 @@ test('H2-01: standaloneInstructions — T1–T5, T6 только с требов
     },
   ];
   const withReq = standaloneInstructions({ requirements });
-  assert.deepEqual(withReq.slice(0, 5), plain);
+  assert.deepEqual(withReq.slice(0, 7), plain);
   assert.equal(
-    withReq[5],
+    withReq[7],
     'Requirement snapshots at HEAD (copy id, source, text and digest exactly; no other requirements exist): ' +
       JSON.stringify(requirements),
   );
-  assert.equal(withReq.length, 6);
+  assert.equal(withReq.length, 8);
   const { prompt } = planningRequest({ brief: 'Greet', facts: facts(), hostInstructions: withReq });
   assert.ok(
     prompt.endsWith('Host instructions:\n' + withReq.join('\n\n') + '\n\nUser brief:\nGreet'),

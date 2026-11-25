@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { workProposalSchema } from './proposals.ts';
 import { API_VERSION, STATE_VERSION } from './version.ts';
 import {
   digestSchema,
@@ -574,6 +575,41 @@ export const cliCommands = {
         required: false,
         multiple: true,
         description: 'Доказательство (ID попытки, evidence, строка лога), до 10',
+      },
+    ],
+    refusals: ['NOT_FOUND', 'NOT_READY', 'INVALID_INPUT'],
+  },
+  proposal: {
+    description:
+      'Решение ведущего по предложению исполнителя (0.1.0-alpha.70): задача-продолжение на остаток или разделение из разбора в начале попытки. accept — внести в план (сам граф команда не меняет: принятое ведущий вносит обычным ревью плана), reject — отклонить с основанием (после отклонённого разделения — retry --by lead). Исполнитель предложения не принимает. Модель не вызывается',
+    writes: true,
+    idempotency: 'Решённое предложение второй раз не решается (NOT_READY)',
+    args: [
+      state,
+      work,
+      {
+        name: '--proposal',
+        value: 'id',
+        required: true,
+        description: 'ID предложения (P-…)',
+      },
+      {
+        name: '--decision',
+        value: 'text',
+        required: true,
+        description: 'accept | reject',
+      },
+      {
+        name: '--reason',
+        value: 'text',
+        required: true,
+        description: 'Основание решения (3–2000 знаков)',
+      },
+      {
+        name: '--by',
+        value: 'text',
+        required: false,
+        description: 'lead (по умолчанию) | operator',
       },
     ],
     refusals: ['NOT_FOUND', 'NOT_READY', 'INVALID_INPUT'],
@@ -1771,6 +1807,58 @@ export const cliCommands = {
     ],
     refusals: ['NOT_FOUND', 'NOT_READY'],
   },
+  'env-up': {
+    description:
+      'Сервисы попытки облегчённого режима (0.1.0-alpha.70): из шага lifecycle или gate попытки поднимает docker compose под именем проекта попытки (COMPOSE_PROJECT_NAME задаёт harness) с up -d --wait, убрав остатки того же проекта; динамические порты (ports: "127.0.0.1::<порт>") дописывает в файл окружения попытки (HARNESS_ATTEMPT_ENV_FILE) переменными HX_<СЕРВИС>_<ПОРТ> — gates попытки получают их в окружении; при отказе готовности — compose ps -a и хвосты журналов нездоровых сервисов (замаскированные) в compose-readiness.json и ответе. Модель не вызывается',
+    writes: true,
+    idempotency: 'Повтор поднимает стек заново (прежний того же проекта снимается)',
+    args: [
+      {
+        name: '--file',
+        value: 'path',
+        required: false,
+        description: 'Файл compose (по умолчанию — правила docker compose в каталоге)',
+      },
+      {
+        name: '--wait',
+        value: 'number',
+        required: false,
+        description: 'Предел ожидания готовности (--wait-timeout, по умолчанию 120 с)',
+      },
+    ],
+    refusals: ['INVALID_INPUT', 'NOT_READY', 'RUNTIME_UNAVAILABLE'],
+  },
+  'env-down': {
+    description:
+      'Убрать сервисы попытки (0.1.0-alpha.70): docker compose down -v --remove-orphans -t 2 под именем проекта попытки; для шага teardown',
+    writes: true,
+    idempotency: 'Повтор без стека — без изменений',
+    args: [
+      {
+        name: '--file',
+        value: 'path',
+        required: false,
+        description: 'Файл compose',
+      },
+    ],
+    refusals: ['INVALID_INPUT', 'RUNTIME_UNAVAILABLE'],
+  },
+  'env-sweep': {
+    description:
+      'Уборка стеков попыток (0.1.0-alpha.70): только проекты docker compose, которые поднял harness env-up попыток ЭТОГО каталога состояния (записи compose-services.json), и только у попыток, которые не идут (живость перепроверяется перед каждым снятием); проекты других установок, harness gates --sha и чужие hx-* не трогаются. Без --yes — только список (dry run); с --yes — down -v --remove-orphans',
+    writes: true,
+    idempotency: 'Повтор после уборки — пустой список',
+    args: [
+      state,
+      {
+        name: '--yes',
+        value: 'flag',
+        required: false,
+        description: 'Снять найденные стеки (без флага — только список)',
+      },
+    ],
+    refusals: ['NOT_FOUND', 'RUNTIME_UNAVAILABLE'],
+  },
   'lead-outline': {
     description:
       'План выпуска ведущего до первого графа (и до первого run — с --policy): этапы × компоненты с грубым размером (S/M/L или число задач) и тем, кто их делает (writers, environment, owner). Прогноз считает незарегистрированные части плана объёмом выпуска; без плана status и панель подсказывают RELEASE_OUTLINE_MISSING, run не блокируется (0.1.0-alpha.68). Синоним: harness lead outline --file F',
@@ -2085,6 +2173,8 @@ export const attemptSummarySchema = z.strictObject({
       at: isoTimeSchema.optional(),
       plain: z.string().min(1).max(300),
       plainEn: z.string().min(1).max(300),
+      /** Справочник причин (0.1.0-alpha.70): `docs/failure-causes.md#…`. */
+      reference: z.string().min(1).max(200).optional(),
     })
     .optional(),
   /**
@@ -2519,6 +2609,60 @@ export const workActionDataSchema = z.strictObject({
   bySource: z.enum(['flag', 'default']).optional(),
 });
 
+/** `harness env-up` / `env-down` / `env-sweep`: сервисы попытки (alpha.70). */
+const composePortSchema = z.strictObject({ host: z.string().max(100), port: z.number().int() });
+export const envUpDataSchema = z.strictObject({
+  project: z.string().max(100),
+  ok: z.boolean(),
+  services: z.record(
+    z.string().max(100),
+    z.strictObject({
+      ports: z.record(z.string().max(10), composePortSchema),
+      state: z.string().max(40).optional(),
+      health: z.string().max(40).optional(),
+    }),
+  ),
+  env: z.record(z.string().max(200), z.string().max(10)),
+  envFile: z.string().max(4096).optional(),
+  warnings: z.array(z.string().max(500)).max(5).optional(),
+  readiness: z
+    .strictObject({
+      services: z.array(
+        z.strictObject({
+          service: z.string().max(100),
+          state: z.string().max(40),
+          health: z.string().max(40).optional(),
+          exitCode: z.number().int().optional(),
+        }),
+      ),
+      logs: z.record(z.string().max(100), z.string().max(8000)),
+      error: z.string().max(4000),
+    })
+    .optional(),
+});
+export const envDownDataSchema = z.strictObject({
+  project: z.string().max(100),
+  ok: z.boolean(),
+  error: z.string().max(2000).optional(),
+});
+export const envSweepDataSchema = z.strictObject({
+  ok: z.boolean(),
+  /** Без `--yes` — только список. */
+  dryRun: z.boolean(),
+  stale: z.array(z.string().max(100)),
+  removed: z.array(z.string().max(100)),
+  kept: z.array(z.string().max(100)),
+  /** Проекты hx-* без записи env-up этого состояния — не тронуты. */
+  ignored: z.number().int().min(0),
+  error: z.string().max(2000).optional(),
+});
+
+/** `harness proposal`: решённое предложение исполнителя (alpha.70). */
+export const proposalDataSchema = z.strictObject({
+  workId: idSchema,
+  proposal: workProposalSchema,
+});
+
 /** `harness diagnose`: записанный разбор, что дальше и действующее правило. */
 export const diagnoseDataSchema = z.strictObject({
   workId: idSchema,
@@ -2691,6 +2835,21 @@ export const doctorDataSchema = z.strictObject({
           mechanism: z.string().optional(),
           reason: z.string().optional(),
           caches: z.array(z.string()).max(200),
+        })
+        .optional(),
+      /**
+       * Уровень безопасности (0.1.0-alpha.70): определённый текущий уровень
+       * шкалы write-guard → os-user → container → vm (строгий режим —
+       * `os-sandbox`); выбирает владелец.
+       */
+      securityTier: z
+        .strictObject({
+          current: z.enum(['none', 'write-guard', 'os-user', 'container', 'vm', 'os-sandbox']),
+          container: z.boolean(),
+          vm: z.boolean(),
+          separateUser: z.boolean(),
+          line: z.string(),
+          lineEn: z.string(),
         })
         .optional(),
     })
@@ -3558,6 +3717,10 @@ export const cliDataSchemas = {
   cancel: workActionDataSchema,
   retry: workActionDataSchema,
   diagnose: diagnoseDataSchema,
+  proposal: proposalDataSchema,
+  'env-up': envUpDataSchema,
+  'env-down': envDownDataSchema,
+  'env-sweep': envSweepDataSchema,
   result: resultEnvelopeSchema,
   deliver: resultEnvelopeSchema,
   cleanup: cleanupDataSchema,

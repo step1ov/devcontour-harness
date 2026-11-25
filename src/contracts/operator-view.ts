@@ -292,6 +292,25 @@ export const driftViewSchema = z.strictObject({
   unavailable: freeText(T.unavailable).optional(),
 });
 
+const costAmount = {
+  usd: z.number().min(0),
+  bound: z.enum(['exact', 'lower']),
+  calls: count,
+  /** Вызовов без цены: `bound: lower`, когда больше нуля. */
+  unpricedCalls: count,
+};
+const attemptCostSchema = z.strictObject({
+  runId: token(200),
+  attempt: z.number().int().positive().optional(),
+  ...costAmount,
+});
+/** Расход одной работы (ревизия 10, `works[].cost`). */
+export const workCostViewSchema = z.strictObject({
+  ...costAmount,
+  byAttempt: z.array(attemptCostSchema).max(20),
+  byAttemptTruncated: count,
+});
+
 export const workViewSchema = z.strictObject({
   id,
   graphId: id,
@@ -373,6 +392,13 @@ export const workViewSchema = z.strictObject({
          */
         kind: token(40).optional(),
         counted: z.boolean().optional(),
+        /** Ревизия 10: справочник причин (`docs/failure-causes.md#…`). */
+        reference: z.string().min(1).max(200).optional(),
+        /**
+         * Ревизия 10: та же ссылка адресом в репозитории harness этой версии
+         * (`<repository>/blob/v<версия>/docs/failure-causes.md#…`).
+         */
+        referenceUrl: z.string().min(1).max(600).optional(),
       })
       .optional(),
   }),
@@ -506,10 +532,65 @@ export const workViewSchema = z.strictObject({
         notes: count,
         at: isoTimeSchema,
         earlier: z.literal(true).optional(),
+        /**
+         * Ревизия 10: второй проход ревью (alpha.70): итог, снятые
+         * находки, пропущенные первым, снят ли отказ первого прохода.
+         */
+        secondPass: z
+          .strictObject({
+            mode: z.enum(['on-reject', 'always']),
+            status: z.enum(['ran', 'failed']),
+            refuted: count,
+            missed: count,
+            overturned: z.literal(true).optional(),
+            /** Снятые находки: текст и основание опровержения (маскируются, до 20). */
+            refutedFindings: z
+              .array(
+                z.strictObject({
+                  finding: z.string().min(1).max(T.plain),
+                  basis: z.string().min(1).max(T.plain),
+                }),
+              )
+              .max(20)
+              .optional(),
+          })
+          .optional(),
       }),
     )
     .max(L.attemptReviews)
     .optional(),
+  /**
+   * Ревизия 10: предложения исполнителей ведущему (alpha.70): задачи-продолжения
+   * и разделения; решает ведущий (`harness proposal`).
+   */
+  proposals: z
+    .array(
+      z.strictObject({
+        id: token(20),
+        kind: z.enum(['follow-up', 'split']),
+        status: z.enum(['proposed', 'accepted', 'rejected']),
+        attempt: z.number().int().positive(),
+        /** Заголовок; у разделения без него — «разделение на N части». */
+        title: freeText(T.title).optional(),
+        /** Цель и почему вне работы — слова исполнителя (маскируются). */
+        goal: freeText(T.plain).optional(),
+        reason: freeText(T.plain).optional(),
+        /** Частей разделения. */
+        parts: count.optional(),
+        /** Решение ведущего или оператора; `reason` — его основание. */
+        decision: z
+          .strictObject({
+            by: z.enum(['lead', 'operator']),
+            at: isoTimeSchema,
+            reason: freeText(T.plain).optional(),
+          })
+          .optional(),
+      }),
+    )
+    .max(20)
+    .optional(),
+  /** Ревизия 10: расход работы — итог и по попыткам (`workCostViewSchema`). */
+  cost: workCostViewSchema.optional(),
 });
 
 const series = z.array(count).max(L.buckets);
@@ -854,6 +935,19 @@ const forecastSchema = z.strictObject({
             line: z.string().min(1).max(300),
           })
           .optional(),
+        /**
+         * Ревизия 10: шаг документации выпуска (alpha.70, `release.docs`):
+         * работа с меткой docs после корневых работ, до приёмки выпуска.
+         */
+        docs: z
+          .strictObject({
+            mode: z.enum(['required', 'advisory', 'off']),
+            status: z.enum(['off', 'no-works', 'missing', 'not-after-roots', 'pending', 'done']),
+            works: z.array(id).max(20),
+            missingRoots: z.array(id).max(50).optional(),
+            line: z.string().min(1).max(300).optional(),
+          })
+          .optional(),
       })
       .optional(),
   }),
@@ -928,6 +1022,52 @@ const sourceSchema = z.strictObject({
 
 const truncatedCount = z.number().int().positive();
 
+export const costsViewSchema = z.strictObject({
+  total: z.strictObject(costAmount),
+  /**
+   * Текущий выпуск: `sinceRelease: true` — вызовы после последнего `release
+   * done` (`since`); `false` — выпуска ещё не было, это все вызовы.
+   */
+  release: z.strictObject({
+    ...costAmount,
+    since: isoTimeSchema.optional(),
+    sinceRelease: z.boolean(),
+  }),
+  byRole: z
+    .array(
+      z.strictObject({
+        role: z.enum(['writer', 'reviewer', 'planner', 'lead', 'other']),
+        ...costAmount,
+      }),
+    )
+    .max(10),
+  byModel: z
+    .array(
+      z.strictObject({
+        runtime: token(40),
+        vendor: token(40),
+        model: z.string().min(1).max(T.model),
+        ...costAmount,
+      }),
+    )
+    .max(50),
+  /** Моделей сверх предела `byModel`. */
+  byModelTruncated: count,
+  byWork: z
+    .array(
+      z.strictObject({
+        workId: id,
+        ...costAmount,
+        /** Последние попытки работы (до 20); ранние сверх предела — `attemptsTruncated`. */
+        attempts: z.array(attemptCostSchema).max(20),
+        attemptsTruncated: count,
+      }),
+    )
+    .max(L.works),
+  /** Работ сверх предела `byWork` (полный расход работы — `works[].cost`). */
+  byWorkTruncated: count,
+});
+
 export const operatorViewSchema = z.strictObject({
   viewVersion: z.literal(OPERATOR_VIEW_VERSION),
   viewRevision: count,
@@ -939,6 +1079,12 @@ export const operatorViewSchema = z.strictObject({
   questions: z.array(operatorQuestionSchema).max(L.questions),
   escalations: z.array(escalationSchema).max(L.escalations),
   drift: z.array(driftViewSchema).max(L.drift),
+  /**
+   * Ревизия 10: расход по работам, попыткам, ролям и моделям (alpha.70,
+   * `costBreakdown`); итог установки и текущего выпуска. `bound: lower` —
+   * есть вызовы без цены.
+   */
+  costs: costsViewSchema.optional(),
   progress: z.strictObject({
     total: count,
     byStage: z.record(token(40), count),

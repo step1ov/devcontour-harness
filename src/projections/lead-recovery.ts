@@ -14,7 +14,8 @@ import type { RecoveryPolicy } from './decisions.ts';
 type AttemptFacts = Pick<
   AttemptState,
   'id' | 'workId' | 'status' | 'failureKind' | 'blocked' | 'writerBlocked' | 'interrupted'
->;
+> &
+  Partial<Pick<AttemptState, 'writerSplit'>>;
 type WorkFacts = Pick<
   WorkState,
   'id' | 'status' | 'attempt' | 'approvedDigest' | 'rework' | 'leadRecovery' | 'recovery'
@@ -32,6 +33,7 @@ export const countedFailure = (a: AttemptFacts) =>
   a.status === 'failed' &&
   !a.blocked &&
   !a.writerBlocked &&
+  !a.writerSplit &&
   !a.interrupted &&
   a.failureKind !== undefined &&
   a.failureKind !== 'environment' &&

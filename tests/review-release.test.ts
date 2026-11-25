@@ -15,7 +15,7 @@ import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
@@ -26,6 +26,7 @@ import {
   digestOf,
   leadDataSchema,
   type InputQuestion,
+  type WorkState,
 } from '../src/contracts/index.ts';
 import type { Engine } from '../src/engine/engine.ts';
 import { cliAdapter } from '../src/agents/cli-adapter.ts';
@@ -38,6 +39,7 @@ import {
   type ReleaseReviewInput,
 } from '../src/control/review-release.ts';
 import { releaseReviewRequired, releaseReviewState } from '../src/control/release-review-state.ts';
+import { releaseDocsLine, releaseDocsState } from '../src/control/release-docs.ts';
 import { engineOf, graphOf, policyOf, ready } from './engine-fixture.ts';
 import { bin } from './runner-fixture.ts';
 import { finding, recordedPrompt, verdict } from './review-fixture.ts';
@@ -310,7 +312,8 @@ test('P7-6: release done при required — отказ без ревью, с б
     releaseDone(f.engine, { summary: 'Выпуск готов', heads: f.heads() }),
   );
   assert.equal(done.release?.works, 1);
-  assert.equal(done.warning, undefined);
+  // Шаг документации по умолчанию — совет (alpha.70): предупреждение, не отказ.
+  assert.match(done.warning ?? '', /нет работы с меткой docs/);
   assert.equal(done.releaseReview?.status, 'approved');
   assert.equal(done.releaseReview?.required, true);
   assert.deepEqual(done.releaseReview?.notes, ['Стоит добавить кэш для /media']);
@@ -511,4 +514,175 @@ test('digest договора выпуска — по полному текст�
     releaseReviewState(v, f.policy, { app: a }, { strict: true, contracts: { app: ca.digest } }),
   );
   assert.equal(ok.status, 'approved');
+});
+
+test('alpha.70: приёмка выпуска — второй проход по умолчанию always: опровергнутая находка снята, пропущенная — держит; off — один проход', async () => {
+  const f = fixture();
+  ready(f.engine, graphOf({ w: [] }));
+  accept(f.engine, f.base, f.head);
+  f.scenario({
+    reviewer: verdict(false, { findings: [finding('Медиа не через Caddy')] }),
+    refuter: {
+      result: {
+        summary: 'неверно',
+        verdicts: [{ index: 0, verdict: 'refuted', basis: 'Caddyfile проксирует /media/* на api' }],
+        missed: [],
+      },
+    },
+  });
+  const r1 = await f.review();
+  assert.equal(r1.approved, true);
+  assert.equal(r1.passes?.mode, 'always');
+  assert.equal(r1.passes?.status, 'ran');
+  assert.equal(r1.passes?.overturned, true);
+  assert.deepEqual(r1.findings, []);
+  assert.equal(codeReviewRecordSchema.safeParse(r1).success, true);
+
+  const g = fixture();
+  ready(g.engine, graphOf({ w: [] }));
+  accept(g.engine, g.base, g.head);
+  g.scenario({
+    reviewer: verdict(true),
+    refuter: {
+      result: {
+        summary: 'пропущено',
+        verdicts: [],
+        missed: [
+          {
+            message: 'prod.env без MEDIA_URL',
+            path: 'deploy/prod.env',
+            line: null,
+            rule: null,
+            evidence: null,
+          },
+        ],
+      },
+    },
+  });
+  const r2 = await g.review();
+  assert.equal(r2.approved, false);
+  assert.equal(r2.passes?.missed, 1);
+  assert.equal(r2.findings[0]?.message, 'prod.env без MEDIA_URL');
+
+  const h = fixture((p) => (p.review.passes = { release: 'off' }));
+  ready(h.engine, graphOf({ w: [] }));
+  accept(h.engine, h.base, h.head);
+  h.scenario({ reviewer: verdict(false, { findings: [finding('Медиа не через Caddy')] }) });
+  const r3 = await h.review();
+  assert.equal(r3.approved, false);
+  assert.equal(r3.passes, undefined);
+});
+
+test('alpha.70: шаг документации выпуска — корни, работа docs после них; required — review-release без неё отказывает', async () => {
+  const states = (graph: ReturnType<typeof graphOf>, docs?: 'required' | 'advisory' | 'off') =>
+    releaseDocsState(
+      {
+        works: () =>
+          graph.orders.map((order) => ({ id: order.id, status: 'ready', order }) as WorkState),
+      },
+      { release: docs ? { docs } : {} },
+    );
+  const g = graphOf({ api: [], ui: ['api'], cli: [] });
+  assert.deepEqual(states(g).roots, ['cli', 'ui']);
+  assert.equal(states(g).status, 'missing');
+  assert.equal(states(g).mode, 'advisory');
+  assert.equal(states(g, 'off').status, 'off');
+  const withDocs = graphOf({ api: [], ui: ['api'], cli: [], docs: ['ui'] });
+  withDocs.orders[3]!.labels = ['docs'];
+  assert.equal(states(withDocs).status, 'not-after-roots');
+  assert.deepEqual(states(withDocs).missingRoots, ['cli']);
+  withDocs.orders[3]!.dependsOn = ['ui', 'cli'];
+  assert.equal(states(withDocs).status, 'pending');
+  assert.match(releaseDocsLine(states(withDocs)) ?? '', /docs ещё не принята/);
+
+  const f = fixture((p) => (p.release.docs = 'required'));
+  ready(f.engine, graphOf({ w: [] }));
+  accept(f.engine, f.base, f.head);
+  f.scenario({ reviewer: verdict(true) });
+  await assert.rejects(f.review(), (e: unknown) => {
+    assert.ok(e instanceof HarnessError);
+    assert.equal(e.code, 'NOT_READY');
+    assert.match(e.message, /нет работы с меткой docs после корневых работ \(w\)/);
+    return true;
+  });
+});
+
+test('ревью 1: отказ приёмки выпуска без блокирующих находок второй проход (always) не снимает', async () => {
+  const f = fixture();
+  ready(f.engine, graphOf({ w: [] }));
+  accept(f.engine, f.base, f.head);
+  f.scenario({
+    reviewer: verdict(false, { findings: [finding('Не проверить маршрут /media', 'note')] }),
+    refuter: { result: { summary: 'нечего опровергать', verdicts: [], missed: [] } },
+  });
+  const r = await f.review();
+  assert.equal(r.approved, false);
+  assert.equal(r.passes?.status, 'ran');
+  assert.equal(r.passes?.overturned, false);
+});
+
+test('ревью 1: release.docs: required держит release done и при review: advisory; advisory — предупреждение; следующий выпуск — свои корни', () => {
+  const f = fixture((p) => (p.release = { review: 'advisory', docs: 'required' }));
+  ready(f.engine, graphOf({ w: [] }));
+  accept(f.engine, f.base, f.head);
+  notReady(
+    () => releaseDone(f.engine, { summary: 'готово', heads: f.heads() }),
+    /нет работы с меткой docs после корневых работ \(w\).*release\.docs: required/,
+  );
+  const g = fixture((p) => (p.release = { review: 'advisory', docs: 'advisory' }));
+  ready(g.engine, graphOf({ w: [] }));
+  accept(g.engine, g.base, g.head);
+  const done = leadDataSchema.parse(releaseDone(g.engine, { summary: 'готово', heads: g.heads() }));
+  assert.match(done.warning ?? '', /нет работы с меткой docs.*release\.docs: advisory/);
+  // Второй выпуск: принятая в первом w не корень нового выпуска.
+  const next = graphOf({ w: [], w2: [], d2: ['w2'] }, '2');
+  next.orders[2]!.labels = ['docs'];
+  ready(g.engine, next);
+  const state = g.engine.read((v) => releaseDocsState(v, { release: { docs: 'advisory' } }));
+  assert.deepEqual(state.roots, ['w2']);
+  assert.equal(state.status, 'pending');
+});
+
+test('ревью 2: второй проход приёмки выпуска, изменивший своё дерево, не принимается — действует первый', async () => {
+  const f = fixture();
+  ready(f.engine, graphOf({ w: [] }));
+  accept(f.engine, f.base, f.head);
+  f.scenario({
+    reviewer: verdict(false, { findings: [finding('Медиа не через Caddy')] }),
+    refuter: {
+      files: { 'deploy/Caddyfile': 'handle /media/* { reverse_proxy api:3000 }\n' },
+      result: {
+        summary: 'после правки маршрут есть',
+        verdicts: [{ index: 0, verdict: 'refuted', basis: 'Caddyfile проксирует /media/*' }],
+        missed: [],
+      },
+    },
+  });
+  const r = await f.review();
+  assert.equal(r.approved, false);
+  assert.equal(r.passes?.status, 'failed');
+  assert.match(r.passes?.reason ?? '', /изменил своё дерево/);
+  assert.equal(r.findings.length, 1);
+});
+
+test('ревью 3: отмена во время второго прохода — деревья обоих проходов убраны', async () => {
+  const f = fixture();
+  ready(f.engine, graphOf({ w: [] }));
+  accept(f.engine, f.base, f.head);
+  f.scenario({
+    reviewer: verdict(false, { findings: [finding('Медиа не через Caddy')] }),
+    refuter: { sleepMs: 5000, result: { summary: 'x', verdicts: [], missed: [] } },
+  });
+  const abort = new AbortController();
+  setTimeout(() => abort.abort(), 1500);
+  await assert.rejects(f.review({ signal: abort.signal }));
+  assert.ok(
+    existsSync(`${f.scenarioPath}.refuter.0.started`),
+    'отмена пришла во время второго прохода',
+  );
+  const trees = f
+    .git('worktree', 'list', '--porcelain')
+    .split('\n')
+    .filter((l) => l.startsWith('worktree '));
+  assert.equal(trees.length, 1, trees.join('\n'));
 });

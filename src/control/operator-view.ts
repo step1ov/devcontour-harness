@@ -39,7 +39,7 @@ import {
   type RunEvent,
   type WorkState,
 } from '../contracts/index.ts';
-import { HARNESS_VERSION } from '../package.ts';
+import { HARNESS_VERSION, harnessDocsBase } from '../package.ts';
 import {
   attemptCounted,
   callCostKnown,
@@ -85,6 +85,8 @@ import { acceptedTargets } from './target.ts';
 import { WorkflowQueue } from './workflow.ts';
 import { reviewRoundCap, strictReviewRoundCap } from './review.ts';
 import { releaseReviewState } from './release-review-state.ts';
+import { releaseDocsLine, releaseDocsState } from './release-docs.ts';
+import { costBreakdown } from '../projections/costs.ts';
 import { LIGHT_ROUNDS_EN, reviewSubjectSummary, subjectRoundBudget } from './review-summary.ts';
 import { stageOfStep } from './stage.ts';
 import { setupProgress } from './setup-progress.ts';
@@ -1016,6 +1018,27 @@ export function attemptReviewsOf(
         notes: findings.filter((f) => f.severity !== 'blocking').length,
         at: e.createdAt,
         ...(earlier.has(a.id) ? { earlier: true as const } : {}),
+        // Второй проход (alpha.70): только прошедший или упавший.
+        ...((p) =>
+          p && p.status !== 'skipped' && p.mode !== 'off'
+            ? {
+                secondPass: {
+                  mode: p.mode,
+                  status: p.status,
+                  refuted: p.refuted.length,
+                  missed: p.missed,
+                  ...(p.overturned ? { overturned: true as const } : {}),
+                  ...(p.refuted.length
+                    ? {
+                        refutedFindings: p.refuted.map((r) => ({
+                          finding: r.message,
+                          basis: r.basis,
+                        })),
+                      }
+                    : {}),
+                },
+              }
+            : {})(applied.length ? e.reviewPasses : undefined),
       });
     }
   return out;
@@ -1156,6 +1179,13 @@ export function collectOperatorViewInput(
     const known = new Set(v.works().map((w) => w.id));
     const gateHolds = h.engine.environmentGateHolds(v);
     const records = callRecords(v);
+    // Расход по работам целиком (ревизия 10, `works[].cost`).
+    const workCosts = new Map(
+      costBreakdown(records, {
+        attemptOf: (runId) => v.attempt(runId)?.attempt,
+        limits: { works: Number.MAX_SAFE_INTEGER },
+      }).byWork.map((c) => [c.workId, c]),
+    );
     const complete = (r: (typeof records)[number]) =>
       r.outcome !== 'active' && r.outcome !== 'abandoned' && r.usage.complete && r.costUsd !== null;
     // Диагноз остановок, как `stage.needs` у status, но с кодом.
@@ -1266,6 +1296,27 @@ export function collectOperatorViewInput(
         ...((rows) => (rows.length ? { attemptReviews: rows } : {}))(
           attemptReviewsOf(own, earlier),
         ),
+        ...(w.proposals?.length
+          ? {
+              proposals: w.proposals.map((p) => ({
+                id: p.id,
+                kind: p.kind,
+                status: p.status,
+                attempt: p.attempt,
+                title: p.title,
+                goal: p.goal,
+                reason: p.reason,
+                ...(p.parts ? { parts: p.parts.length } : {}),
+                ...(p.decision
+                  ? {
+                      decision: { by: p.decision.by, reason: p.decision.reason, at: p.decision.at },
+                    }
+                  : {}),
+              })),
+            }
+          : {}),
+        // Расход работы (ревизия 10): итог и по попыткам, без предела списка работ.
+        ...((c) => (c ? { cost: c } : {}))(workCosts.get(w.id)),
         rechecks: own.reduce((n, a) => n + a.evidence.filter((e) => e.recheck).length, 0),
         ...(sw.liveness ? { liveness: sw.liveness } : {}),
         ...(active?.status === 'active'
@@ -1360,6 +1411,8 @@ export function collectOperatorViewInput(
     return {
       now,
       harnessVersion: HARNESS_VERSION,
+      // Ссылки на документы этой версии harness (ревизия 10, `referenceUrl`).
+      ...((base) => (base ? { docsBase: base } : {}))(harnessDocsBase()),
       stateVersion: status.stateVersion,
       policy,
       policyDigest: policyDigest(policy),
@@ -1484,6 +1537,33 @@ export function collectOperatorViewInput(
               },
             }
           : {})(releaseReviewState(v, policy)),
+      // Шаг документации выпуска (ревизия 10): только когда есть работы.
+      ...((d) =>
+        d.status === 'off'
+          ? {}
+          : {
+              releaseDocs: {
+                mode: d.mode,
+                status: d.status,
+                works: d.works.slice(0, 20),
+                ...(d.missingRoots ? { missingRoots: d.missingRoots.slice(0, 50) } : {}),
+                ...((line) => (line ? { line: line.slice(0, 300) } : {}))(
+                  releaseDocsLine(d, options.lang === 'en' ? 'en' : 'ru'),
+                ),
+              },
+            })(releaseDocsState(v, policy)),
+      // Расход по работам, попыткам, ролям и моделям (ревизия 10).
+      ...((records) =>
+        records.length
+          ? {
+              costs: costBreakdown(records, {
+                attemptOf: (runId) => v.attempt(runId)?.attempt,
+                ...((at) => (at ? { releaseSince: at } : {}))(
+                  v.local('lead', WORKSPACE_OWNER, 'log')?.release?.doneAt,
+                ),
+              }),
+            }
+          : {})(callRecords(v)),
       ...((r) => (r ? { resources: r } : {}))(
         resourcesInputOf(policy, h.stateDir, view.baseDir, {
           // Попытка закончилась по снимку хранилища: квитанция окружения

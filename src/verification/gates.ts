@@ -29,7 +29,14 @@ import {
   writeGuardActive,
   NO_RETRY_GATE_CODES,
 } from '../contracts/index.ts';
-import { WriteGuardUnavailable, guardEntries, guardedArgv } from '../environment/write-guard.ts';
+import {
+  WriteGuardUnavailable,
+  gitWorktreeGuard,
+  GUARDED_GIT_ADVICE,
+  GUARDED_GIT_DENIAL,
+  guardEntries,
+  guardedArgv,
+} from '../environment/write-guard.ts';
 import { ReapFailure, command, git, gitOutput, gitRawOutput } from '../environment/process.ts';
 import {
   isolation,
@@ -96,6 +103,14 @@ import { sameNode, toolchainFacts, toolchainText, usesPnpm } from '../environmen
 
 /** Метка молчаливого провала gate в тексте провала и итоге `harness gates` (alpha.69). */
 export const GATE_SILENT_FAILURE = 'GATE_SILENT_FAILURE';
+/**
+ * Gate меняет состояние git (P8-1, alpha.70 ревью 4): под границей записи
+ * облегчённого режима `.git` закрыт, а gate берёт блокировку index или пишет
+ * объекты/ссылки. Засчитан исполнителю с советом, кроме случая, когда тот
+ * же gate так же падает и на базе — тогда это определение gate
+ * (`gate-definition`, удержание до хода ведущего), как молчаливый провал.
+ */
+export const GATE_GIT_WRITE = 'GATE_GIT_WRITE';
 
 /** Длинное имя testcase заменяется хешем, а не обрезается: обрезка дала бы ложные совпадения. */
 export const TEST_ID_LIMIT = 1000;
@@ -571,7 +586,13 @@ export async function runCheck(
       // процессы открыты. Временный каталог — свой (scratch).
       assertExecutable(argv[0]!, env.PATH, options.cwd);
       // Нет механизма — отказ среды, как недоступная изоляция строгого режима.
-      argv = guardedArgv(argv, guardEntries(h.config, [...options.write, scratch, marks]));
+      // Метаданные git дерева попытки (P8-1): только его gitdir; новые
+      // объекты — в своё хранилище, перенос — после проверки.
+      const gitGuard = gitWorktreeGuard(options.cwd);
+      argv = guardedArgv(
+        argv,
+        guardEntries(h.config, [...options.write, scratch, marks], gitGuard?.entries ?? []),
+      );
       env = { ...env, ...toolStateEnv(env, scratch), TMPDIR: scratch };
     } else if (strictSandbox(h.config)) {
       const support = isolationBackend.check();
@@ -1289,6 +1310,8 @@ export interface GateRun {
    * (удержание для ведущего), а не провал кода исполнителя.
    */
   silentOnBase?: (gateId: string) => boolean;
+  /** Тот же gate падал на базе, меняя состояние git (`GATE_GIT_WRITE`, ревью 4). */
+  gitWriteOnBase?: (gateId: string) => boolean;
   /**
    * Генеративный gate (`gate.property`): попытка, от которой seed, и
    * ожидаемая проверка поручения. Без `expected` — прежний уровень (отчёт
@@ -1720,6 +1743,41 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
             partialNotes.map((n) => '; ' + n).join(''),
         );
       }
+      // Gate меняет состояние git под границей записи (P8-1, ревью 4–5).
+      // Только когда отказ git — единственное объяснение (нет упавших тестов,
+      // утверждения не про git, сигнала): совет и отметка `gitWrite`; на базе
+      // так же — определение gate, удержание для ведущего. Иначе — обычный
+      // засчитанный провал, совет — дополнением.
+      const gitDenied =
+        writeGuardActive(run.policy) &&
+        !property &&
+        !reaped &&
+        GUARDED_GIT_DENIAL.test(result.stderr + '\n' + result.stdout);
+      // Упавшие testcases — по выжимке: она уже не считает общий провал
+      // обёртки («Gate execution failed», `opaqueFailure`) причиной (ревью 6).
+      const independent =
+        !!failureSummary.tests?.length ||
+        !!result.diagnostics?.signal ||
+        // Утверждение — независимое, только если оно не про сам git (строка
+        // ошибки команды git попадает в выжимку утверждением).
+        (!!failureSummary.assertion &&
+          !GUARDED_GIT_DENIAL.test(failureSummary.assertion) &&
+          !/\bgit\b/i.test(failureSummary.assertion));
+      if (gitDenied && !independent) {
+        failureSummary = { ...failureSummary, gitWrite: true };
+        if (run.gitWriteOnBase?.(gate.id)) {
+          kind = 'environment';
+          cause = 'gate-definition';
+          throw new Error(
+            `${NO_RETRY_GATE_CODES['gate-definition']}: ${GATE_GIT_WRITE}: ${GUARDED_GIT_ADVICE}; так же падает и на базе. ` +
+              `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`,
+          );
+        }
+        throw new Error(
+          `${GATE_GIT_WRITE}: ${GUARDED_GIT_ADVICE}. Если так же падает и база, ведущий проверяет gate: harness gates --sha <база> --gate ${gate.id}. ` +
+            `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`,
+        );
+      }
       // Имена не из отчёта gate (вывод, отчёт команды): отчёт gate мог
       // назвать только общий провал обёртки.
       const named =
@@ -1739,7 +1797,8 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
           .filter(Boolean)
           .join(': ') +
           partialNotes.map((n) => '; ' + n).join('') +
-          (failureSummary.withheld ? `; ${WITHHELD_NOTE}` : ''),
+          (failureSummary.withheld ? `; ${WITHHELD_NOTE}` : '') +
+          (gitDenied ? `; кроме того, ${GATE_GIT_WRITE}: ${GUARDED_GIT_ADVICE}` : ''),
       );
     }
     if (reportPath) {

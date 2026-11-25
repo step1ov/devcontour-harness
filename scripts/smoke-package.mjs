@@ -203,7 +203,8 @@ for (const required of [
 // импортов (0.1.0-alpha.58). `contracts/decision-rules.js` — кто принимает
 // решения: правила, тексты настроек и виды шагов пути работы, только типы
 // (0.1.0-alpha.66). `contracts/outline-weights.js` — веса и виды стадий плана
-// выпуска без импортов (0.1.0-alpha.68).
+// выпуска без импортов (0.1.0-alpha.68). `contracts/failure-catalog.js` —
+// справочник причин отказов, только типы (0.1.0-alpha.70).
 const libDir = join(unpacked, 'package', 'lib');
 const browserGraph = (entry) => {
   const files = new Set();
@@ -221,7 +222,8 @@ const browserGraph = (entry) => {
       rel !== 'contracts/plural.js' &&
       rel !== 'contracts/attempt-line.js' &&
       rel !== 'contracts/decision-rules.js' &&
-      rel !== 'contracts/outline-weights.js'
+      rel !== 'contracts/outline-weights.js' &&
+      rel !== 'contracts/failure-catalog.js'
     )
       fail(`./${entry} достигает ` + rel);
     const text = readFileSync(file, 'utf8');

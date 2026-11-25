@@ -1,4 +1,11 @@
 #!/usr/bin/env node
+import {
+  composeDown,
+  composeSweep,
+  composeUp,
+  ownedComposeProjects,
+} from './environment/compose-env.ts';
+import { redactor } from './environment/redaction.ts';
 import { execFileSync } from 'node:child_process';
 import {
   existsSync,
@@ -535,6 +542,8 @@ const options = {
   'diagnose-after': { type: 'string' },
   'lead-resets': { type: 'string' },
   file: { type: 'string' },
+  proposal: { type: 'string' },
+  yes: { type: 'boolean' },
 } as const;
 
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
@@ -554,6 +563,7 @@ const flagOwners = {
   contracts: ['plan-request', 'plan-check'],
   requirements: ['plan-request'],
   'dry-run': ['worktree-cleanup'],
+  yes: ['env-sweep'],
   'probe-sandbox': ['doctor'],
   detail: ['status'],
   since: ['report'],
@@ -580,11 +590,12 @@ const flagOwners = {
   text: ['input-answer', 'lead-begin', 'lead-note', 'lead-end'],
   ttl: ['lead-begin', 'preview-start'],
   summary: ['release-done'],
-  file: ['lead-outline'],
+  file: ['lead-outline', 'env-up', 'env-down'],
   option: ['input-answer'],
   kind: ['input-answer'],
   actor: ['input-answer', 'input-carry', 'review-plan', 'review-contract', 'review-accept'],
-  by: ['reapprove', 'retry'],
+  by: ['reapprove', 'retry', 'proposal'],
+  proposal: ['proposal'],
   cause: ['diagnose'],
   hypothesis: ['diagnose'],
   addendum: ['diagnose'],
@@ -618,7 +629,7 @@ const flagOwners = {
   schedule: ['update'],
   mode: ['update'],
   prefix: ['update'],
-  wait: ['update'],
+  wait: ['update', 'env-up'],
   scheduled: ['update'],
   'confirm-formats': ['update'],
   preview: ['preview-start', 'preview-stop'],
@@ -1646,6 +1657,115 @@ async function run(
           .recordReleaseBases(new Set(h.policy.repositories.map((r) => r.id)), 'outline')
           .catch(() => undefined);
         return { command, data };
+      } finally {
+        h.close();
+      }
+    }
+    case 'env-up':
+    case 'env-down': {
+      const files = v.file ? [v.file] : undefined;
+      let wait: number | undefined;
+      if (v.wait !== undefined) {
+        wait = Number(v.wait);
+        if (!Number.isInteger(wait) || wait < 1 || wait > 3600)
+          throw new HarnessError('INVALID_INPUT', '--wait: целое число секунд 1–3600', [
+            { path: ['--wait'], message: v.wait },
+          ]);
+      }
+      if (!process.env.COMPOSE_PROJECT_NAME)
+        throw new HarnessError(
+          'NOT_READY',
+          `${command}: COMPOSE_PROJECT_NAME не задан — команда для шагов lifecycle и gates попытки облегчённого режима (имя проекта задаёт harness)`,
+        );
+      const options = {
+        env: process.env,
+        cwd: process.cwd(),
+        ...(files ? { files } : {}),
+        ...(wait !== undefined ? { waitTimeoutS: wait } : {}),
+        // Журналы сервисов маскируются значениями объявленных секретов шага
+        // (`HARNESS_SECRET_NAMES` задаёт controller, ревью 2) и переменных с
+        // секретным именем; маска — по полному тексту, до обрезки.
+        redact: redactor(
+          Object.entries(process.env)
+            .filter(
+              (e): e is [string, string] =>
+                typeof e[1] === 'string' &&
+                e[1].length > 0 &&
+                ((process.env.HARNESS_SECRET_NAMES ?? '').split(',').includes(e[0]) ||
+                  (/TOKEN|SECRET|PASSWORD|PASSWD|KEY|CREDENTIAL|_URL$/i.test(e[0]) &&
+                    e[1].length >= 4)),
+            )
+            .map(([, value]) => value),
+        ),
+      };
+      if (command === 'env-down') return { command, data: await composeDown(options) };
+      const data = await composeUp(options);
+      if (data.readiness)
+        process.stderr.write(
+          `env-up: стек ${data.project} не готов: ${data.readiness.error}\n` +
+            data.readiness.services
+              .map((s) => `  ${s.service}: ${s.state}${s.health ? ' (' + s.health + ')' : ''}`)
+              .join('\n') +
+            '\n' +
+            Object.entries(data.readiness.logs)
+              .map(([svc, log]) => `--- ${svc} (последние строки)\n${log}`)
+              .join('\n') +
+            '\n',
+        );
+      return { command, data, ...(data.ok ? {} : { code: 1 }) };
+    }
+    case 'env-sweep': {
+      const state = need('state');
+      const h = open(state, binding(state), false);
+      try {
+        // Только проекты env-up попыток этого состояния; живость — свежим
+        // чтением прямо перед каждым снятием. Без --yes — только список.
+        // Записи — только из каталогов артефактов известных попыток
+        // (каталог controller), проект — выведенный из попытки и репозитория.
+        const owned = await ownedComposeProjects(
+          h.engine.read((view) =>
+            view.attempts().map((a) => ({ id: a.id, dir: join(state, 'artifacts', a.id) })),
+          ),
+          h.policy.repositories.map((r) => r.id),
+        );
+        return {
+          command,
+          data: await composeSweep({
+            env: process.env,
+            cwd: process.cwd(),
+            owned,
+            alive: (attemptId) =>
+              h.engine.read((view) => view.attempt(attemptId)?.status === 'active'),
+            ...(v.yes ? { confirm: true } : {}),
+          }),
+        };
+      } finally {
+        h.close();
+      }
+    }
+    case 'proposal': {
+      const decision = need('decision');
+      if (decision !== 'accept' && decision !== 'reject')
+        throw new HarnessError('INVALID_INPUT', '--decision: accept | reject', [
+          { path: ['--decision'], message: decision },
+        ]);
+      if (v.by !== undefined && v.by !== 'lead' && v.by !== 'operator')
+        throw new HarnessError('INVALID_INPUT', '--by: lead (по умолчанию) | operator', [
+          { path: ['--by'], message: v.by },
+        ]);
+      const h = open(need('state'), binding(need('state')), true);
+      try {
+        return {
+          command,
+          data: {
+            workId: need('work'),
+            proposal: h.engine.decideProposal(need('work'), need('proposal'), {
+              decision,
+              by: v.by === 'operator' ? 'operator' : 'lead',
+              reason: need('reason'),
+            }),
+          },
+        };
       } finally {
         h.close();
       }

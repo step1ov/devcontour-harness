@@ -499,7 +499,9 @@ test('H1-03: статическая проверка — stop.ts и explain/* н
         // Лист без импортов: русские формы при числе в тексте остановки.
         rel === 'contracts/plural.ts' ||
         // Лист правил «кто принимает решения» (только типы, 0.1.0-alpha.66).
-        rel === 'contracts/decision-rules.ts',
+        rel === 'contracts/decision-rules.ts' ||
+        // Справочник причин отказов (только типы, 0.1.0-alpha.70).
+        rel === 'contracts/failure-catalog.ts',
       `stop.ts достигает ${rel}`,
     );
   }

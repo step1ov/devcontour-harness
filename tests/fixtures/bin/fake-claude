@@ -31,16 +31,24 @@ const schema =
     ? JSON.parse(readFileSync(arg('--output-schema'), 'utf8'))
     : JSON.parse(arg('--json-schema'));
 // Разбор ведущего (ответ с `action`) — отдельная роль сценария `lead`.
+// Второй проход ревью (alpha.70, ответ с `verdicts`) — роль `refuter`; без
+// шагов сценария он подтверждает все находки первого прохода.
 const role = schema?.properties?.approved
   ? 'reviewer'
-  : schema?.properties?.action
-    ? 'lead'
-    : 'writer';
+  : schema?.properties?.verdicts
+    ? 'refuter'
+    : schema?.properties?.action
+      ? 'lead'
+      : 'writer';
 const counterPath = `${scenarioPath}.${runtime}.${role}.count`;
 const index = existsSync(counterPath) ? Number(readFileSync(counterPath, 'utf8')) : 0;
 writeFileSync(counterPath, String(index + 1));
 const steps = scenario[role] ?? scenario[`${runtime}-${role}`];
-const step = Array.isArray(steps) ? steps[Math.min(index, steps.length - 1)] : steps;
+const step =
+  (Array.isArray(steps) ? steps[Math.min(index, steps.length - 1)] : steps) ??
+  (role === 'refuter'
+    ? { result: { summary: 'fixture: all confirmed', verdicts: [], missed: [] } }
+    : undefined);
 if (!step) {
   console.error(`fixture: no ${role} step`);
   process.exit(2);
@@ -105,6 +113,9 @@ for (const [path, text] of Object.entries(step.files ?? {})) {
   mkdirSync(dirname(join(process.cwd(), path)), { recursive: true });
   writeFileSync(join(process.cwd(), path), text);
 }
+// Команда оболочки в рабочем дереве (как исполнитель, который запускает git).
+if (step.shell)
+  execFileSync('/bin/sh', ['-c', step.shell], { cwd: process.cwd(), stdio: 'ignore' });
 // Пустые служебные каталоги, как у настоящего CLI (`.claude/.cc-writes`).
 for (const path of step.dirs ?? [])
   mkdirSync(join(process.cwd(), path), { recursive: true, mode: 0o700 });

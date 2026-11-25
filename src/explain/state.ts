@@ -508,6 +508,20 @@ export function stopInputsIn(
           ...(work.status === 'failed' && failedBeforeWork(kind, attempts)
             ? { preflight: true }
             : {}),
+          ...((last) => {
+            const p = last?.writerSplit
+              ? work.proposals?.find((x) => x.id === last.writerSplit)
+              : undefined;
+            return work.status === 'failed' && kind === 'needs-lead' && last?.writerSplit
+              ? {
+                  writerSplit: {
+                    proposal: last.writerSplit,
+                    parts: p?.parts?.length ?? 0,
+                    ...(p ? { status: p.status } : {}),
+                  },
+                }
+              : {};
+          })(attempts.findLast((a) => a.status !== 'active')),
           ...((last) =>
             work.status === 'failed' && writerBlockedStop(kind, attempts)
               ? {

@@ -297,6 +297,49 @@
               "maxLength": 500,
               "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
             }
+          },
+          "labels": {
+            "minItems": 1,
+            "maxItems": 10,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[a-z0-9][a-z0-9_.-]{0,39}$"
+            }
+          },
+          "criteriaSources": {
+            "maxItems": 30,
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "criterion": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 29
+                },
+                "kind": {
+                  "type": "string",
+                  "enum": [
+                    "brief",
+                    "owner-answer",
+                    "review-finding",
+                    "context"
+                  ]
+                },
+                "ref": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 300
+                }
+              },
+              "required": [
+                "criterion",
+                "kind",
+                "ref"
+              ],
+              "additionalProperties": false
+            }
           }
         },
         "required": [

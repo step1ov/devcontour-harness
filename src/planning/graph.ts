@@ -76,6 +76,15 @@ export function draftToGraph(
         });
       else refs.push({ id: c, digest });
     });
+    // Источник критерия ссылается на существующий критерий (alpha.70).
+    (task.criteriaSources ?? []).forEach((c, k) => {
+      if (c.criterion >= task.acceptance.length)
+        issues.push({
+          code: 'INVALID_INPUT',
+          path: ['tasks', i, 'criteriaSources', k, 'criterion'],
+          message: `Источник ссылается на критерий ${c.criterion}, а критериев ${task.acceptance.length}`,
+        });
+    });
     if (task.scope === 'component' && task.relatedRepositories?.length)
       issues.push({
         code: 'INVALID_INPUT',
@@ -112,6 +121,8 @@ export function draftToGraph(
       context: task.contextPacks ?? [],
       ...(task.kind ? { kind: task.kind } : {}),
       ...(task.gateChanges ? { gateChanges: task.gateChanges } : {}),
+      ...(task.labels ? { labels: task.labels } : {}),
+      ...(task.criteriaSources ? { criteriaSources: task.criteriaSources } : {}),
     };
   });
   const candidate: WorkGraphInput = {

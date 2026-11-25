@@ -99,6 +99,9 @@ test('Изменение каждого поля поручения меняет
     // alpha.67: вид работы и согласованные изменения gates (docs/infra-works.md).
     kind: (o) => (o.kind = 'infra'),
     gateChanges: (o) => (o.gateChanges = ['.harness/acceptance/a.test.mjs']),
+    // alpha.70: метки работы и источники критериев ведущего.
+    labels: (o) => (o.labels = ['security']),
+    criteriaSources: (o) => (o.criteriaSources = [{ criterion: 0, kind: 'brief', ref: '§1' }]),
   };
   const fields = Object.keys(workGraphSchema.shape.orders.element.shape).filter(
     (k) => k !== 'apiVersion',

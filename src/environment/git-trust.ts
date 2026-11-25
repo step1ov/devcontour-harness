@@ -41,6 +41,22 @@ export class UntrustedCheckoutError extends Error {
 const trustedCommon = new Set<string>();
 /** Рабочие деревья, созданные через `worktree add`: путь → содержимое `.git`. */
 const knownWorktrees = new Map<string, string>();
+/**
+ * `config.worktree` каталога git известного дерева (ревью 3): содержимое при
+ * создании или `null` — не было. При `extensions.worktreeConfig` он задаёт
+ * фильтры и `core.worktree` для каждого git хоста в дереве: изменённый —
+ * отказ.
+ */
+const knownWorktreeConfig = new Map<string, string | null>();
+const readOrNull = (path: string): string | null => {
+  try {
+    if (lstatSync(path).isSymbolicLink()) return '\0symlink';
+    // Пустой — как отсутствующий (bubblewrap создаёт его заранее закрытым).
+    return readFileSync(path, 'utf8') || null;
+  } catch {
+    return null;
+  }
+};
 
 const real = (path: string) => {
   try {
@@ -123,6 +139,11 @@ export function assertTrustedCheckout(cwd: string): string | undefined {
       const back = join(gitdir, 'gitdir');
       if (!isFile(back) || real(readFileSync(back, 'utf8').trim()) !== real(dotgit))
         refuse(`${gitdir} не ссылается обратно на ${dotgit}`);
+      if (
+        knownWorktreeConfig.has(dir) &&
+        readOrNull(join(gitdir, 'config.worktree')) !== knownWorktreeConfig.get(dir)
+      )
+        refuse(`${join(gitdir, 'config.worktree')} рабочего дерева изменён после создания`);
       // Дерево, созданное этим процессом, ведёт только в известный репозиторий.
       if (known !== undefined && !trustedCommon.has(common))
         refuse(`общий каталог ${common} не тот, от которого создано дерево`);
@@ -142,7 +163,11 @@ export function assertTrustedCheckout(cwd: string): string | undefined {
 export function rememberWorktree(path: string) {
   const dir = real(path);
   try {
-    knownWorktrees.set(dir, readFileSync(join(dir, '.git'), 'utf8'));
+    const dotgit = readFileSync(join(dir, '.git'), 'utf8');
+    knownWorktrees.set(dir, dotgit);
+    const m = /^gitdir: (.+)$/m.exec(dotgit);
+    if (m)
+      knownWorktreeConfig.set(dir, readOrNull(join(resolve(dir, m[1]!.trim()), 'config.worktree')));
   } catch {
     /* `worktree add` не создал дерево: git уже сообщил об отказе */
   }
@@ -152,6 +177,7 @@ export function rememberWorktree(path: string) {
 export const worktreeKey = real;
 export function forgetWorktree(key: string) {
   knownWorktrees.delete(key);
+  knownWorktreeConfig.delete(key);
 }
 
 /** Путь, который `git worktree add` получит как каталог дерева. */
@@ -172,4 +198,5 @@ export function worktreeAddPath(args: string[]) {
 export function resetGitTrust() {
   trustedCommon.clear();
   knownWorktrees.clear();
+  knownWorktreeConfig.clear();
 }

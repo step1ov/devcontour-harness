@@ -77,6 +77,11 @@ export const environmentCauses = [
    */
   'writer-environment',
   /**
+   * Исполнитель в начале попытки предложил разделить работу (0.1.0-alpha.70):
+   * класс `needs-lead`, попытка не засчитана, решает ведущий.
+   */
+  'writer-split',
+  /**
    * Toolchain среды: закреплённый `policy.toolchain` не разрешился, либо
    * проверка упала под другим node, чем последний её успешный запуск на базе.
    * О коде это не говорит; попытка не засчитана.
@@ -680,6 +685,9 @@ export const transactionKinds = [
   'run.consumer-checked',
   'run.implementation-basis',
   'run.partial',
+  'proposal.recorded',
+  'proposal.decided',
+  'run.research',
   'run.continuation',
   'run.model',
   'run.timing.started',

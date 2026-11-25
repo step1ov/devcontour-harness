@@ -1956,6 +1956,56 @@
             "reviewer"
           ],
           "additionalProperties": false
+        },
+        "passes": {
+          "anyOf": [
+            {
+              "type": "string",
+              "enum": [
+                "off",
+                "on-reject",
+                "always"
+              ]
+            },
+            {
+              "type": "object",
+              "properties": {
+                "code": {
+                  "type": "string",
+                  "enum": [
+                    "off",
+                    "on-reject",
+                    "always"
+                  ]
+                },
+                "release": {
+                  "type": "string",
+                  "enum": [
+                    "off",
+                    "on-reject",
+                    "always"
+                  ]
+                },
+                "sensitive": {
+                  "type": "string",
+                  "enum": [
+                    "off",
+                    "on-reject",
+                    "always"
+                  ]
+                },
+                "sensitiveLabels": {
+                  "maxItems": 20,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "pattern": "^[a-z0-9][a-z0-9_.-]{0,39}$"
+                  }
+                }
+              },
+              "additionalProperties": false
+            }
+          ]
         }
       },
       "required": [
@@ -2956,6 +3006,14 @@
             "maxLength": 500,
             "pattern": "^(?!\\/)(?!.*[\\\\:*?\\[\\]\\x00])(?!(?:.*\\/)?\\.{1,2}(?:\\/|$))(?=.{1,500}$).+$"
           }
+        },
+        "docs": {
+          "type": "string",
+          "enum": [
+            "required",
+            "advisory",
+            "off"
+          ]
         }
       },
       "additionalProperties": false
