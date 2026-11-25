@@ -536,3 +536,11 @@ harness wait --state <state> --policy <policy> [--until accepted,failed,held,que
 Коды выхода: 0 accepted, 10 release-ready, 11 question, 12 held, 13 failed,
 14 stopped, 15 timeout. `--until` сужает ожидаемые исходы; готовность
 выпуска, остановка и предел времени кончают ожидание всегда.
+
+## Разделы инструкции: `harness guide` (alpha.71)
+
+`harness guide <setup|plan|review|run|recovery|release|relay>` печатает
+раздел инструкции ведущего текстом (`--json` — конвертом с заголовками).
+Источник — `skills/harness/guide/<topic>.md` пакета (тема `relay` — раздел
+«Task source» skill установки); `skills/harness/SKILL.md` — оглавление,
+которое строит `scripts/guide-index.ts`.

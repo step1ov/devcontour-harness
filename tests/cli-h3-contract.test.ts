@@ -96,6 +96,7 @@ const laterCommands: readonly string[] = [
   'env-down',
   'env-sweep',
   // Ожидание значимого события вместо цикла status (0.1.0-alpha.71).
+  'guide',
   'wait',
 ];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
@@ -318,7 +319,7 @@ test('H3-01: capabilities объявлена в договоре CLI — без 
 test('H3-01: ключи sharedOperations = sharedOperationNames — операции в порядке декларации', () => {
   assert.deepEqual(
     [...sharedOperationNames],
-    ['init', 'explain', 'plan-request', 'plan-check', 'capabilities', 'view'],
+    ['init', 'explain', 'plan-request', 'plan-check', 'capabilities', 'view', 'wait'],
   );
   assert.deepEqual(Object.keys(sharedOperations), [...sharedOperationNames]);
   for (const name of Object.keys(cliCommands))
@@ -407,6 +408,7 @@ test('H3-01: API каждой общей операции опубликован
     'plan-check': 'planCheck',
     capabilities: 'harnessCapabilities',
     view: 'harnessView',
+    wait: 'waitFor',
   });
   const exports = root as unknown as Record<string, unknown>;
   for (const c of sharedOperationNames)

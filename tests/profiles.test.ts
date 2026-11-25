@@ -432,21 +432,33 @@ test('Skills и шаблоны: шаблоны проходят validate; инс
     graph: JSON.parse(readFileSync(join(root, 'templates/graph.json'), 'utf8')),
     policy: JSON.parse(readFileSync(join(root, 'templates/policy.json'), 'utf8')),
   });
-  const skill = readFileSync(join(root, 'skills/harness/SKILL.md'), 'utf8');
-  assert.match(skill, /^---\nname: harness\ndescription: .+\n---\n/);
+  // alpha.71 (E3): SKILL.md — оглавление, текст — в разделах `skills/harness/guide/`.
+  const guideFiles = ['setup', 'plan', 'review', 'run', 'recovery', 'release'].map(
+    (t) => `skills/harness/guide/${t}.md`,
+  );
+  const head = readFileSync(join(root, 'skills/harness/SKILL.md'), 'utf8');
+  assert.match(head, /^---\nname: harness\ndescription: .+\n---\n/);
+  const skill = [head, ...guideFiles.map((f) => readFileSync(join(root, f), 'utf8'))].join('\n');
   // Единственное исключение: необязательная панель оператора отдельного skill
   // `harness-ui` в начале долгого запуска — только «если установлен», с
   // текстовым `status --watch` иначе; без неё ничего не отключается.
   const optionalPanel = /If the `harness-ui` skill is installed,[^]*?URL\./;
   assert.match(skill, optionalPanel, 'панель названа только как необязательная');
   assert.match(skill, /Otherwise give them the watch command/);
-  for (const file of ['skills/harness/SKILL.md', 'templates/AGENTS.md']) {
+  for (const file of ['skills/harness/SKILL.md', ...guideFiles, 'templates/AGENTS.md']) {
     const text = readFileSync(join(root, file), 'utf8')
       .replace(optionalPanel, '')
-      .replaceAll('devcontour-harness', '');
+      .replaceAll('devcontour-harness', '')
+      // Тема `guide relay` — раздел skill установки, не текст этого skill.
+      .replaceAll('$H guide relay', '');
     assert.doesNotMatch(text, /devcontour|relay|панел|памят|\bmemory\b|\bmcp\b|panel/i, file);
-    assert.match(text, /enforce|checked by the harness/i, file + ': проверки принадлежат harness');
   }
+  for (const file of ['skills/harness/SKILL.md', 'templates/AGENTS.md'])
+    assert.match(
+      readFileSync(join(root, file), 'utf8'),
+      /enforce|checked by the harness/i,
+      file + ': проверки принадлежат harness',
+    );
   // Skill установки называет Relay как источник задач пакета, остальное — то же правило.
   const setup = readFileSync(join(root, 'skills/harness-setup/SKILL.md'), 'utf8').replaceAll(
     'devcontour-harness',
@@ -514,9 +526,14 @@ test('S2.5: исполнение не читает skills, шаблоны и п�
           ? [join(dir, e.name)]
           : [],
     );
+  // Исключение — `harness guide` (alpha.71): печатает разделы skill по
+  // просьбе ведущего; исполнение его не вызывает.
   for (const file of sources(join(root, 'src'))) {
     const text = readFileSync(file, 'utf8');
-    assert.doesNotMatch(text, /['"`/]skills\/|['"`/]templates\//, file);
+    if (!file.endsWith(join('guide', 'guide.ts')))
+      assert.doesNotMatch(text, /['"`/]skills\/|['"`/]templates\//, file);
+    if (!file.endsWith(join('src', 'cli.ts')))
+      assert.doesNotMatch(text, /guide\/guide\.ts'/, file + ': guide зовёт только CLI');
     if (!file.endsWith(join('profiles', 'resolve.ts')))
       assert.doesNotMatch(text, /\.\.\/\.\.\/profiles\//, file);
   }

@@ -126,7 +126,14 @@ import { leadOutline } from './control/outline.ts';
 import { parseDurationFlag } from './control/duration.ts';
 import { readyNotRunning } from './control/lead-end-warning.ts';
 import { briefMissingLine } from './control/review-release.ts';
-import { WAIT_EXIT_CODES, waitFor, waitKinds, type WaitKind } from './control/wait.ts';
+import {
+  WAIT_EXIT_CODES,
+  waitFor,
+  waitKinds,
+  type WaitData,
+  type WaitKind,
+} from './control/wait.ts';
+import { guideSection } from './guide/guide.ts';
 import { recordGatesRun } from './control/release-gates.ts';
 
 const usage = `harness ${HARNESS_VERSION}
@@ -490,6 +497,8 @@ const options = {
   since: { type: 'string' },
   until: { type: 'string' },
   timeout: { type: 'string' },
+  topic: { type: 'string' },
+  json: { type: 'boolean' },
   'as-of': { type: 'string' },
   format: { type: 'string' },
   'no-titles': { type: 'boolean' },
@@ -560,7 +569,9 @@ const flagOwners = {
   lead: ['init'],
   review: ['init'],
   model: ['init'],
-  human: ['init', 'lean', 'status', 'explain', 'plan-request', 'gates', 'smoke', 'update'],
+  human: ['init', 'lean', 'status', 'explain', 'plan-request', 'gates', 'smoke', 'update', 'wait'],
+  topic: ['guide'],
+  json: ['guide'],
   draft: ['plan-check'],
   basis: ['plan-check'],
   brief: ['plan-request', 'plan-check'],
@@ -652,6 +663,14 @@ const presenters: Partial<Record<CliCommand, (data: never) => string>> = {
   gates: gatesText,
   smoke: smokeText,
   update: updateText,
+  wait: (d: WaitData) =>
+    [
+      `${d.kind}${d.workId ? ` ${d.workId}` : ''}${d.event ? ` (${d.event.type} #${d.event.seq})` : ''}`,
+      d.next ? `дальше: ${d.next.actor ?? '—'} ${d.next.action}: ${d.next.message}` : '',
+      d.status,
+    ]
+      .filter(Boolean)
+      .join('\n') + '\n',
 };
 
 /**
@@ -1191,6 +1210,7 @@ async function run(
     'status',
     'events',
     'wait',
+    'guide',
     'result',
     'view',
     'report',
@@ -1424,6 +1444,17 @@ async function run(
       } finally {
         h.close();
       }
+    }
+    case 'guide': {
+      // Раздел инструкции ведущего (alpha.71, E3): текст без конверта; --json — конверт.
+      const section = guideSection(need('topic'));
+      const data = {
+        topic: section.topic,
+        title: section.title,
+        headings: section.headings,
+        text: section.text,
+      };
+      return { command, data, ...(v.json ? {} : { text: section.text }) };
     }
     case 'wait': {
       // Ожидание события (alpha.71, E1): журнал событий на чтение, без опроса controller.
@@ -2689,6 +2720,8 @@ function leadAlias(args: string[]): string[] {
   if (a === 'lead' && b === 'note') return ['lead-note', ...lifted('--text')];
   if (a === 'lead' && b === 'outline') return ['lead-outline', ...rest];
   if (a === 'release' && b === 'done') return ['release-done', ...lifted('--summary')];
+  if (a === 'guide' && b !== undefined && !b.startsWith('--'))
+    return ['guide', '--topic', b, ...rest];
   return args;
 }
 
