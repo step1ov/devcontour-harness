@@ -519,6 +519,13 @@ id>"]`. The hypothesis is required for `coverage` and `approach` and must be
 new for the work. The next attempt gets the cause and the hypothesis in its
 prompt; then `$H retry --work <id>` or `$H run` continues.
 
+**The same defect twice in a row.** When two consecutive counted failures
+have the same failure fingerprint or the same blocking review finding, the
+work is held for your diagnosis whatever `diagnoseAfter` says, harness does
+not retry it on its own, and the diagnosis needs a `--hypothesis`. The next
+attempt starts from a clean tree instead of continuing the failed patch, so
+name what it does differently.
+
 Found a second cause of the same failure after you diagnosed it (for example,
 a cleanup error in the test masks the original failure)? Add it to the fresh
 diagnosis instead of re-registering the graph or writing an instruction into
@@ -537,7 +544,8 @@ on the same order.
 **Attempts exhausted (`ATTEMPTS_EXHAUSTED`).** If `explain` says `actor:
 lead`, it is yours: with `diagnose`, diagnose the last failure first; with
 `reset-attempts`, a fresh technical diagnosis exists (`coverage`, `approach`,
-or `other` with a hypothesis) and you grant a new attempt limit yourself:
+`other` with a hypothesis, or `environment` with evidence) and you grant a
+new attempt limit yourself:
 `$H retry --state D --work <id> --reset --by lead --diagnosis <D…>`. You may
 do this `recovery.leadResets` times per work budget (default 2), only after a
 new failure and a new hypothesis, and only while the work budget is not
@@ -547,6 +555,16 @@ the cause is not technical, the diagnosis was already used, or the rule is
 `user` — hand it to the human with the message and your diagnosis as
 evidence. Never call `retry --reset` without `--by lead` yourself: that
 records a human decision.
+
+Attempts eaten by the environment (owner decision P8-4(b), alpha.71) are
+yours too. Examples: a Docker pull EOF, a registry timeout, the uncounted
+failure limit («исчерпан предел незасчитанных отказов»). Fix the
+environment and prove it with `$H smoke --writer-probe` (or
+`lifecyclePreflight`). Then diagnose `--cause environment --evidence "<what
+passed after the failure>"` and reset with `--by lead --diagnosis <D…>`. Do
+not ask the owner. It counts against `recovery.leadResets` like any lead
+reset. A gate that is held for its own definition (`ps`, a signal, a browser
+in the OS sandbox, `gate-definition`) is not this case: fix the gate.
 
 **Writer stopped on the environment (`APPROVAL_REQUIRED`, `cause:
 needs-lead`, `actor: lead`, `diagnose-failure`).** The writer reported that
@@ -559,6 +577,16 @@ context, a harness gate), then `$H retry --work <id>`. Never retry it
 unchanged. The same applies when `explain` says the same testcase failed
 twice in a row before the last attempt: read the gate log (expected and actual), fix the task or its
 context, then retry or split the task.
+
+**A gate tool is missing (`GATE_TOOL_MISSING`, cause `gate-definition`).**
+The gate command could not find its program or browser. Examples:
+`Command "playwright" not found`, `sh: vitest: not found`,
+`Executable doesn't exist … playwright install`. Another case is pnpm
+refusing its task state path. The task change did not touch manifests or
+lockfiles, so this is the gate's or the environment's fault: the attempt is
+not counted, the writer is not retried, and the gate is held. Install the
+tool or browser, or fix the gate command, then `$H retry --work <id> --by
+lead`. When the change did touch manifests, it stays a counted gate failure.
 
 **A gate needs `ps` (`GATE_SANDBOX_PROCESS_LIST`, cause
 `sandbox-process-list`).** The gate ran `ps`, `pgrep` or `top` inside the OS
