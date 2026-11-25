@@ -202,6 +202,16 @@ export async function toolMissingVerdict(input: {
         held: false,
         why: `изменение задачи трогает ${touched}, через который gate зовёт инструмент`,
       };
+    // Код отказа менеджера пакетов (ревью final L1): не напечатало ли его
+    // само изменение (тест, который выводит ту же строку и падает).
+    if (tool.code && input.addedCalls) {
+      const added = await input.addedCalls((line) => line.includes(tool.code!));
+      if (added.length)
+        return {
+          held: false,
+          why: `изменение задачи добавило строку с ${tool.code} (${added.join(', ')})`,
+        };
+    }
     if (tool.name && input.addedCalls) {
       const name = posix.basename(tool.name);
       const word = new RegExp(`(^|[^\\w.-])${escape(name)}($|[^\\w.-])`);

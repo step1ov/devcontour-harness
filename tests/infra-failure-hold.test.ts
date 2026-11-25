@@ -16,10 +16,11 @@ import {
   gateBinaries,
   toolMissingFailure,
   toolMissingLine,
+  toolMissingVerdict,
 } from '../src/verification/gate-tooling.ts';
 import { approve, implement, runAll, setup } from './runner-fixture.ts';
 import { gateHoldLine } from '../src/projections/gate-hold.ts';
-import { nodeGate } from './git-fixture.ts';
+import { nodeGate, repo, write } from './git-fixture.ts';
 
 test('toolMissing: pnpm «Command not found», sh, spawn ENOENT, браузер Playwright, pnpm state path; провал кода — нет', () => {
   for (const text of [
@@ -235,4 +236,35 @@ test('ревью B2 M3: программы gate — argv[0], цель exec и п
     'maestro',
   ]);
   assert.deepEqual(gateBinaries({ command: ['node', 'x.js'] }, scripts), ['node']);
+});
+
+test('ревью final L1: отказ pnpm по каталогу состояния не удерживается, если строку кода добавило само изменение', async () => {
+  const r = repo({ 'package.json': '{"name":"app"}\n', 'README.md': 'app\n' });
+  const base = r.git('rev-parse', 'HEAD');
+  write(r.dir, {
+    'test/state.test.js': "console.error('[ERR_PNPM_UNSAFE_TASK_RUN_STATE_PATH] x');\n",
+  });
+  r.git('add', '-A');
+  r.git('commit', '-qm', 'test prints the pnpm code');
+  const sha = r.git('rev-parse', 'HEAD');
+  const verdict = (addedLine: string | undefined) =>
+    toolMissingVerdict({
+      tool: {
+        line: '[ERR_PNPM_UNSAFE_TASK_RUN_STATE_PATH] Refusing',
+        code: 'ERR_PNPM_UNSAFE_TASK_RUN_STATE_PATH',
+      },
+      gate: { command: ['pnpm', 'test'] },
+      cwd: r.dir,
+      gateCwd: r.dir,
+      base,
+      sha,
+      probe: () => Promise.resolve(0),
+      addedCalls: (isCall) =>
+        Promise.resolve(addedLine !== undefined && isCall(addedLine) ? ['test/state.test.js'] : []),
+    });
+  const printed = await verdict("console.error('[ERR_PNPM_UNSAFE_TASK_RUN_STATE_PATH] x');");
+  assert.equal(printed.held, false, printed.why);
+  assert.match(printed.why, /добавило строку с ERR_PNPM_UNSAFE_TASK_RUN_STATE_PATH/);
+  const env = await verdict(undefined);
+  assert.equal(env.held, true, 'строку напечатал pnpm, а не код задачи');
 });
