@@ -381,23 +381,40 @@
                       }
                     },
                     "when": {
-                      "type": "object",
-                      "properties": {
-                        "paths": {
-                          "minItems": 1,
-                          "maxItems": 64,
-                          "type": "array",
-                          "items": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 200
-                          }
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "paths": {
+                              "minItems": 1,
+                              "maxItems": 64,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 200
+                              }
+                            }
+                          },
+                          "required": [
+                            "paths"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "always": {
+                              "type": "boolean",
+                              "const": true
+                            }
+                          },
+                          "required": [
+                            "always"
+                          ],
+                          "additionalProperties": false
                         }
-                      },
-                      "required": [
-                        "paths"
-                      ],
-                      "additionalProperties": false
+                      ]
                     },
                     "ui": {
                       "oneOf": [
@@ -681,23 +698,40 @@
                       }
                     },
                     "when": {
-                      "type": "object",
-                      "properties": {
-                        "paths": {
-                          "minItems": 1,
-                          "maxItems": 64,
-                          "type": "array",
-                          "items": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": 200
-                          }
+                      "anyOf": [
+                        {
+                          "type": "object",
+                          "properties": {
+                            "paths": {
+                              "minItems": 1,
+                              "maxItems": 64,
+                              "type": "array",
+                              "items": {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": 200
+                              }
+                            }
+                          },
+                          "required": [
+                            "paths"
+                          ],
+                          "additionalProperties": false
+                        },
+                        {
+                          "type": "object",
+                          "properties": {
+                            "always": {
+                              "type": "boolean",
+                              "const": true
+                            }
+                          },
+                          "required": [
+                            "always"
+                          ],
+                          "additionalProperties": false
                         }
-                      },
-                      "required": [
-                        "paths"
-                      ],
-                      "additionalProperties": false
+                      ]
                     },
                     "ui": {
                       "oneOf": [
@@ -2820,7 +2854,21 @@
     },
     "integrationReuse": {
       "type": "string",
-      "const": "identical-tree"
+      "enum": [
+        "identical-tree",
+        "off"
+      ]
+    },
+    "derivedApplicability": {
+      "type": "string",
+      "enum": [
+        "on",
+        "off"
+      ]
+    },
+    "trustDerivedRecords": {
+      "type": "boolean",
+      "const": true
     },
     "lifecyclePreflight": {
       "type": "string",

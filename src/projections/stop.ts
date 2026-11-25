@@ -817,7 +817,9 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
       case 'timeout':
       case 'stalled':
         // Gate зовёт ps в песочнице ОС: повтор не поможет, правит ведущий.
-        if (kind === 'environment' && work.environmentCause) {
+        // Предел незасчитанных отказов исчерпан и без такой причины
+        // (alpha.71, P8-4(b)): ход по исчерпанию из того же правила.
+        if (kind === 'environment' && (work.environmentCause || work.retryRoute?.limit)) {
           // Предел незасчитанных отказов исчерпан: простой повтор ведущего
           // движок отклонит — ход по исчерпанию из того же правила.
           const route = work.retryRoute;
@@ -836,15 +838,16 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
               cause: kind,
               phase: 'claim',
               note:
-                `${NO_RETRY_ENVIRONMENT_EXPLAIN[work.environmentCause]} У работы ${route.limit.ru}: ` +
+                `${work.environmentCause ? NO_RETRY_ENVIRONMENT_EXPLAIN[work.environmentCause] : 'Попытки работы съели отказы окружения; после исправления окружения ведущий разбирает их причиной environment с доказательством (harness diagnose --cause environment --evidence …) и сбрасывает попытки сам.'} У работы ${route.limit.ru}: ` +
                 `${route.actor === 'user' ? 'сброс — решение человека с причиной' : 'ход ведущего'} — ${route.command}.`,
             };
-          return {
-            ...ruleOutcome('environment-gate-command'),
-            cause: kind,
-            phase,
-            note: NO_RETRY_ENVIRONMENT_EXPLAIN[work.environmentCause],
-          };
+          if (work.environmentCause)
+            return {
+              ...ruleOutcome('environment-gate-command'),
+              cause: kind,
+              phase,
+              note: NO_RETRY_ENVIRONMENT_EXPLAIN[work.environmentCause],
+            };
         }
         return {
           code: 'RUNTIME_UNAVAILABLE',

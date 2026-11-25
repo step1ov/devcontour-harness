@@ -224,7 +224,11 @@ export {
 export { requirementProof, uncoveredGates, unprovenReason } from './verification/proof.ts';
 export {
   changedPaths,
+  conditionalGate,
   coverageChanges,
+  derivationAllowed,
+  derivedRecordChecks,
+  explicitCondition,
   gateBasis,
   gateDecisions,
   gatePathRegExp,
@@ -234,10 +238,18 @@ export {
   proofGates,
   providerMovement,
   type ChangedPaths,
+  type GateCondition,
   type GateDecision,
   type PathDecision,
   type ProviderSnapshot,
 } from './verification/applicability.ts';
+export {
+  packageBinding,
+  packageClosure,
+  workspaceGraphAt,
+  type PackageSelector,
+  type WorkspacePackage,
+} from './verification/workspace-graph.ts';
 export {
   reusedEvidenceProblem,
   type ReuseCheck,
@@ -414,3 +426,11 @@ export {
 } from './explain/state.ts';
 export * from './planning/index.ts';
 export * from './catalog/index.ts';
+
+export {
+  waitFor,
+  waitKinds,
+  WAIT_EXIT_CODES,
+  type WaitData,
+  type WaitKind,
+} from './control/wait.ts';

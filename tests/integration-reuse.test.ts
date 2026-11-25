@@ -176,7 +176,13 @@ test('integrationReuse: target не сдвинулся — каждый gate и�
     order: v.work('add-greeting')!.order,
   }));
   assert.deepEqual(runResultSchema.parse(JSON.parse(JSON.stringify(result))), result);
-  assert.ok(result.evidence.filter((e) => e.reusedEvidence).length === 2);
+  assert.ok(result.evidence.filter((e) => e.kind === 'test' && e.reusedEvidence).length === 2);
+  // Ревью интеграции того же дерева перенесено из кандидата (alpha.71).
+  assert.ok(
+    result.evidence.some(
+      (e) => e.kind === 'review' && e.phase === 'integration' && e.reusedEvidence,
+    ),
+  );
   const context: ReceiverContext = {
     order,
     graphId: graph.id,
@@ -239,7 +245,7 @@ test('integrationReuse: target не сдвинулся — каждый gate и�
     forged((r) => {
       const review = r.evidence.find((e: any) => e.kind === 'review' && e.phase === 'candidate');
       review.reusedEvidence = reused(r).reusedEvidence;
-    }).some((p) => /взятой из кандидата бывает только запись test интеграции/.test(p)),
+    }).some((p) => /взятой из кандидата бывает только запись test или ревью интеграции/.test(p)),
   );
   ctx.store.close();
 });
@@ -349,7 +355,8 @@ test('integrationReuse: предпосылка исполняемого gate и�
   );
   assert.equal(runs.count('unit'), 2);
   assert.equal(runs.count('lint'), 2, 'предпосылка исполняемого gate не переносится');
-  assert.ok(attemptOf(ctx).evidence.every((e) => !e.reusedEvidence));
+  // Gates исполнены; ревью того же дерева перенесено из кандидата (alpha.71).
+  assert.ok(attemptOf(ctx).evidence.every((e) => e.kind === 'review' || !e.reusedEvidence));
   ctx.store.close();
 });
 

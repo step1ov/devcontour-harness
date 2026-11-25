@@ -115,6 +115,7 @@ import {
   leadCommandEntry,
   leadEnd,
   leadNote,
+  leadRenew,
   leadCommandActor,
   leadSessionOpen,
   leadTtlMs,
@@ -125,6 +126,16 @@ import {
 import { leadOutline } from './control/outline.ts';
 import { parseDurationFlag } from './control/duration.ts';
 import { readyNotRunning } from './control/lead-end-warning.ts';
+import { briefMissingLine } from './control/review-release.ts';
+import {
+  WAIT_EXIT_CODES,
+  waitFor,
+  waitKinds,
+  type WaitData,
+  type WaitKind,
+} from './control/wait.ts';
+import { guideSection } from './guide/guide.ts';
+import { recordGatesRun } from './control/release-gates.ts';
 
 const usage = `harness ${HARNESS_VERSION}
 
@@ -486,6 +497,9 @@ const options = {
   detail: { type: 'boolean' },
   since: { type: 'string' },
   until: { type: 'string' },
+  timeout: { type: 'string' },
+  topic: { type: 'string' },
+  json: { type: 'boolean' },
   'as-of': { type: 'string' },
   format: { type: 'string' },
   'no-titles': { type: 'boolean' },
@@ -556,7 +570,9 @@ const flagOwners = {
   lead: ['init'],
   review: ['init'],
   model: ['init'],
-  human: ['init', 'lean', 'status', 'explain', 'plan-request', 'gates', 'smoke', 'update'],
+  human: ['init', 'lean', 'status', 'explain', 'plan-request', 'gates', 'smoke', 'update', 'wait'],
+  topic: ['guide'],
+  json: ['guide'],
   draft: ['plan-check'],
   basis: ['plan-check'],
   brief: ['plan-request', 'plan-check'],
@@ -567,7 +583,8 @@ const flagOwners = {
   'probe-sandbox': ['doctor'],
   detail: ['status'],
   since: ['report'],
-  until: ['report'],
+  until: ['report', 'wait'],
+  timeout: ['wait'],
   'as-of': ['report'],
   format: ['report', 'handoff'],
   'no-titles': ['report', 'view'],
@@ -647,6 +664,14 @@ const presenters: Partial<Record<CliCommand, (data: never) => string>> = {
   gates: gatesText,
   smoke: smokeText,
   update: updateText,
+  wait: (d: WaitData) =>
+    [
+      `${d.kind}${d.workId ? ` ${d.workId}` : ''}${d.event ? ` (${d.event.type} #${d.event.seq})` : ''}; cursor ${d.cursor}`,
+      d.next ? `дальше: ${d.next.actor ?? '—'} ${d.next.action}: ${d.next.message}` : '',
+      d.status,
+    ]
+      .filter(Boolean)
+      .join('\n') + '\n',
 };
 
 /**
@@ -1185,6 +1210,8 @@ async function run(
   const readOnly = [
     'status',
     'events',
+    'wait',
+    'guide',
     'result',
     'view',
     'report',
@@ -1398,9 +1425,21 @@ async function run(
       const h = open(need('state'), b, false);
       try {
         const { graph, ctx } = await graphAndContext();
+        // Постановка графа (`<граф>.brief.md` рядом с графом, alpha.71 A1) —
+        // в состояние, когда run принял граф (ревью A1 L3): её читает договор выпуска.
+        const briefPath = v.graph
+          ? need('graph').replace(/(\.draft)?\.json$/, '.brief.md')
+          : undefined;
+        const brief =
+          briefPath && briefPath !== need('graph') && existsSync(briefPath)
+            ? readFileSync(briefPath, 'utf8')
+            : undefined;
         const sink = sinkOf(v.sink, h, b.baseDir);
         const data = await h.run({
           graph,
+          ...(brief !== undefined
+            ? { onRegistered: (id: string) => void h.engine.recordBrief(id, brief) }
+            : {}),
           author: parseWith(authorSchema, v.author ?? 'external', 'author'),
           ...(ctx ? { context: ctx } : {}),
           ...(sink ? { sink } : {}),
@@ -1410,6 +1449,78 @@ async function run(
         return { command, data, code: failed ? runExit(h, data.works) : exitCodes.ok };
       } finally {
         h.close();
+      }
+    }
+    case 'guide': {
+      // Раздел инструкции ведущего (alpha.71, E3): текст без конверта; --json — конверт.
+      const section = guideSection(need('topic'));
+      const data = {
+        topic: section.topic,
+        title: section.title,
+        headings: section.headings,
+        text: section.text,
+      };
+      return { command, data, ...(v.json ? {} : { text: section.text }) };
+    }
+    case 'wait': {
+      // Ожидание события (alpha.71, E1): журнал событий на чтение, без опроса controller.
+      const state = need('state');
+      const b = loadPolicy(need('policy'));
+      const until = (v.until ?? '')
+        .split(',')
+        .map((k) => k.trim())
+        .filter(Boolean);
+      const unknown = until.filter((k) => !(waitKinds as readonly string[]).includes(k));
+      if (unknown.length)
+        throw new HarnessError(
+          'INVALID_INPUT',
+          `--until: ожидается ${waitKinds.join(', ')}; неизвестно: ${unknown.join(', ')}`,
+          [{ path: ['--until'], message: unknown.join(',') }],
+        );
+      const timeoutMs =
+        v.timeout === undefined
+          ? 30 * 60_000
+          : parseDurationFlag('timeout', v.timeout, { minMs: 1000, maxMs: 24 * 3_600_000 });
+      const after =
+        v.after === undefined
+          ? undefined
+          : /^\d+$/.test(v.after)
+            ? Number(v.after)
+            : (() => {
+                throw new HarnessError(
+                  'INVALID_INPUT',
+                  '--after: номер события (cursor прошлого wait)',
+                  [{ path: ['--after'], message: v.after }],
+                );
+              })();
+      const abort = new AbortController();
+      const stop = () => abort.abort(new Error('Ожидание прервано сигналом'));
+      process.once('SIGINT', stop);
+      process.once('SIGTERM', stop);
+      try {
+        const data = await waitFor({
+          stateDir: state,
+          policy: b.policy,
+          baseDir: b.baseDir,
+          ...(until.length ? { until: until as WaitKind[] } : {}),
+          ...(after !== undefined ? { after } : {}),
+          timeoutMs,
+          signal: abort.signal,
+          // Ожидание ведущего продлевает его активную сессию (ревью D/E LOW-3).
+          onTick: () => {
+            if (!existsSync(bindingFile(state))) return;
+            const h = open(state, binding(state), false);
+            try {
+              leadRenew(h.engine);
+            } finally {
+              h.close();
+            }
+          },
+        });
+        return { command, data, code: WAIT_EXIT_CODES[data.kind] };
+      } finally {
+        process.off('SIGINT', stop);
+        process.off('SIGTERM', stop);
       }
     }
     case 'status':
@@ -2166,6 +2277,17 @@ async function run(
           onEvidence: (e) =>
             process.stderr.write(`harness gates: ${e.gate} ${e.passed ? 'passed' : 'failed'}\n`),
         });
+        // Прогон — в состояние (ревью B2 M4): страховка выпуска засчитывает
+        // только записанный прогон с основанием каждого gate. Нет базы
+        // состояния (проверка до первого run) — записывать некуда.
+        if (!data.interrupted && existsSync(join(resolve(state), 'state.sqlite'))) {
+          const h = open(state, b, false);
+          try {
+            recordGatesRun(h.engine, b.policy, data);
+          } finally {
+            h.close();
+          }
+        }
         // Прерывание — отказ CANCELLED; исход каждого gate — в issues.
         if (data.interrupted)
           throw new HarnessError(
@@ -2232,11 +2354,12 @@ async function run(
           ...optional('role', v.role),
           ...optional('author', author),
           ...optional('repositoryId', v.repository),
-          signal: AbortSignal.any([
-            abort.signal,
-            AbortSignal.timeout(b.policy.runTimeoutMs + 5000),
-          ]),
+          // Пределы шагов (прогон gates и reviewer) — свои у каждого (ревью final M3).
+          signal: abort.signal,
         });
+        // Постановки выпуска нет (alpha.71, A1): заметка в stderr, ответ прежний.
+        const missing = h.engine.read((view) => briefMissingLine(view));
+        if (missing) process.stderr.write(`harness: ${missing}\n`);
         return { command, data: record, code: record.approved ? 0 : exitCodes.refused };
       } finally {
         process.off('SIGINT', stop);
@@ -2624,6 +2747,8 @@ function leadAlias(args: string[]): string[] {
   if (a === 'lead' && b === 'note') return ['lead-note', ...lifted('--text')];
   if (a === 'lead' && b === 'outline') return ['lead-outline', ...rest];
   if (a === 'release' && b === 'done') return ['release-done', ...lifted('--summary')];
+  if (a === 'guide' && b !== undefined && !b.startsWith('--'))
+    return ['guide', '--topic', b, ...rest];
   return args;
 }
 

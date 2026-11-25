@@ -8,9 +8,11 @@ export type OutlineSize = (typeof OUTLINE_SIZES)[number];
 
 /**
  * Размер → объём в задачах (единица объёма прогноза — одна работа harness):
- * S — 1 задача, M — 2, L — 4. Явное `tasks` у компонента главнее размера.
+ * S — 1 задача, M — 1–2 (прогноз считает 2), L — 2–3 (прогноз считает 3;
+ * alpha.71, D1: работа — связный сценарий, крупнее прежнего). Явное `tasks`
+ * у компонента главнее размера.
  */
-export const OUTLINE_SIZE_UNITS: Readonly<Record<OutlineSize, number>> = { S: 1, M: 2, L: 4 };
+export const OUTLINE_SIZE_UNITS: Readonly<Record<OutlineSize, number>> = { S: 1, M: 2, L: 3 };
 
 /** Вид этапа выпуска. */
 export const OUTLINE_STAGE_KINDS = ['infra', 'product', 'deploy', 'other'] as const;

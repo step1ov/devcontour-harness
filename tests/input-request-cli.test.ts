@@ -249,8 +249,9 @@ test('H02 CLI: вопрос → ответ → снимок → review-plan → 
   assert.equal(second.json.data.works[0].status, 'done');
   assert.equal(
     p.reviews() - reviewsBefore,
-    3,
-    'ревью плана и два ревью кода, без повторного ревью плана',
+    // Ревью интеграции того же дерева перенесено из кандидата (alpha.71).
+    2,
+    'ревью плана и ревью кода кандидата, без повторного ревью плана',
   );
   const prompt = readFileSync(`${p.scenario}.writer.1.prompt`, 'utf8');
   assert.match(prompt, /Use exactly Hello, <name>!/);

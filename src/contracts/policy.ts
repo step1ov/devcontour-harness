@@ -166,11 +166,17 @@ const gatePathPattern = z
  * Условие применимости gate задачи: gate исполняется, только когда настоящий
  * diff фазы (из Git, не заявление исполнителя) задевает один из путей или
  * неявный вход gate; иначе пишется запись `not-applicable`, которая не PASS.
+ * `{ always: true }` (alpha.71) — gate исполняется всегда: отказ от
+ * применимости по умолчанию для gate пакета workspace (`packageBinding`).
  * Необязательное поле без умолчания: политика без него сохраняет digest.
  */
-export const gateWhenSchema = z.strictObject({
-  paths: z.array(gatePathPattern).min(1).max(64),
-});
+export const gateWhenSchema = z.union([
+  z.strictObject({ paths: z.array(gatePathPattern).min(1).max(64) }),
+  z.strictObject({ always: z.literal(true) }),
+]);
+/** Явные `when.paths` gate, или undefined (нет `when` или `when.always`). */
+export const whenPaths = (gate: { when?: z.infer<typeof gateWhenSchema> | undefined }) =>
+  gate.when && 'paths' in gate.when ? gate.when.paths : undefined;
 const gateWhen = gateWhenSchema.optional();
 export const gateSchema = z.discriminatedUnion('kind', [
   z.strictObject({
@@ -571,19 +577,37 @@ export const executionPolicySchema = z.strictObject({
     })
     .optional(),
   /**
-   * Перенос evidence кандидата на интеграцию (opt-in). `identical-tree`: если
-   * дерево integration-коммита равно дереву кандидата, а политика, версия
-   * движка и снимок провайдеров не сдвинулись, gate, прошедший на кандидате,
-   * на интеграции не исполняется — пишется запись PASS со ссылкой на запись
-   * кандидата (`reusedEvidence`). Доказательства (требования, свойства,
-   * договоры) и gates с `artifacts` исполняются всегда. Нет поля — каждый
-   * gate исполняется на интеграции; умолчание не подставляется, digest
-   * прежних политик не меняется. Поле входит в `executionDigest`. Хост,
-   * который ведёт попытки сам, должен объявить поддержку
-   * (`ExecutionHost.capabilities.integrationReuse`), иначе движок с такой
-   * политикой не создаётся.
+   * Перенос evidence кандидата на интеграцию. `identical-tree`: если дерево
+   * integration-коммита равно дереву кандидата, а политика, версия движка и
+   * снимок провайдеров не сдвинулись, gate, прошедший на кандидате, на
+   * интеграции не исполняется — пишется запись PASS со ссылкой на запись
+   * кандидата (`reusedEvidence`); с alpha.71 так же переносится PASS ревью
+   * кандидата (второе ревью того же дерева не вызывается). Доказательства
+   * (требования, свойства, договоры) и gates с `artifacts` исполняются
+   * всегда. `off` — каждый gate и ревью исполняются на интеграции.
+   *
+   * Нет поля (alpha.71): в облегчённом режиме — `identical-tree`, если хост
+   * объявил поддержку (`ExecutionHost.capabilities.integrationReuse`), иначе
+   * и в строгом режиме — `off` (`integrationReuseOn`). Умолчание в политику
+   * не подставляется: digest прежних политик не меняется. Поле входит в
+   * `executionDigest`. Явное `identical-tree` под хостом без поддержки —
+   * отказ создания движка (`integrationReuseProblem`).
    */
-  integrationReuse: z.literal('identical-tree').optional(),
+  integrationReuse: z.enum(['identical-tree', 'off']).optional(),
+  /**
+   * Применимость по умолчанию gates пакетов workspace (alpha.71,
+   * `derivationAllowed`): `on` — gate пакета без `when` не исполняется, когда
+   * diff не задел пакет, его зависимости и неявные входы; `off` — каждый
+   * такой gate исполняется. Нет поля — `on` в облегчённом режиме, `off` в
+   * строгом (`derivedApplicabilityOn`).
+   */
+  derivedApplicability: z.enum(['on', 'off']).optional(),
+  /**
+   * Получатель результата засчитывает записи применимости по умолчанию
+   * (`notApplicable.derived`) на слово исполнителя, без сверки Git
+   * (`derivedRecordChecks`). Нет поля — без сверки такая запись не PASS.
+   */
+  trustDerivedRecords: z.literal(true).optional(),
   /**
    * Проверка окружения перед `run` (opt-in). `cached`: до ревью плана и
    * первой попытки controller поднимает окружение каждого репозитория с
@@ -725,6 +749,35 @@ export const executionDigest = (policy: ExecutionPolicy) =>
     // Второй проход ревью (alpha.70) — надзор ревью, не условие исполнения.
     review: { ...policy.review, passes: undefined },
   });
+
+/**
+ * Переносит ли интеграция PASS кандидата при том же дереве (gates и ревью):
+ * явное `identical-tree` — да, явное `off` — нет; без поля — да в облегчённом
+ * режиме, если хост объявил поддержку; у получателя (`host` не передан) —
+ * только при явном `harnessMode: light` его политики (alpha.71).
+ */
+export const integrationReuseOn = (
+  policy: {
+    integrationReuse?: 'identical-tree' | 'off' | undefined;
+    harnessMode?: HarnessMode | undefined;
+  },
+  host?: { capabilities?: { integrationReuse?: boolean | undefined } | undefined },
+): boolean =>
+  policy.integrationReuse !== undefined
+    ? policy.integrationReuse === 'identical-tree'
+    : host === undefined
+      ? // Получатель, не знающий режим, перенос не включает (ревью B, L2).
+        policy.harnessMode === 'light'
+      : harnessModeOf(policy) === 'light' && host.capabilities?.integrationReuse === true;
+
+/** Действует ли применимость по умолчанию (alpha.71): явное поле, иначе облегчённый режим. */
+export const derivedApplicabilityOn = (policy: {
+  derivedApplicability?: 'on' | 'off' | undefined;
+  harnessMode?: HarnessMode | undefined;
+}): boolean =>
+  policy.derivedApplicability !== undefined
+    ? policy.derivedApplicability === 'on'
+    : harnessModeOf(policy) === 'light';
 
 /** Действующий режим политики: нет поля — `light` (alpha.69). */
 export const harnessModeOf = (policy: { harnessMode?: HarnessMode | undefined }): HarnessMode =>
@@ -1256,14 +1309,14 @@ export function policyIssues(policy: ExecutionPolicy): Issue[] {
       );
     // Условие путей: хотя бы один test gate исполняется всегда, и генеративный
     // gate условным не бывает (его seed и отчёт свойств — доказательство).
-    else if (!repo.gates.some((g) => g.kind === 'test' && !g.when))
+    else if (!repo.gates.some((g) => g.kind === 'test' && !whenPaths(g)))
       add(
         'INVALID_INPUT',
         ['repositories', r, 'gates'],
         'Нужен хотя бы один test gate без when: все test gates не могут быть условными',
       );
     repo.gates.forEach((g, i) => {
-      if (g.when && g.property)
+      if (whenPaths(g) && g.property)
         add(
           'INVALID_INPUT',
           ['repositories', r, 'gates', i, 'when'],

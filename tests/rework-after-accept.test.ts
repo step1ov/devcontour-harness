@@ -551,7 +551,10 @@ test('P3-1: прогноз выпуска из одной доработанно
   assert.equal(accepted.progress.percent, 95);
   assert.equal(accepted.progress.release?.state, 'code-accepted');
   env.clock.now += 1000;
-  releaseDone(env.engine, { summary: 'Доработка принята, выпуск готов.' });
+  releaseDone(env.engine, {
+    summary: 'Доработка принята, выпуск готов.',
+    fullGates: { app: undefined },
+  });
   const done = viewOf(env).forecast!;
   assert.equal(done.progress.percent, 100);
   assert.equal(done.progress.release?.state, 'done');

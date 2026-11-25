@@ -147,12 +147,57 @@ export const ENVIRONMENT_BLOCK_WRITER_TEXT =
   'Environment blocks: if a step that the project rules (AGENTS.md, skills, templates) make mandatory is blocked by this environment — no network or registry, a local server cannot listen, a tool or browser cannot start, a path is read-only, a source of the task is unreachable — do not stop before coding and do not spend the attempt on probing the toolchain first. Implement the work order first with what you have, run every check you can, and keep your edits in the worktree. The harness gates run acceptance outside your sandbox. Then: if the blocked step was only a self-check and the work is complete, return completed=true and name the unrun step, the exact error and why in the summary. If the blocked step is needed to finish the work and the input policy lets you ask, return completed=false with an inputRequest: impact "technical", the blocked step and the exact error in the question, concrete options (for example: the lead enables the step in the policy, the step moves to a harness gate, the rule is waived for this task), severity at least the input threshold; if the policy does not let you ask, return completed=false and name the blocked step and the exact error in the summary — the lead decides. Never return completed=false for an environment reason without having written the code you could write.';
 
 /** Запрос исполнителю или reviewer: исходные критерии, область, прежние находки, контекст. */
+/**
+ * Сбойные пути пользовательских сценариев (alpha.71, A2/A3): ревью попытки
+ * и выпуска проверяет их как часть приёмки, исполнитель — до сдачи.
+ * Сценарий постановки, ломающийся на сбойном пути, — блокирующая находка.
+ */
+export const FAILURE_PATHS = [
+  'the response is lost or times out (the client retries or gives up)',
+  'the same request is retried or submitted twice',
+  'the client is offline or the network drops mid-request',
+  'a dependency (database, queue, storage, external API) is down or slow',
+  'state is expired or abandoned (an upload, session, reservation or link left half-way)',
+  'concurrent requests touch the same data',
+] as const;
+
+// Ревью A1 M4: блокирует только находка с доказательством; неприменимые
+// пути пропускаются; reviewer попытки работает от цели и сценариев
+// поручения (брифа у него нет), reviewer выпуска — и от брифа.
+const reviewTail =
+  '. Check only the paths that apply to the scenarios this change touches and skip the rest. A failure-path finding is blocking only with concrete evidence: a code path (file:line) or a run that shows the break. A scenario that, so shown, loses or corrupts data, deletes what it should keep, gets stuck in an error that a retry cannot clear, or takes down another page or screen is a blocking finding, even when no acceptance criterion names that path. Without such evidence, report the risk as a note.';
+
+/** Чеклист сбойных путей для reviewer попытки. */
+export const FAILURE_PATHS_REVIEW_TEXT =
+  "Failure paths: for the order's goal and the user scenarios it changes, consider what happens when " +
+  FAILURE_PATHS.join('; ') +
+  reviewTail;
+
+/** Чеклист сбойных путей для reviewer выпуска (договор с брифами). */
+export const FAILURE_PATHS_RELEASE_TEXT =
+  'Failure paths: for each user scenario of the release (orders and briefs) that this release changes, consider what happens when ' +
+  FAILURE_PATHS.join('; ') +
+  reviewTail;
+
+/** Тот же чеклист исполнителю: проверить до сдачи. */
+export const FAILURE_PATHS_WRITER_TEXT =
+  'Before you hand back, check the failure paths that apply to the scenarios your order changes and handle them within its scope: ' +
+  FAILURE_PATHS.join('; ') +
+  '. Do not widen the work beyond the order for paths it does not touch. The reviewer rejects a scenario that is shown to break on one of these paths even when no acceptance criterion names it.';
+
+/**
+ * Самопроверка исполнителя (alpha.71): те же команды gates области, что
+ * исполнит harness, — до сдачи. Доверенная проверка остаётся за harness.
+ */
+export const WRITER_SELF_CHECK_TEXT =
+  'Self-check before you hand back: run each gate command above yourself from the worktree root (in its cwd when one is given), in the listed order, and fix what fails instead of handing back a red gate. If a gate cannot run in your environment (a service, browser or port is unavailable), the environment-block rule applies: name the gate and the exact error in the summary and still return completed=true when the work itself is done; completed=false is only for unfinished work. The harness runs the same gates again as the trusted check; your run only saves an attempt.';
+
 export function prompt(input: {
   work: WorkState;
   attempt: AttemptState;
   history: AttemptState[];
   context?: ContextSnapshot;
-  gates: { id: string; command: string[] }[];
+  gates: { id: string; command: string[]; cwd?: string }[];
   review?: { sha: string; phase: string; diff: string };
   /** Обязательный корпус и решение разбора, под которым выдан повтор. */
   notes?: string[];
@@ -207,6 +252,8 @@ export function prompt(input: {
         JSON.stringify(attempt.dependencies)
       : '',
     'Gates that prove this work: ' + JSON.stringify(input.gates),
+    review ? '' : WRITER_SELF_CHECK_TEXT,
+    review ? FAILURE_PATHS_REVIEW_TEXT : FAILURE_PATHS_WRITER_TEXT,
     (review && input.findings
       ? 'Historical attempt errors and gate observations (diagnostic context only). Only controller-issued ids in the review findings sections below may appear in `previous`; do not derive ids from this history: '
       : 'Previous attempts, with the findings each review left. Address every finding that is still open first and say what you changed for it: ') +

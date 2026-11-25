@@ -18,6 +18,7 @@ import { knap, propertyHarness, propertySetup } from './property-fixture.ts';
 import { measuredInvoke } from '../src/engine/measured.ts';
 import { approve, bin, implement } from './runner-fixture.ts';
 import { Harness } from '../src/control/harness.ts';
+import { repairDecision } from '../src/engine/repair.ts';
 import { cliAdapter } from '../src/agents/cli-adapter.ts';
 
 type Ctx = ReturnType<typeof hsetup>;
@@ -2195,6 +2196,60 @@ test('H1-03 (H1-F022): explain = движок — первый эпизод read
       h.engine.read((v) => v.work('later')!.attempt),
       2,
     );
+  } finally {
+    h.close();
+  }
+});
+
+test('ревью D/E MEDIUM-1: удержание gate снято записанной пробой списка процессов — explain и ремонт controller одинаково: harness повторит сам', () => {
+  const ctx = hsetup({ scenario: { writer: implement(), reviewer: approve() } });
+  const h = ctx.open();
+  try {
+    started(ctx, h);
+    const a = h.engine.claim('controller')!;
+    h.engine.phase(a.id, a.token, 'verifying', { candidateSha: 'c'.repeat(40) });
+    h.engine.evidence(a.id, a.token, {
+      kind: 'test',
+      phase: 'candidate',
+      sha: 'c'.repeat(40),
+      gate: 'unit',
+      passed: false,
+      command: ['x'],
+      exitCode: 1,
+      log: '',
+      digest: 'd'.repeat(64),
+      summary: 'GATE_SANDBOX_PROCESS_LIST: ps: Operation not permitted',
+    });
+    h.engine.fail(a.id, a.token, 'GATE_SANDBOX_PROCESS_LIST: ps', {
+      kind: 'environment',
+      cause: 'sandbox-process-list',
+    });
+    h.engine.release('controller');
+    assert.ok(
+      h.engine.read((v) => v.work(a.workId)?.environmentHold),
+      'удержание записано',
+    );
+    const decide = () =>
+      h.engine.read((v) =>
+        repairDecision(v, v.works(), {
+          budgetLeft: ctx.policy.repairBudget,
+          maxAttempts: ctx.policy.maxAttempts,
+          holdFixed: (w) => h.engine.holdLifted(w, v),
+        }),
+      );
+    const [before] = diagnose(ctx, h);
+    assert.equal(before!.retryPlanned, false);
+    assert.notEqual(before!.actor, 'controller');
+    assert.equal(decide()?.action, 'stop');
+    // Проба другого процесса (controller) записана в состояние; глобала этого процесса нет.
+    h.engine.recordProcessList('available');
+    const [after] = diagnose(ctx, h);
+    assert.deepEqual(
+      [after!.retryPlanned, after!.actor, after!.action],
+      [true, 'controller', 'retry'],
+      'explain: harness повторит сам',
+    );
+    assert.equal(decide()?.action, 'retry', 'controller повторяет');
   } finally {
     h.close();
   }

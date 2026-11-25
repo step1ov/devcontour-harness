@@ -147,14 +147,15 @@ check(
     request.maxTasks,
     /^[a-f0-9]{64}$/.test(request.basis),
   ],
-  [true, 15, 30, true],
+  // alpha.71 (D1): рекомендуемое число работ по умолчанию — 5.
+  [true, 5, 30, true],
 );
 check(
   'OP-PLAN-01 S1 without product planner',
   [
     sections[0].startsWith('Inspect the repository read-only.'),
     sections[0].includes('You are a product planner.'),
-    sections[0].includes('at most 15 tasks'),
+    sections[0].includes('at most 5 tasks'),
   ],
   [true, false, true],
 );
@@ -173,7 +174,9 @@ check(
 );
 check(
   'OP-PLAN-01 declared roles without builtin',
-  sections[1].endsWith(JSON.stringify(planningFacts(config, contractRecords).roles)),
+  // alpha.71 (D1): за S1 — раздел размера работ по сценарию, роли — третьим.
+  sections[1].startsWith('Size tasks by user scenario:') &&
+    sections[2].endsWith(JSON.stringify(planningFacts(config, contractRecords).roles)),
   true,
 );
 check(

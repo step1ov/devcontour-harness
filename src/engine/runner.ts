@@ -1,4 +1,4 @@
-import { freshDiagnosis } from '../projections/lead-recovery.ts';
+import { freshDiagnosis, repeatedDefect } from '../projections/lead-recovery.ts';
 import { silentGateOnSha } from '../verification/gates-at.ts';
 import { controllerTemp } from '../environment/controller-temp.ts';
 import type { LeadDiagnosis } from '../contracts/execution.ts';
@@ -6,10 +6,21 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { toolchainBaseline } from '../environment/toolchain-pin.ts';
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import {
   roleBinding,
+  WORKSPACE_OWNER,
   selectReviewer,
   mcpEnvironment,
   HarnessError,
@@ -57,7 +68,10 @@ import {
   infraViolations,
   strictSandbox,
   gateDigest,
+  derivedApplicabilityOn,
+  gateApplicabilityLimits,
   harnessModeOf,
+  integrationReuseOn,
   writeGuardActive,
   blockingOf,
   mergePasses,
@@ -162,13 +176,22 @@ import {
   type ChangeOutcome,
   type LivenessChange,
 } from './stall-sweep.ts';
-import { gatePrerequisites, orderedScope } from '../verification/gate-scope.ts';
+import { failedFirst, gatePrerequisites, orderedScope } from '../verification/gate-scope.ts';
 import { REUSED_LABEL } from '../verification/integration-reuse.ts';
 import {
+  packageBinding,
+  packageClosure,
+  workspaceGraphAt,
+} from '../verification/workspace-graph.ts';
+import {
   changedPaths,
+  conditionalGate,
+  derivationAllowed,
+  explicitCondition,
   gateBasis,
   gateDecisions,
   proofGates,
+  type GateCondition,
   providerMovement,
   type ChangedPaths,
 } from '../verification/applicability.ts';
@@ -208,6 +231,8 @@ import {
   classifyFailure,
   environmentCauseOf,
   failureOrigin,
+  registryPullFailure,
+  registryPullStep,
   withSuffix,
 } from './classify.ts';
 import { TaskFailure, type FailureKind } from './failure.ts';
@@ -339,6 +364,9 @@ const ALREADY_SATISFIED_REVIEW_NOTE =
 
 /** Порядок области gates — общий с проверкой на SHA вне попытки (`orderedScope`). */
 const ordered = orderedScope;
+/** Первые каталоги списка для сводки записи неприменимости. */
+const listed = (dirs: readonly string[]) =>
+  dirs.slice(0, 10).join(', ') + (dirs.length > 10 ? ` и ещё ${dirs.length - 10}` : '');
 
 /**
  * Исполнитель очереди. Один действующий controller; попытка проходит
@@ -574,6 +602,8 @@ export class Runner {
       changed: (change) => this.livenessChanged(change),
     });
     this.sweep.start();
+    // Брошенные копии проверок прежнего controller (ревью A1 L4).
+    void this.sweepProbeCopies();
   }
   private stopLead() {
     if (this.leaseTimer) clearInterval(this.leaseTimer);
@@ -1624,6 +1654,25 @@ export class Runner {
     }
   }
 
+  /**
+   * Попытка после того же дефекта дважды подряд начинается с чистого дерева
+   * (alpha.71, C3, `continuableDraft`): исполнитель узнаёт почему.
+   */
+  private freshStartNotes(work: WorkState): string[] {
+    const defect = this.engine.read((v) => {
+      const attempts = v.attempts(work.id);
+      const found = repeatedDefect(work, attempts);
+      // Только когда попытка и правда начата без черновика пары.
+      const previous = attempts.filter((a) => a.status !== 'active').at(-1);
+      return found && previous && found.runs.includes(previous.id) ? found : undefined;
+    });
+    return defect
+      ? [
+          `Fresh start: attempts ${defect.runs.join(' and ')} failed on the same defect (${defect.by === 'finding' ? 'blocking review finding ' + defect.finding : 'the same failure'}), so this attempt starts from a clean tree instead of continuing their patch. Do not rebuild the same patch: follow the lead's diagnosis below and take a different approach, then make the gates pass.`,
+        ]
+      : [];
+  }
+
   /** Накладывает черновик предыдущей попытки, если он есть и годится. */
   private async continueDraft(
     attempt: AttemptState,
@@ -2028,12 +2077,21 @@ export class Runner {
                       attempt,
                       history: this.history(attempt),
                       context,
-                      gates: gates.map((g) => ({ id: g.id, command: g.command })),
+                      // Команда и cwd gate — без окружения: значения и
+                      // секреты политики в подсказку не попадают (alpha.71).
+                      // Значения секретов, вписанные в команду gate, —
+                      // маской окружения попытки (ревью C LOW-5).
+                      gates: gates.map((g) => ({
+                        id: g.id,
+                        command: g.command.map((a) => execution.redact(a)),
+                        ...(g.cwd ? { cwd: g.cwd } : {}),
+                      })),
                       inputPolicy: attempt.inputPolicy ?? inputPolicyOf(this.policy),
                       notes: [
                         ...this.notes(attempt, false),
                         ...(await this.hostNotes(work, attempt, false)),
                         ...(dependencies ? [writerDependenciesNote(dependencies)] : []),
+                        ...this.freshStartNotes(work),
                         ...(repo.generators?.length ? [generatorNote(repo.generators)!] : []),
                         ALREADY_SATISFIED_WRITER_NOTE,
                         WRITER_TRIAGE_TEXT,
@@ -2338,7 +2396,7 @@ export class Runner {
                 attempt,
                 work,
                 repo,
-                gates,
+                failedFirst(repo.gates, gates, this.failedGate(attempt)),
                 'candidate',
                 cwd,
                 sha,
@@ -2506,14 +2564,21 @@ export class Runner {
         // setup, хранилище зависимостей, prepare), у попытки без взятого или
         // восстановленного кода исполнителя (по записанному состоянию).
         const persisted = this.engine.read((v) => v.attempt(attempt.id));
-        const preWriter =
-          classified === 'unknown' &&
+        const onBase =
           this.preparing.has(attempt.id) &&
           !persisted?.reusedFrom &&
           !persisted?.continuedFrom?.applied &&
           !persisted?.candidateSha;
+        const preWriter = classified === 'unknown' && onBase;
+        // Обрыв реестра при загрузке (alpha.71, ревью C MEDIUM-3): окружение
+        // только до кода исполнителя или на шаге загрузки; после кода
+        // исполнителя такой вывод может быть симптомом его кода.
+        const registry =
+          classified === 'unknown' &&
+          registryPullFailure(message) &&
+          (onBase || registryPullStep(message));
         this.preparing.delete(attempt.id);
-        const kind: FailureKind = preWriter ? 'environment' : classified;
+        const kind: FailureKind = preWriter || registry ? 'environment' : classified;
         // Незакоммиченная работа сохраняется при любом отказе до кандидата:
         // по времени, «не закончил», обрыв. Иначе повтор начинал с пустого
         // дерева и тратил попытку на сделанное.
@@ -2523,7 +2588,11 @@ export class Runner {
         // начинает с базы в новом дереве.
         const named = environmentCauseOf(stalled ? undefined : error, message, kind);
         // Отказ до вызова исполнителя без названной причины — `preflight`.
-        const cause = preWriter && named === 'other' ? 'preflight' : named;
+        const cause = registry
+          ? 'dependency-network'
+          : preWriter && named === 'other'
+            ? 'preflight'
+            : named;
         let reported = message;
         const ports = this.portWarnings.get(attempt.id);
         if (ports?.length) reported += `; предупреждение пробы портов: ${ports.join('; ')}`;
@@ -3145,6 +3214,25 @@ export class Runner {
   }
 
   /**
+   * Gate, на котором упала прежняя попытка поручения (её последняя
+   * собственная запись `test` — провал), или undefined. Gates исполняются
+   * по одному и первый провал останавливает фазу, поэтому последняя запись —
+   * решающая; повтор, прошедший как flaky, провалом не считается.
+   */
+  private failedGate(attempt: AttemptState): string | undefined {
+    return this.engine.read((v) => {
+      const prior = v
+        .attempts(attempt.workId)
+        .filter((a) => a.attempt < attempt.attempt && a.status !== 'active')
+        .sort((a, b) => a.attempt - b.attempt)
+        .at(-1);
+      if (!prior || prior.status === 'succeeded') return undefined;
+      const last = prior.evidence.findLast((e) => e.kind === 'test' && e.consumer === undefined);
+      return last && !last.passed ? last.gate : undefined;
+    });
+  }
+
+  /**
    * Gates фазы, которые исполняются; для остальных (gate с `when.paths`, чей
    * путь diff фазы не задел, — `gateDecisions`) записывается `not-applicable`.
    * Diff — из Git: кандидат — `base..candidate`; интеграция — ещё и
@@ -3161,9 +3249,34 @@ export class Runner {
     sha: string,
     base: string,
   ): Promise<GatePolicy[]> {
-    if (!gates.some((g) => g.when)) return gates;
+    const derived = derivedApplicabilityOn(this.policy);
+    if (!gates.some((g) => conditionalGate(repo.gates, g, derived))) return gates;
     const candidate = phase === 'candidate' ? sha : attempt.candidateSha!;
     if (candidate === base) return gates;
+    // Условие gate: явные `when.paths` или (alpha.71) каталоги его пакетов
+    // workspace с зависимостями на SHA фазы — из объектов Git. Граф не
+    // прочитан, пакет не найден, script выходит за пакет — условия нет, gate
+    // исполняется. Смена манифестов — неявный вход: граф с зелёного SHA тот же.
+    const conditions = new Map<string, GateCondition>();
+    let graph: Awaited<ReturnType<typeof workspaceGraphAt>> | undefined;
+    for (const gate of gates) {
+      const explicit = explicitCondition(gate);
+      if (explicit) conditions.set(gate.id, explicit);
+      else if (derivationAllowed(repo.gates, gate, derived)) {
+        graph ??= await workspaceGraphAt(cwd, sha);
+        if (typeof graph === 'string') continue;
+        const closure = packageClosure(
+          graph,
+          packageBinding(gate)!,
+          gateApplicabilityLimits.patterns,
+        );
+        if (closure.ok)
+          conditions.set(gate.id, {
+            paths: closure.dirs,
+            derived: { packages: closure.packages },
+          });
+      }
+    }
     const proof = this.engine.read((v) => proofGates(work.order, contractDocuments(work.order, v)));
     // Последний зелёный SHA условного gate: integration принятой попытки
     // этого репозитория, где gate прошёл под тем же основанием (`gateBasis`),
@@ -3178,11 +3291,41 @@ export class Runner {
     );
     // Снимок провайдеров текущей попытки — закреплённый в хранилище до реализации.
     const providers = this.engine.read((v) => v.attempt(attempt.id)?.dependencies);
+    // Gate, упавший в записанном полном прогоне (ревью final M1), выводом
+    // применимости не пропускается, пока снова не пройдёт в попытке: его
+    // замыкание пакетов, видимо, неполно (файлы вне пакета не через
+    // зависимость workspace), и работа-исправление иначе его не исполнит.
+    const fullRunFailed = this.engine.read((v) => {
+      const at = new Map<string, string>();
+      for (const { key, value } of v.locals('gates-runs', WORKSPACE_OWNER))
+        if (key.startsWith(repo.id + '@'))
+          for (const run of value.runs)
+            for (const g of run.gates)
+              if (g.status === 'failed' && !g.environment && run.at > (at.get(g.gate) ?? ''))
+                at.set(g.gate, run.at);
+      return at;
+    });
+    const repoAttempts = fullRunFailed.size
+      ? this.engine.read((v) => v.attempts().filter((x) => x.repositoryId === repo.id))
+      : [];
+    const passedSince = (gateId: string, since: string) =>
+      repoAttempts.some((x) =>
+        x.evidence.some(
+          (e) =>
+            e.kind === 'test' &&
+            e.gate === gateId &&
+            e.consumer === undefined &&
+            e.passed &&
+            e.createdAt > since,
+        ),
+      );
     const diffs = new Map<string, ChangedPaths>();
     const changed = new Map<string, ChangedPaths>();
     const moved = new Map<string, string | undefined>();
     for (const gate of gates) {
-      if (!gate.when || proof.has(gate.id)) continue;
+      if (!conditions.has(gate.id) || proof.has(gate.id)) continue;
+      const failedAt = fullRunFailed.get(gate.id);
+      if (failedAt && !passedSince(gate.id, failedAt)) continue;
       const basis = gateBasis(this.policy, repo, gate, this.engine.version);
       const passed = greens.filter((x) =>
         x.evidence.some(
@@ -3229,6 +3372,7 @@ export class Runner {
       proof,
       changedFor: (gate) => changed.get(gate.id),
       providersMoved: (gate) => moved.get(gate.id),
+      conditionFor: (gate) => conditions.get(gate.id),
     });
     for (const d of decisions)
       if (!d.run && d.record)
@@ -3242,7 +3386,9 @@ export class Runner {
           exitCode: -1,
           log: '',
           digest: digestOf(d.record),
-          summary: `Не применим: diff фазы (${d.record.count} путей) не задел when.paths и неявные входы gate`,
+          summary: d.record.derived
+            ? `Не применим: diff фазы (${d.record.count} путей) не задел пакеты gate в workspace (${listed(d.record.patterns)}) и неявные входы`
+            : `Не применим: diff фазы (${d.record.count} путей) не задел when.paths и неявные входы gate`,
           notApplicable: d.record,
         });
     return decisions.filter((d) => d.run).map((d) => d.gate);
@@ -3266,7 +3412,11 @@ export class Runner {
     const run = this.propertyRun(attempt, gate, consumer);
     const property = gate.property || expectsReference(run.expected) ? run : undefined;
     const basis =
-      gate.when && !consumer
+      conditionalGate(
+        this.repo(attempt.repositoryId).gates,
+        gate,
+        derivedApplicabilityOn(this.policy),
+      ) && !consumer
         ? {
             gateBasis: gateBasis(
               this.policy,
@@ -3537,6 +3687,129 @@ export class Runner {
    * ограничивает срок. Спецификация лежит в каталоге ревью; значения
    * переменных окружения CLI передаёт серверу по имени, на диск они не пишутся.
    */
+  /** Reviewer этой попытки запускает проверки (как решит `reviewProbe`). */
+  private probesWanted(attempt: AttemptState, work: WorkState) {
+    const chosen = selectReviewer(
+      this.policy,
+      'code',
+      { runtime: attempt.runtime },
+      work.order.role,
+      work.order.repositoryId,
+    );
+    const name = chosen.ok ? chosen.reviewer.toolProfile : undefined;
+    const profile = name ? this.policy.toolProfiles[name] : undefined;
+    return attempt.reviewer !== 'fixture' && reviewerRunsChecks(attempt.reviewer, profile);
+  }
+
+  /**
+   * Одноразовая копия проверяемого коммита для проверок reviewer (alpha.71,
+   * A4; ревью A1 M3, L4): отдельный клон `--shared` (объекты — из
+   * проверяемого репозитория, своя `.git`) во временном каталоге controller,
+   * detached на `sha` и сверенный (HEAD — `sha`, чистое дерево). Каждый
+   * игнорируемый элемент проверяемого дерева (`node_modules`, `.env`,
+   * `vendor/`, `dist/` …) — ссылка на него, и ссылка записана в
+   * `.git/info/exclude` копии: `git status` копии чист, как у кандидата.
+   * Подмодули копия не повторяет — тогда копии нет, проверки идут в
+   * проверяемом дереве только для чтения, причина — в `skipped`. Отказ
+   * создания — так же, с причиной. `dispose` убирает копию при любом исходе.
+   */
+  async probeCopy(
+    cwd: string,
+    sha: string,
+    dir: string,
+  ): Promise<{ cwd: string; links: string[]; dispose: () => Promise<void> } | { skipped: string }> {
+    let tree: string | undefined;
+    const dispose = async () => {
+      // Каталог создан этим вызовом (mkdtemp под временным каталогом controller).
+      if (tree) await rm(tree, { recursive: true, force: true }).catch(() => undefined);
+    };
+    const skipped = async (reason: string) => {
+      await dispose();
+      await writeFile(
+        join(dir, 'probe-copy.json'),
+        JSON.stringify({ sha, skipped: reason }, null, 2),
+      ).catch(() => undefined);
+      return { skipped: reason };
+    };
+    try {
+      if (await git(cwd, 'ls-tree', sha, '.gitmodules').catch(() => ''))
+        return await skipped(
+          'submodules: копия не повторяет подмодули — проверки в дереве только для чтения',
+        );
+      tree = await mkdtemp(join(controllerTemp.dir(), 'hx-probe-'));
+      const checkout = join(tree, 'tree');
+      await git(tree, 'clone', '--quiet', '--shared', '--no-checkout', cwd, checkout);
+      await git(checkout, 'remote', 'remove', 'origin').catch(() => undefined);
+      await git(checkout, 'checkout', '--quiet', '--detach', sha);
+      if (
+        (await git(checkout, 'rev-parse', 'HEAD')) !== sha ||
+        (await git(checkout, 'status', '--porcelain', '--untracked-files=all'))
+      )
+        throw new Error('копия проверок не на проверяемом коммите');
+      // Игнорируемые элементы кандидата (каталог — целиком): ссылки в копии.
+      const links = (
+        await git(cwd, 'ls-files', '--others', '--ignored', '--exclude-standard', '--directory')
+      )
+        .split('\n')
+        .map((p) => p.replace(/\/$/, ''))
+        .filter((p) => p && !p.split('/').includes('.git'));
+      const linked: string[] = [];
+      for (const m of links) {
+        if (existsSync(join(checkout, m))) continue;
+        await mkdir(dirname(join(checkout, m)), { recursive: true });
+        if (
+          await symlink(join(cwd, m), join(checkout, m)).then(
+            () => true,
+            () => false,
+          )
+        )
+          linked.push(m);
+      }
+      if (linked.length)
+        await writeFile(
+          join(checkout, '.git', 'info', 'exclude'),
+          linked.map((m) => '/' + m.replace(/([*?[\]\\!#])/g, '\\$1')).join('\n') + '\n',
+          { flag: 'a' },
+        );
+      if (await git(checkout, 'status', '--porcelain', '--untracked-files=all'))
+        throw new Error('ссылки на игнорируемые файлы видны git status копии');
+      await writeFile(
+        join(dir, 'probe-copy.json'),
+        JSON.stringify({ sha, cwd: checkout, links: linked }, null, 2),
+      ).catch(() => undefined);
+      return { cwd: checkout, links: linked, dispose };
+    } catch (error) {
+      return skipped('copy-failed: ' + ((error as Error)?.message ?? String(error)).slice(0, 500));
+    }
+  }
+
+  /**
+   * Брошенные копии проверок (`hx-probe-*`) прежнего controller (ревью A1
+   * L4): старше предела попытки — убираются; регистрации деревьев прежних
+   * версий (копия через `git worktree`) — `git worktree prune`.
+   */
+  async sweepProbeCopies(now = Date.now()) {
+    const root = controllerTemp.dir();
+    const maxAge = this.policy.runTimeoutMs + 10 * 60_000;
+    const names = await readdir(root).catch(() => [] as string[]);
+    for (const name of names) {
+      if (!/^hx-probe-[A-Za-z0-9_-]+$/.test(name)) continue;
+      const path = join(root, name);
+      const st = await lstat(path).catch(() => undefined);
+      if (!st?.isDirectory() || now - st.mtimeMs < maxAge) continue;
+      await rm(path, { recursive: true, force: true }).catch(() => undefined);
+    }
+    for (const repo of this.policy.repositories)
+      await git(this.repoPath(repo), 'worktree', 'prune').catch(() => undefined);
+  }
+
+  /** Остаток бюджета проверок логического ревью позволяет новый вызов. */
+  private probeBudgetLeft(shared?: { deadline: number; spentMs: number }) {
+    const limits = probeLimits(this.policy);
+    const deadline = shared?.deadline ?? Date.now() + this.policy.runTimeoutMs - limits.reserveMs;
+    return limits.budgetMs - (shared?.spentMs ?? 0) >= 1000 && deadline - Date.now() >= 1000;
+  }
+
   private async reviewProbe(
     attempt: AttemptState,
     work: WorkState,
@@ -3559,6 +3832,8 @@ export class Runner {
      * проверок переходят от первого вызова, а не выдаются заново.
      */
     shared?: { deadline: number; spentMs: number },
+    /** Одноразовая записываемая копия дерева для проверок (`probeCopy`). */
+    probeCwd?: string,
   ) {
     const chosen = selectReviewer(
       this.policy,
@@ -3581,9 +3856,10 @@ export class Runner {
     const execution = this.environment(attempt, phase, cwd, name);
     const secrets = new Set(execution.redact.secrets ?? []);
     const spec: ProbeSpec = {
-      cwd,
+      cwd: probeCwd ?? cwd,
       controller: boundary.hidden,
-      readable: [cwd, ...boundary.readable],
+      readable: [...(probeCwd ? [probeCwd] : []), cwd, ...boundary.readable],
+      ...(probeCwd ? { writable: true } : {}),
       ...(boundary.checkouts.length ? { checkouts: boundary.checkouts } : {}),
       isolation: this.policy.isolation,
       harnessMode: harnessModeOf(this.policy),
@@ -3618,7 +3894,7 @@ export class Runner {
         env: spec.env,
         commandTimeoutMs: limits.commandTimeoutMs,
       } satisfies ProbeServer,
-      prompt: `Run checks with the ${probeTool} tool (argv, no shell; sources are read-only, temporary files go to TMPDIR). The controller stops each command after ${seconds(limits.commandTimeoutMs)} s and all checks share ${seconds(budgetMs)} s; ${seconds(limits.reserveMs)} s stay reserved for your verdict. A timeout is an observation about that command on that input, not proof of a defect: name the input and the limit if you report it, and give your verdict with what you have when the budget runs out. When a finding rests on a run, put its runId into reproduction.run.${spec.gates?.length ? ' ' + gateProbePrompt(spec.gates) : ''}`,
+      prompt: `Run checks with the ${probeTool} tool (argv, no shell; ${probeCwd ? 'checks run in a disposable writable copy of the same commit, discarded after your review — your verdict is about the candidate' : 'sources are read-only'}, temporary files go to TMPDIR). The controller stops each command after ${seconds(limits.commandTimeoutMs)} s and all checks share ${seconds(budgetMs)} s; ${seconds(limits.reserveMs)} s stay reserved for your verdict. A timeout is an observation about that command on that input, not proof of a defect: name the input and the limit if you report it, and give your verdict with what you have when the budget runs out. When a finding rests on a run, put its runId into reproduction.run.${spec.gates?.length ? ' ' + gateProbePrompt(spec.gates) : ''}`,
     };
   }
 
@@ -4046,45 +4322,65 @@ export class Runner {
       }
       const callDir = call === 1 ? dir : join(dir, `call-${call}`);
       await mkdir(callDir, { recursive: true });
-      const probe = await this.reviewProbe(
-        attempt,
-        work,
-        cwd,
-        callDir,
-        phase,
-        sha,
-        base,
-        gates,
-        call,
-        shared,
-      );
-      const response = await this.call(
-        this.adapter(attempt.reviewer),
-        {
-          task: 'review-code',
+      // Проверки reviewer — в одноразовой записываемой копии того же
+      // коммита (alpha.71, A4): проверяемое дерево только для чтения.
+      // Бюджет проверок исчерпан — копии не делается (ревью A1 L4).
+      const made =
+        this.probesWanted(attempt, work) && this.probeBudgetLeft(shared)
+          ? await this.probeCopy(cwd, sha, callDir)
+          : undefined;
+      const copy = made && 'cwd' in made ? made : undefined;
+      const probeCopyNote = made
+        ? 'cwd' in made
+          ? { status: 'copy' as const, links: made.links.slice(0, 50) }
+          : { status: 'read-only' as const, reason: made.skipped }
+        : undefined;
+      let probe: Awaited<ReturnType<Runner['reviewProbe']>>;
+      let response: Awaited<ReturnType<Runner['call']>>;
+      try {
+        probe = await this.reviewProbe(
           attempt,
+          work,
           cwd,
-          dir: callDir,
+          callDir,
           phase,
-          prompt:
-            prompt({
-              work,
-              attempt: { ...attempt, baseSha: base },
-              history: this.history(attempt),
-              context,
-              gates: gates.map((g) => ({ id: g.id, command: g.command })),
-              review: { sha, phase, diff },
-              notes,
-              ...(legacy ? {} : { findings: history }),
-              ...(call > 1 ? { retry: { call, calls, issues } } : {}),
-            }) + (probe ? '\n\n' + probe.prompt : ''),
-          ...(probe ? { probe: probe.server } : {}),
-          ...(legacy ? {} : { findings: requestFindings(history) }),
-          timeoutMs: remaining,
-          ...(unchanged ? { outputSchema: alreadySatisfiedReviewOutputSchema } : {}),
-        },
-        signal,
-      );
+          sha,
+          base,
+          gates,
+          call,
+          shared,
+          copy?.cwd,
+        );
+        response = await this.call(
+          this.adapter(attempt.reviewer),
+          {
+            task: 'review-code',
+            attempt,
+            cwd,
+            dir: callDir,
+            phase,
+            prompt:
+              prompt({
+                work,
+                attempt: { ...attempt, baseSha: base },
+                history: this.history(attempt),
+                context,
+                gates: gates.map((g) => ({ id: g.id, command: g.command })),
+                review: { sha, phase, diff },
+                notes,
+                ...(legacy ? {} : { findings: history }),
+                ...(call > 1 ? { retry: { call, calls, issues } } : {}),
+              }) + (probe ? '\n\n' + probe.prompt : ''),
+            ...(probe ? { probe: probe.server } : {}),
+            ...(legacy ? {} : { findings: requestFindings(history) }),
+            timeoutMs: remaining,
+            ...(unchanged ? { outputSchema: alreadySatisfiedReviewOutputSchema } : {}),
+          },
+          signal,
+        );
+      } finally {
+        await copy?.dispose();
+      }
       // Reviewer не меняет закреплённые зависимости, как и своё дерево.
       await assertDependencies(attempt.dependencies ?? []);
       const redact = response.redact;
@@ -4172,6 +4468,9 @@ export class Runner {
           // Ответ вне схемы сохраняется как есть (замаскированным) для разбора.
           ...(result ? {} : { raw: response.output ?? null }),
           ...(probes ? { probes } : {}),
+          // Где шли проверки reviewer (ревью A1 L4): копия или, с причиной,
+          // проверяемое дерево только для чтения.
+          ...(probe && probeCopyNote ? { probeCopy: probeCopyNote } : {}),
           ...(passes ? { passes } : {}),
         },
         redact,
@@ -4692,8 +4991,11 @@ export class Runner {
     gates: GatePolicy[],
     cwd: string,
     sha: string,
-  ): Promise<{ tree: string; gates: Set<string>; records: EvidenceRecord[] } | undefined> {
-    if (this.policy.integrationReuse !== 'identical-tree') return undefined;
+  ): Promise<
+    | { tree: string; gates: Set<string>; records: EvidenceRecord[]; review?: EvidenceRecord }
+    | undefined
+  > {
+    if (!integrationReuseOn(this.policy, this.engine.host)) return undefined;
     const candidate = attempt.candidateSha!;
     if (candidate === attempt.baseSha) return undefined;
     const tree = await git(cwd, 'rev-parse', sha + '^{tree}');
@@ -4741,12 +5043,53 @@ export class Runner {
       const needed = new Set(running.flatMap((g) => gatePrerequisites(repo.gates, g.id)));
       for (const id of needed) if (sources.delete(id)) changed = true;
     }
-    if (!sources.size) return undefined;
+    // Ревью кандидата (alpha.71): его решающая запись прошла — дерево
+    // интеграции то же, второе ревью того же дерева не вызывается.
+    const review = evidence.findLast(
+      (e) =>
+        e.kind === 'review' &&
+        e.phase === 'candidate' &&
+        e.sha === candidate &&
+        e.consumer === undefined &&
+        e.checks === checks,
+    );
+    const carried = review?.passed && !review.reusedEvidence ? review : undefined;
+    if (!sources.size && !carried) return undefined;
     return {
       tree,
       gates: new Set(sources.keys()),
       records: gates.flatMap((g) => (sources.has(g.id) ? [sources.get(g.id)!] : [])),
+      ...(carried ? { review: carried } : {}),
     };
+  }
+
+  /**
+   * Ревью интеграции, взятое из решающего PASS ревью кандидата при том же
+   * дереве (alpha.71): reviewer не вызывается, запись ссылается на ревью
+   * кандидата (`reusedEvidence`) и находок не несёт — история находок
+   * поручения остаётся у записи кандидата.
+   */
+  private recordReviewCarried(
+    attempt: AttemptState,
+    sha: string,
+    source: EvidenceRecord,
+    tree: string,
+  ) {
+    this.engine.evidence(attempt.id, attempt.token, {
+      kind: 'review',
+      phase: 'integration',
+      sha,
+      gate: 'independent-review',
+      passed: true,
+      command: source.command,
+      exitCode: 0,
+      log: source.log,
+      digest: source.digest,
+      summary: `PASS ${REUSED_LABEL}: ревью кандидата ${source.id} перенесено — дерево integration-коммита ${tree.slice(0, 12)} совпадает с проверенным деревом кандидата ${source.sha.slice(0, 12)}`,
+      findings: [],
+      ...(source.inspection ? { inspection: source.inspection } : {}),
+      reusedEvidence: { evidenceId: source.id, phase: 'candidate', sha: source.sha, tree },
+    });
   }
 
   /** Запись интеграции, взятая из решающей записи кандидата при том же дереве. */
@@ -4821,7 +5164,12 @@ export class Runner {
         );
     }
     this.engine.phase(attempt.id, attempt.token, 'integrating', { integrationSha: sha });
-    const gates = ordered(repo.gates, attempt.requiredGates ?? repo.gates.map((g) => g.id));
+    // Gate, на котором упала прежняя попытка, — первым (`failedFirst`).
+    const gates = failedFirst(
+      repo.gates,
+      ordered(repo.gates, attempt.requiredGates ?? repo.gates.map((g) => g.id)),
+      this.failedGate(attempt),
+    );
     // Выходы генераторов кандидата построены на его базе: на слиянии с
     // текущей они обязаны остаться прежними (после gates установки:
     // генератору нужны зависимости проекта), иначе повтор от неё.
@@ -4861,6 +5209,12 @@ export class Runner {
       await this.consumers(attempt, cwd, sha, artifacts, signal);
       this.requirements(attempt, work, repoPath, cwd, sha, 'integration');
       rearm();
+      // Дерево интеграции — проверенное дерево кандидата: PASS его ревью
+      // переносится (`integrationReuse`), второго ревью нет.
+      if (reuse?.review) {
+        this.recordReviewCarried(attempt, sha, reuse.review, reuse.tree);
+        return;
+      }
       // База ревью интеграции — target, на который сделано слияние (первый
       // родитель integration SHA), а не база попытки: работа, принятая в
       // target после начала попытки, в diff этого поручения не входит.

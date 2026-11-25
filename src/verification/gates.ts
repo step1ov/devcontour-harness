@@ -12,7 +12,7 @@ import {
 import { controllerTemp } from '../environment/controller-temp.ts';
 import { hostLoad, loadText, type HostLoad } from '../environment/host-load.ts';
 import { join, resolve, sep, delimiter, relative, dirname } from 'node:path';
-import { accessSync, constants, existsSync, readdirSync } from 'node:fs';
+import { accessSync, constants, existsSync, readdirSync, readFileSync } from 'node:fs';
 import { createHash, randomUUID } from 'node:crypto';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import {
@@ -72,6 +72,7 @@ import {
 import { keepGateArtifacts } from './gate-artifacts.ts';
 import { uiFailureArtifacts, uiGateEnvironment } from './ui-gates.ts';
 import { ReapedGate } from './reaped.ts';
+import { GATE_TOOL_MISSING, toolMissingFailure, toolMissingVerdict } from './gate-tooling.ts';
 import {
   processListCall,
   processListCallPatterns,
@@ -1711,6 +1712,79 @@ export async function runGate(run: GateRun): Promise<EvidenceRecord> {
         stderr: result.stderr,
         redact,
       });
+      // Отказ инструмента gate (alpha.71, C1; ревью C HIGH-1): программа
+      // или браузер не найдены, pnpm отказал по каталогу состояния — правка
+      // команды gate или окружения. Удержание (`gate-definition`, попытка не
+      // засчитана) — только когда это единственное объяснение
+      // (`toolMissingVerdict`): признак у каждого упавшего testcase или, без
+      // отчёта, ни другого провала в выводе; проба harness в той же среде
+      // подтвердила, что инструмента нет; изменение задачи не добавило вызов
+      // этого имени и не трогало файлы, через которые gate его зовёт. Иначе —
+      // засчитанный провал с пометкой.
+      const tool =
+        !property && !reaped && !run.consumer && !result.diagnostics?.signal
+          ? toolMissingFailure(
+              result.stdout + '\n' + result.stderr,
+              failureTexts,
+              counts?.failures ? undefined : failureSummary,
+            )
+          : undefined;
+      if (tool) {
+        const verdict = await toolMissingVerdict({
+          tool,
+          gate,
+          cwd,
+          gateCwd,
+          base: run.trustedBase,
+          sha,
+          scripts: () => {
+            try {
+              const pkg = JSON.parse(readFileSync(join(gateCwd, 'package.json'), 'utf8')) as {
+                scripts?: Record<string, string>;
+              };
+              return pkg.scripts;
+            } catch {
+              return undefined;
+            }
+          },
+          addedCalls: (isCall) =>
+            run.trustedBase && run.trustedBase !== sha
+              ? addedCallFiles(cwd, run.trustedBase, sha, isCall)
+              : Promise.resolve([]),
+          probe: (argv) =>
+            runCheck(
+              { config: run.policy },
+              {
+                activity: { kind: 'gate', label: `${gate.id}:tool-probe`.slice(0, 300) },
+                argv,
+                cwd: gateCwd,
+                env: run.execution.env,
+                redact,
+                timeoutMs: 15_000,
+                signal,
+                write: [cwd],
+                readable: [...run.boundary.readable],
+                controller: run.boundary.hidden,
+                ...(run.boundary.checkouts?.length ? { checkouts: run.boundary.checkouts } : {}),
+                settingsDir: join(artifactDir, gate.id + '-tool-probe'),
+              },
+            ).then(
+              (r) => r.code,
+              () => undefined,
+            ),
+        });
+        if (verdict.held) {
+          kind = 'environment';
+          cause = 'gate-definition';
+          throw new Error(
+            `${NO_RETRY_GATE_CODES['gate-definition']}: ${GATE_TOOL_MISSING}: ${redact(tool.line)} — команда gate не нашла инструмент (или менеджер пакетов отказал по своему окружению), проба harness это подтвердила; это правка команды gate или окружения, а не кода задачи: попытка не засчитана, ход ведущего — починить gate или окружение и повторить (retry --by lead). ` +
+              `Код выхода ${result.code}: ${diagnostic(result.stderr, result.stdout, redact)}`,
+          );
+        }
+        partialNotes.push(
+          `${GATE_TOOL_MISSING}: ${redact(tool.line)}; ${verdict.why} — провал засчитан`,
+        );
+      }
       // Gate не назвал причину провала (ни упавших тестов, ни строки ошибки,
       // 0.1.0-alpha.69): это правка определения gate, а не кода задачи —
       // попытка исполнителю не засчитана, gate удержан до хода ведущего

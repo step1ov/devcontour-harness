@@ -15,7 +15,14 @@ import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
@@ -24,6 +31,10 @@ import {
   cliDataSchemas,
   codeReviewRecordSchema,
   digestOf,
+  gateDigest,
+  sha256,
+  API_VERSION,
+  WORKSPACE_OWNER,
   leadDataSchema,
   type InputQuestion,
   type WorkState,
@@ -31,17 +42,27 @@ import {
 import type { Engine } from '../src/engine/engine.ts';
 import { cliAdapter } from '../src/agents/cli-adapter.ts';
 import { releaseDone } from '../src/control/lead.ts';
+import { FAILURE_PATHS_RELEASE_TEXT } from '../src/engine/prompt.ts';
 import {
   releaseBaseOf,
+  briefMissingLine,
   releaseContract,
+  RELEASE_CONTRACT_LIMIT,
   RELEASE_TOPOLOGY_FILE_LIMIT,
   reviewRelease,
   type ReleaseReviewInput,
 } from '../src/control/review-release.ts';
+import {
+  fullGatesProblem,
+  recordGatesRun,
+  releaseGatesProblems,
+} from '../src/control/release-gates.ts';
+import { checkGates } from '../src/control/gates-check.ts';
 import { releaseReviewRequired, releaseReviewState } from '../src/control/release-review-state.ts';
 import { releaseDocsLine, releaseDocsState } from '../src/control/release-docs.ts';
 import { engineOf, graphOf, policyOf, ready } from './engine-fixture.ts';
 import { bin } from './runner-fixture.ts';
+import { junit } from './git-fixture.ts';
 import { finding, recordedPrompt, verdict } from './review-fixture.ts';
 
 const CADDY = 'example.com {\n  reverse_proxy /api/* api:3000\n}\n';
@@ -88,6 +109,12 @@ function fixture(patch: (p: Record<string, any>) => void = () => {}) {
     p.isolation = { mode: 'none', domains: [] };
     p.environment = { values: { FIXTURE_SCENARIO: scenarioPath } };
     p.release = { review: 'required', topology: ['deploy/Caddyfile', 'deploy/prod.env'] };
+    // Gate unit проходит на любом SHA: полный прогон gates цели — настоящий.
+    p.repositories[0].gates[0].command = [
+      process.execPath,
+      '-e',
+      junit('<testcase classname="app" name="ok"/>'),
+    ];
     patch(p);
   });
   const targetRef = policy.repositories[0]!.targetRef;
@@ -111,7 +138,25 @@ function fixture(patch: (p: Record<string, any>) => void = () => {}) {
     stateDir: state,
     repoPath: (path: string) => path,
   };
+  // Полный прогон gates на цели (alpha.71): здесь не предмет — исполняется
+  // тем же путём, что у harness gates и review-release, и записывается в
+  // состояние (ревью B2 M4).
+  const fullGates = async (sha: string) =>
+    recordGatesRun(
+      env.engine,
+      policy,
+      await checkGates({
+        policy,
+        baseDir: '',
+        repoPath: (r) => r.path,
+        stateDir: state,
+        repositoryId: 'app',
+        rev: sha,
+      }),
+    );
+  // review-release сам исполняет полный прогон, когда годного нет.
   const review = (input: ReleaseReviewInput = {}) => reviewRelease(ctx, input);
+  const reviewBare = (input: ReleaseReviewInput = {}) => reviewRelease(ctx, input);
   const heads = () => ({ app: git('rev-parse', targetRef) });
   return {
     ...env,
@@ -125,6 +170,9 @@ function fixture(patch: (p: Record<string, any>) => void = () => {}) {
     scenario,
     scenarioPath,
     review,
+    reviewBare,
+    fullGates,
+    state,
     heads,
   };
 }
@@ -212,6 +260,8 @@ test('P7-6: review-release — договор выпуска в запросе: 
   assert.match(rec.id, /^RR-/);
   const prompt = recordedPrompt(f.scenarioPath, 'reviewer', 0);
   assert.match(prompt, /RELEASE CONTRACT/);
+  // A2: чеклист сбойных путей в ревью выпуска.
+  assert.ok(prompt.includes(FAILURE_PATHS_RELEASE_TEXT), 'чеклист сбойных путей');
   // (a) постановки и критерии приёмки
   assert.match(prompt, /Add a greeting function/);
   assert.match(prompt, /greet\('Ada'\) returns 'Hello, Ada!'/);
@@ -246,7 +296,8 @@ test('P7-6: release done при required — отказ без ревью, с б
   ready(f.engine, graphOf({ w: [] }));
   accept(f.engine, f.base, f.head);
   notReady(
-    () => releaseDone(f.engine, { summary: 'готово', heads: f.heads() }),
+    () =>
+      releaseDone(f.engine, { summary: 'готово', heads: f.heads(), fullGates: { app: undefined } }),
     /ревью выпуска не проводилось.*harness review-release/,
   );
   assert.equal(
@@ -268,7 +319,8 @@ test('P7-6: release done при required — отказ без ревью, с б
   assert.equal(r1.approved, false);
   const blocking = r1.findings[0]!;
   notReady(
-    () => releaseDone(f.engine, { summary: 'готово', heads: f.heads() }),
+    () =>
+      releaseDone(f.engine, { summary: 'готово', heads: f.heads(), fullGates: { app: undefined } }),
     /не одобрено: открытых находок 1, блокирующих 1.*Открытых находок: 1/,
   );
   const findings = f.engine.read((v) => releaseReviewState(v, f.policy, f.heads()));
@@ -292,7 +344,8 @@ test('P7-6: release done при required — отказ без ревью, с б
   assert.equal(stale.head, f.head);
   assert.equal(stale.target, fixed);
   notReady(
-    () => releaseDone(f.engine, { summary: 'готово', heads: f.heads() }),
+    () =>
+      releaseDone(f.engine, { summary: 'готово', heads: f.heads(), fullGates: { app: undefined } }),
     /раунд 1\) на [0-9a-f]{12}, а принятая цель — [0-9a-f]{12}/,
   );
   // Раунд 2 на новой цели: прежняя находка закрыта, одна заметка — не блокирует.
@@ -309,7 +362,11 @@ test('P7-6: release done при required — отказ без ревью, с б
   assert.equal(r2.approved, true);
   assert.equal(r2.findings.find((x) => x.id === blocking.id)?.status, 'closed');
   const done = leadDataSchema.parse(
-    releaseDone(f.engine, { summary: 'Выпуск готов', heads: f.heads() }),
+    releaseDone(f.engine, {
+      summary: 'Выпуск готов',
+      heads: f.heads(),
+      fullGates: { app: undefined },
+    }),
   );
   assert.equal(done.release?.works, 1);
   // Шаг документации по умолчанию — совет (alpha.70): предупреждение, не отказ.
@@ -326,7 +383,9 @@ test('P7-6: advisory — release done проходит с предупрежде
   });
   ready(f.engine, graphOf({ w: [] }));
   accept(f.engine, f.base, f.head);
-  const done = leadDataSchema.parse(releaseDone(f.engine, { summary: 'готово', heads: f.heads() }));
+  const done = leadDataSchema.parse(
+    releaseDone(f.engine, { summary: 'готово', heads: f.heads(), fullGates: { app: undefined } }),
+  );
   assert.equal(done.release?.works, 1);
   assert.equal(done.releaseReview?.required, false);
   assert.equal(done.releaseReview?.status, 'not-run');
@@ -345,7 +404,7 @@ test('P7-6: advisory — release done проходит с предупрежде
   ready(strict.engine, graphOf({ w: [] }));
   accept(strict.engine, strict.base, strict.head);
   assert.throws(
-    () => releaseDone(strict.engine, { summary: 'готово' }),
+    () => releaseDone(strict.engine, { summary: 'готово', fullGates: { app: undefined } }),
     (e: unknown) => e instanceof HarnessError && e.code === 'NOT_READY',
   );
 
@@ -369,7 +428,12 @@ test('P7-6: advisory — release done проходит с предупрежде
   ready(light.engine, graphOf({ w: [] }));
   accept(light.engine, light.base, light.head);
   notReady(
-    () => releaseDone(light.engine, { summary: 'готово', heads: light.heads() }),
+    () =>
+      releaseDone(light.engine, {
+        summary: 'готово',
+        heads: light.heads(),
+        fullGates: { app: undefined },
+      }),
     /harness review-release/,
   );
 });
@@ -412,7 +476,7 @@ test('база выпуска: записана при регистрации и
   assert.equal(recorded.baseSource, 'register');
   // Новый выпуск (после release done) записывает новую базу.
   f.clock.now += 1000;
-  releaseDone(f.engine, { summary: 'готово', heads: f.heads() });
+  releaseDone(f.engine, { summary: 'готово', heads: f.heads(), fullGates: { app: undefined } });
   f.clock.now += 1000;
   assert.deepEqual(f.engine.recordReleaseBases({ app: other }, 'outline'), ['app']);
   assert.equal(f.engine.read((v) => releaseReviewState(v, f.policy)).baseSource, 'outline');
@@ -433,7 +497,12 @@ test('ревью выпуска — только от базы выпуска и
   assert.equal(state.status, 'stale');
   assert.equal(state.repositories[0]!.staleReason, 'base-mismatch');
   notReady(
-    () => releaseDone(f.engine, { summary: 'готово', heads: { app: head } }),
+    () =>
+      releaseDone(f.engine, {
+        summary: 'готово',
+        heads: { app: head },
+        fullGates: { app: undefined },
+      }),
     /не от базы выпуска/,
   );
   // Ревью от базы выпуска одобрено; договор изменился (ответ владельца) — снова нет.
@@ -451,12 +520,19 @@ test('ревью выпуска — только от базы выпуска и
         summary: 'готово',
         heads: { app: head },
         contracts: { app: 'changed-contract' },
+        fullGates: { app: undefined },
       }),
     /договор выпуска изменился/,
   );
   // Цель не определена (target ref не читается) — выпуск не закрывается.
   notReady(
-    () => releaseDone(f.engine, { summary: 'готово', heads: {}, contracts: before }),
+    () =>
+      releaseDone(f.engine, {
+        summary: 'готово',
+        heads: {},
+        contracts: before,
+        fullGates: { app: undefined },
+      }),
     /принятая цель не определена/,
   );
   // Выпуск без изменений: база = цель, ревью идёт с пустым diff.
@@ -626,13 +702,16 @@ test('ревью 1: release.docs: required держит release done и при r
   ready(f.engine, graphOf({ w: [] }));
   accept(f.engine, f.base, f.head);
   notReady(
-    () => releaseDone(f.engine, { summary: 'готово', heads: f.heads() }),
+    () =>
+      releaseDone(f.engine, { summary: 'готово', heads: f.heads(), fullGates: { app: undefined } }),
     /нет работы с меткой docs после корневых работ \(w\).*release\.docs: required/,
   );
   const g = fixture((p) => (p.release = { review: 'advisory', docs: 'advisory' }));
   ready(g.engine, graphOf({ w: [] }));
   accept(g.engine, g.base, g.head);
-  const done = leadDataSchema.parse(releaseDone(g.engine, { summary: 'готово', heads: g.heads() }));
+  const done = leadDataSchema.parse(
+    releaseDone(g.engine, { summary: 'готово', heads: g.heads(), fullGates: { app: undefined } }),
+  );
   assert.match(done.warning ?? '', /нет работы с меткой docs.*release\.docs: advisory/);
   // Второй выпуск: принятая в первом w не корень нового выпуска.
   const next = graphOf({ w: [], w2: [], d2: ['w2'] }, '2');
@@ -674,8 +753,20 @@ test('ревью 3: отмена во время второго прохода �
     refuter: { sleepMs: 5000, result: { summary: 'x', verdicts: [], missed: [] } },
   });
   const abort = new AbortController();
-  setTimeout(() => abort.abort(), 1500);
-  await assert.rejects(f.review({ signal: abort.signal }));
+  // Отмена — когда второй проход действительно начался (не по таймеру: под нагрузкой первый проход
+  // мог не закончиться за фиксированное время).
+  const started = `${f.scenarioPath}.refuter.0.started`;
+  const poll = setInterval(() => {
+    if (existsSync(started)) {
+      clearInterval(poll);
+      abort.abort();
+    }
+  }, 50);
+  try {
+    await assert.rejects(f.review({ signal: abort.signal }));
+  } finally {
+    clearInterval(poll);
+  }
   assert.ok(
     existsSync(`${f.scenarioPath}.refuter.0.started`),
     'отмена пришла во время второго прохода',
@@ -685,4 +776,266 @@ test('ревью 3: отмена во время второго прохода �
     .split('\n')
     .filter((l) => l.startsWith('worktree '));
   assert.equal(trees.length, 1, trees.join('\n'));
+});
+
+test('ревью B, страховка выпуска: review-release исполняет полный прогон сам и отказывает при провале; годен только прогон из состояния под нынешним основанием; release done без него — отказ', async () => {
+  // Gate unit падает на цели: review-release исполняет все gates и отказывает.
+  const failing = fixture(
+    (p) => (p.repositories[0].gates[0].command = [process.execPath, '-e', 'process.exit(1)']),
+  );
+  ready(failing.engine, graphOf({ a: [] }));
+  accept(failing.engine, failing.base, failing.head);
+  await assert.rejects(
+    () => failing.reviewBare(),
+    (e: unknown) =>
+      e instanceof HarnessError &&
+      e.code === 'NOT_READY' &&
+      /полный прогон gates app .* не прошёл: unit/.test(e.message),
+  );
+  const f = fixture();
+  ready(f.engine, graphOf({ a: [] }));
+  accept(f.engine, f.base, f.head);
+  const repo = f.policy.repositories[0]!;
+  const problem = (policy = f.policy) =>
+    f.engine.read((v) =>
+      fullGatesProblem(v, f.state, policy, policy.repositories[0]!, f.head, f.engine.version),
+    );
+  // Итог, написанный руками, без записи в состоянии — не прогон.
+  const forged = join(f.state, 'gates-at', 'GA-forged');
+  mkdirSync(forged, { recursive: true });
+  writeFileSync(
+    join(forged, 'result.json'),
+    JSON.stringify({
+      at: new Date().toISOString(),
+      data: {
+        id: 'GA-forged',
+        repositoryId: 'app',
+        sha: f.head,
+        passed: true,
+        gates: [{ gate: 'unit', status: 'passed', definition: gateDigest(repo.gates[0]!) }],
+      },
+    }),
+  );
+  assert.match(problem() ?? '', /нет полного прогона gates app/);
+  // review-release сам исполняет и записывает прогон; ревью идёт.
+  const record = await f.reviewBare();
+  assert.equal(record.kind, 'release');
+  assert.equal(problem(), undefined);
+  // Основание gate сменилось (окружение) — прогон устарел.
+  const moved = {
+    ...f.policy,
+    environment: {
+      inherit: [],
+      secrets: {},
+      ...f.policy.environment,
+      values: { ...f.policy.environment?.values, NEW: '1' },
+    },
+  };
+  assert.match(problem(moved) ?? '', /устарел: основание gate unit/);
+  // Подменённый файл итога записанного прогона — не годен.
+  const runs = f.engine.read((v) => v.local('gates-runs', WORKSPACE_OWNER, `app@${f.head}`)!.runs);
+  const file = join(f.state, 'gates-at', runs.at(-1)!.id, 'result.json');
+  writeFileSync(file, readFileSync(file, 'utf8') + ' ');
+  assert.match(problem() ?? '', /не совпадает с записью состояния/);
+  // release done: причина полного прогона — отказ при любом правиле ревью.
+  notReady(
+    () =>
+      releaseDone(f.engine, {
+        summary: 'готово',
+        heads: f.heads(),
+        fullGates: { app: 'нет полного прогона gates app' },
+      }),
+    /нет полного прогона gates app/,
+  );
+  // Ревью B2 L1: репозиторий с принятыми работами без проверки — отказ.
+  notReady(
+    () => releaseDone(f.engine, { summary: 'готово', heads: f.heads(), fullGates: {} }),
+    /полный прогон gates app не проверен/,
+  );
+  // Ревью B2 M2: цель не читается — причина с ходом при любом правиле ревью.
+  const problems = f.engine.read((v) =>
+    releaseGatesProblems(v, f.state, f.policy, {}, new Set(['app']), f.engine.version),
+  );
+  assert.match(problems.app ?? '', /не читается — полный прогон gates на ней не проверить/);
+  notReady(
+    () => releaseDone(f.engine, { summary: 'готово', heads: f.heads(), fullGates: problems }),
+    /не читается/,
+  );
+});
+
+test('A1: договор выпуска содержит постановку графа и документы-ответы владельца из закреплённого контекста; смена постановки меняет digest', async () => {
+  const f = fixture();
+  ready(f.engine, graphOf({ a: [] }));
+  const ctxOf = { engine: f.engine, policy: f.policy };
+  const before = await releaseContract(ctxOf, 'app', f.app, f.head);
+  assert.match(before.prompt, /\(c\) Briefs: none recorded/);
+  assert.match(before.prompt, /\(d\) Owner answer documents: none pinned/);
+  const brief =
+    'Каталог чая с фото. Загрузка фото может оборваться — повтор не должен удалять снимки.';
+  assert.equal(f.engine.recordBrief('g1', brief), true);
+  assert.equal(f.engine.recordBrief('g1', brief), false, 'та же постановка — без записи');
+  // Документ-ответ владельца в закреплённом контексте попытки.
+  const pinned = (path: string, data: string) => ({
+    path,
+    digest: sha256(data),
+    bytes: Buffer.byteLength(data),
+    content: { encoding: 'utf8' as const, data },
+  });
+  const answer =
+    '# Вопрос: адрес медиа\n\n## Вопрос\nКак отдавать медиа?\n\n## Ответ\nЧерез шлюз /media.\n';
+  const question = '# Вопрос: цвет\n\n## Вопрос\nКакой цвет?\n\n## Ответ\n\n## Варианты\n- синий\n';
+  const snapshot = {
+    apiVersion: API_VERSION,
+    sources: [
+      {
+        id: 'relay-a',
+        kind: 'relay-task',
+        version: '1',
+        required: true,
+        files: [pinned('documents/DOC-1.md', answer), pinned('documents/DOC-2.md', question)],
+        references: [],
+        digest: 'a'.repeat(64),
+      },
+    ],
+    missing: [],
+  };
+  f.store.transact('run.phase', (tx) => {
+    tx.putLocal('context-snapshots', WORKSPACE_OWNER, 'c'.repeat(64), snapshot);
+    const a = tx.attempts()[0];
+    if (a) tx.putAttempt({ ...a, contextSnapshot: 'c'.repeat(64) });
+  });
+  if (!f.engine.read((v) => v.attempts().length)) {
+    const a = f.engine.claim('c1')!;
+    f.store.transact('run.phase', (tx) =>
+      tx.putAttempt({ ...tx.attempt(a.id)!, contextSnapshot: 'c'.repeat(64) }),
+    );
+  }
+  const after = await releaseContract(ctxOf, 'app', f.app, f.head);
+  assert.ok(after.prompt.includes(brief), 'постановка в договоре');
+  assert.ok(after.prompt.includes('Через шлюз /media.'), 'документ-ответ в договоре');
+  assert.ok(!after.prompt.includes('Какой цвет?'), 'вопрос без ответа — не ответ');
+  assert.notEqual(after.digest, before.digest);
+  // Новая редакция постановки — другой digest договора (раунд устаревает).
+  f.engine.recordBrief('g1', brief + ' И офлайн-загрузка не роняет экран.');
+  const changed = await releaseContract(ctxOf, 'app', f.app, f.head);
+  assert.notEqual(changed.digest, after.digest);
+  assert.match(changed.prompt, /офлайн-загрузка/);
+});
+
+test('A1 (Relay): документ-постановка из закреплённого контекста — в разделе постановок; без постановки — BRIEF_MISSING', async () => {
+  const f = fixture();
+  ready(f.engine, graphOf({ a: [] }));
+  const ctxOf = { engine: f.engine, policy: f.policy };
+  // Ни .brief.md, ни документа-постановки: заметка BRIEF_MISSING.
+  assert.match(f.engine.read((v) => briefMissingLine(v)) ?? '', /^BRIEF_MISSING: /);
+  assert.match((await releaseContract(ctxOf, 'app', f.app, f.head)).prompt, /BRIEF_MISSING/);
+  const pinned = (path: string, data: string) => ({
+    path,
+    digest: sha256(data),
+    bytes: Buffer.byteLength(data),
+    content: { encoding: 'utf8' as const, data },
+  });
+  const brief = '# Каталог чая\n\nЗагрузка фото, оборвавшаяся посреди, не должна удалять снимки.\n';
+  const other = '# Заметки дизайнера\n\nЦвета.\n';
+  const provenance = JSON.stringify({
+    documents: [
+      { id: 'DOC-1', key: 'DOC-1', name: 'Исходная постановка', included: 'full', required: true },
+      { id: 'DOC-2', key: 'DOC-2', name: 'Заметки', included: 'full', required: false },
+    ],
+  });
+  const snapshot = {
+    apiVersion: API_VERSION,
+    sources: [
+      {
+        id: 'relay-a',
+        kind: 'relay-task',
+        version: '1',
+        required: true,
+        files: [pinned('documents/DOC-1.md', brief), pinned('documents/DOC-2.md', other)],
+        references: [pinned('references/provenance.json', provenance)],
+        digest: 'a'.repeat(64),
+      },
+    ],
+    missing: [],
+  };
+  const a = f.engine.claim('c1')!;
+  f.store.transact('run.phase', (tx) => {
+    tx.putLocal('context-snapshots', WORKSPACE_OWNER, 'c'.repeat(64), snapshot);
+    tx.putAttempt({ ...tx.attempt(a.id)!, contextSnapshot: 'c'.repeat(64) });
+  });
+  assert.equal(
+    f.engine.read((v) => briefMissingLine(v)),
+    undefined,
+  );
+  const contract = await releaseContract(ctxOf, 'app', f.app, f.head);
+  assert.match(contract.prompt, /\(c\) Briefs of the release[\s\S]*relay-a\/documents\/DOC-1\.md/);
+  assert.ok(contract.prompt.includes('не должна удалять снимки'));
+  assert.ok(
+    !contract.prompt.includes('Заметки дизайнера'),
+    'необязательный документ — не постановка',
+  );
+  assert.doesNotMatch(contract.prompt, /BRIEF_MISSING/);
+});
+
+test('ревью A1 M2, L2: большая постановка обрезается в своём пределе — топология и её проверка в запросе целиком; правка за обрезкой меняет digest', async () => {
+  const f = fixture();
+  ready(f.engine, graphOf({ a: [] }));
+  const ctxOf = { engine: f.engine, policy: f.policy };
+  const big = 'Сценарий. '.repeat(70_000);
+  f.engine.recordBrief('g1', big + 'конец A');
+  const one = await releaseContract(ctxOf, 'app', f.app, f.head);
+  assert.match(one.prompt, /\[обрезано: \d+ символов\]/);
+  assert.ok(one.prompt.length < RELEASE_CONTRACT_LIMIT + 1000);
+  assert.ok(one.prompt.includes('--- deploy/Caddyfile\n' + CADDY), 'топология целиком');
+  assert.match(one.prompt, /Topology check: compare the production routing/);
+  assert.match(one.prompt, /\(f\) The diff base\.\.head follows\.$/);
+  // Правка за пределом обрезки и записи (512 KiB) — другой digest договора.
+  f.engine.recordBrief('g1', big + 'конец B');
+  const two = await releaseContract(ctxOf, 'app', f.app, f.head);
+  assert.notEqual(two.digest, one.digest);
+});
+
+test('ревью final M3: отказ review-release по виду провала — код (работой, when.always), инструмент (среда), отмена (повторить, без записи)', async () => {
+  const refusal = async (
+    patch: (p: Record<string, any>) => void,
+    input: (f: ReturnType<typeof fixture>) => ReleaseReviewInput = () => ({}),
+  ) => {
+    const f = fixture(patch);
+    ready(f.engine, graphOf({ a: [] }));
+    accept(f.engine, f.base, f.head);
+    let message = '';
+    await f.reviewBare(input(f)).catch((e: unknown) => {
+      assert.ok(e instanceof HarnessError && e.code === 'NOT_READY', String(e));
+      message = e.message;
+    });
+    const runs = f.engine.read(
+      (v) => v.local('gates-runs', WORKSPACE_OWNER, `app@${f.head}`)?.runs,
+    );
+    return { message, runs };
+  };
+  const code = await refusal(
+    (p) => (p.repositories[0].gates[0].command = [process.execPath, '-e', 'process.exit(1)']),
+  );
+  assert.match(code.message, /провал кода \(unit\) исправьте обычной работой/);
+  assert.match(code.message, /"when": \{"always": true\}/);
+  assert.doesNotMatch(code.message, /исправьте окружение/);
+  const tool = await refusal(
+    (p) => (p.repositories[0].gates[0].command = ['sh', '-c', 'harness-no-such-tool-xyz --run']),
+  );
+  assert.match(tool.message, /\[среда: [a-z-]+\]/, tool.message);
+  assert.match(tool.message, /исправьте окружение или определение gate и повторите harness gates/);
+  assert.doesNotMatch(tool.message, /провал кода/);
+  const abort = new AbortController();
+  setTimeout(() => abort.abort(new Error('отменено')), 400);
+  const cancelled = await refusal(
+    (p) =>
+      (p.repositories[0].gates[0].command = [
+        process.execPath,
+        '-e',
+        'setTimeout(() => {}, 20000)',
+      ]),
+    () => ({ signal: abort.signal }),
+  );
+  assert.match(cancelled.message, /прерван .* это не провал кода: повторите review-release/);
+  assert.equal(cancelled.runs, undefined, 'прерванный прогон не записан');
 });

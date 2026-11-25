@@ -2442,6 +2442,10 @@
                   "sandbox-browser",
                   "gate-definition"
                 ]
+              },
+              "tool": {
+                "type": "boolean",
+                "const": true
               }
             },
             "required": [
@@ -4778,6 +4782,24 @@
                     "pathsDigest": {
                       "type": "string",
                       "pattern": "^[a-f0-9]{64}$"
+                    },
+                    "derived": {
+                      "type": "object",
+                      "properties": {
+                        "packages": {
+                          "maxItems": 64,
+                          "type": "array",
+                          "items": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 214
+                          }
+                        }
+                      },
+                      "required": [
+                        "packages"
+                      ],
+                      "additionalProperties": false
                     }
                   },
                   "required": [

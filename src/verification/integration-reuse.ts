@@ -10,6 +10,11 @@ import type { GatePolicy, ReusedEvidence } from '../contracts/index.ts';
  * каждой фазе) и без `artifacts` (копии — свои у каждой фазы), а деревья
  * обоих коммитов совпадают. Деревья сверяет тот, кто владеет Git: controller
  * при записи и recovery, получатель — своим `git rev-parse <sha>^{tree}`.
+ *
+ * С alpha.71 так же переносится ревью: запись `review` интеграции — PASS,
+ * только если она ссылается на решающий PASS ревью кандидата этой попытки
+ * (собственный, не перенесённый) под той же версией проверок, а деревья
+ * совпадают.
  */
 export interface ReuseRecord {
   id: string;
@@ -48,6 +53,7 @@ export function reusedEvidenceProblem(input: ReuseCheck): string | undefined {
   const from = record.reusedEvidence;
   const label = `запись ${record.id} (${record.gate}), взятая из кандидата`;
   if (!from) return `${label}: нет ссылки на запись кандидата`;
+  if (record.kind === 'review') return reviewProblem(input, label);
   if (
     record.kind !== 'test' ||
     record.phase !== 'integration' ||
@@ -93,6 +99,42 @@ export function reusedEvidenceProblem(input: ReuseCheck): string | undefined {
   );
   if (decisive?.id !== source.id)
     return `${label}: запись ${from.evidenceId} — не решающая запись кандидата`;
+  if (input.trees) {
+    if (input.trees.candidate !== input.trees.result)
+      return `${label}: дерево результата ${input.trees.result} не совпадает с деревом кандидата ${input.trees.candidate}`;
+    if (from.tree !== input.trees.candidate)
+      return `${label}: записанное дерево ${from.tree} не совпадает с деревом кандидата ${input.trees.candidate}`;
+  }
+  return undefined;
+}
+
+/** Перенос ревью кандидата на интеграцию (`reusedEvidenceProblem` для записи `review`). */
+function reviewProblem(input: ReuseCheck, label: string): string | undefined {
+  const { record, candidateSha, resultSha } = input;
+  const from = record.reusedEvidence!;
+  if (
+    record.gate !== 'independent-review' ||
+    record.phase !== 'integration' ||
+    record.sha !== resultSha ||
+    !record.passed ||
+    record.consumer !== undefined
+  )
+    return `${label}: переносится только PASS ревью интеграции на result SHA`;
+  if (from.phase !== 'candidate' || from.sha !== candidateSha)
+    return `${label}: ссылка не на SHA кандидата ${candidateSha}`;
+  const own = (e: ReuseRecord) =>
+    e.kind === 'review' &&
+    e.phase === 'candidate' &&
+    e.sha === candidateSha &&
+    e.consumer === undefined &&
+    e.checks === record.checks;
+  const source = input.evidence.find((e) => e.id === from.evidenceId);
+  if (!source) return `${label}: запись кандидата ${from.evidenceId} не найдена`;
+  if (!own(source) || source.reusedEvidence !== undefined)
+    return `${label}: запись ${from.evidenceId} — не собственное ревью кандидата`;
+  if (!source.passed) return `${label}: ревью кандидата ${from.evidenceId} не PASS`;
+  if (input.evidence.findLast(own)?.id !== source.id)
+    return `${label}: запись ${from.evidenceId} — не решающее ревью кандидата`;
   if (input.trees) {
     if (input.trees.candidate !== input.trees.result)
       return `${label}: дерево результата ${input.trees.result} не совпадает с деревом кандидата ${input.trees.candidate}`;

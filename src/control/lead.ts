@@ -203,6 +203,13 @@ export function releaseDone(
      * договору выпуск не принимает.
      */
     contracts?: Readonly<Record<string, string | undefined>>;
+    /**
+     * Почему на цели репозитория нет годного полного прогона gates
+     * (`releaseGatesProblems`, alpha.71): любая причина — отказ `NOT_READY`.
+     * Обязателен (ревью B2 L1): репозиторий с принятыми работами без
+     * записи — тоже отказ.
+     */
+    fullGates: Readonly<Record<string, string | undefined>>;
   },
 ): LeadData {
   const summary = cleanLeadText(options.summary, LEAD_LIMITS.summary, 'release done --summary');
@@ -215,6 +222,24 @@ export function releaseDone(
       );
     const accepted = view.works().filter((w) => w.status === 'done').length;
     if (!accepted) throw new HarnessError('NOT_READY', 'Выпуск не готов: принятых работ нет');
+    // Полный прогон gates на цели выпуска (alpha.71, ревью B) обязателен
+    // при любом правиле ревью выпуска.
+    const unchecked = [
+      ...new Set(
+        view
+          .works()
+          .filter((w) => w.status === 'done')
+          .map((w) => w.order.repositoryId),
+      ),
+    ]
+      .filter((id) => !Object.hasOwn(options.fullGates, id))
+      .map((id) => `полный прогон gates ${id} не проверен`);
+    const gates = [...unchecked, ...Object.values(options.fullGates).filter(Boolean)];
+    if (gates.length)
+      throw new HarnessError(
+        'NOT_READY',
+        `Выпуск не готов: ${gates.join('; ')}. Запустите harness review-release (исполнит полный прогон сам) или harness gates на цели`,
+      );
     const review = releaseReviewState(
       view,
       engine.policy,
@@ -546,6 +571,28 @@ export function recordLeadCommand(
     result: undefined,
   }));
   return true;
+}
+
+/**
+ * Продлить активную сессию ведущего на её аренду без записи в журнал
+ * (`harness wait`, ревью D/E LOW-3): ожидание ведущего — тоже его работа.
+ * Нет активной сессии — ничего; возвращает, продлена ли.
+ */
+export function leadRenew(engine: Engine): boolean {
+  return engine.recordLead((log, now) =>
+    log.session && activeAt(log, now)
+      ? {
+          log: {
+            ...log,
+            session: {
+              ...log.session,
+              until: iso(Math.max(Date.parse(log.session.until), now + log.session.ttlMs)),
+            },
+          },
+          result: true,
+        }
+      : { log, result: false },
+  );
 }
 
 /**

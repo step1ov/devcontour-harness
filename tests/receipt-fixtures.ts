@@ -490,6 +490,58 @@ export function notApplicableAttempt() {
 }
 
 /**
+ * Принятый результат с gate пакета workspace `web` без `when` (alpha.71,
+ * применимость по умолчанию), неприменимым в обеих фазах: записи
+ * `not-applicable` с `derived`.
+ */
+export function derivedNotApplicableAttempt() {
+  const policy = policyOf((p: any) => {
+    // Строгий режим фикстуры: применимость по умолчанию — явным полем;
+    // получатель доверяет исполнителю (сверку Git проверяет свой тест).
+    p.derivedApplicability = 'on';
+    p.trustDerivedRecords = true;
+    p.repositories[0].gates.push({
+      id: 'web',
+      kind: 'check',
+      command: ['pnpm', '--filter', 'web', 'run', 'build'],
+    });
+  });
+  const gate = policy.repositories[0]!.gates.find((g) => g.id === 'web')!;
+  const graph = graphOf({ a: [] });
+  graph.orders[0]!.gates = ['unit', 'web'];
+  const f = attempt(graph, policy);
+  for (const phase of ['candidate', 'integration'] as const) {
+    const at = sha(phase === 'candidate' ? 'c' : 'b');
+    const notApplicable = {
+      gateDigest: gateDigest(gate),
+      patterns: ['apps/web', 'packages/ui'],
+      ranges: [
+        { from: sha('a'), to: sha('c') },
+        ...(phase === 'integration' ? [{ from: sha('a'), to: at }] : []),
+      ],
+      count: 1,
+      files: ['apps/api/a.js'],
+      pathsDigest: sha256('apps/api/a.js'),
+      derived: { packages: ['web'] },
+    };
+    f.e.evidence(f.a.id, f.a.token, {
+      kind: 'not-applicable',
+      phase,
+      sha: at,
+      gate: 'web',
+      passed: false,
+      command: [],
+      exitCode: -1,
+      log: '',
+      digest: digestOf(notApplicable),
+      summary: 'Не применим',
+      notApplicable,
+    });
+  }
+  return f;
+}
+
+/**
  * Результат с записью интеграции, взятой из кандидата (`integrationReuse`):
  * `lint` прошёл на кандидате, на интеграции — ссылка на его запись и общее
  * дерево; получатель передаёт деревья своим Git (`trees`).

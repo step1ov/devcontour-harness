@@ -12,6 +12,8 @@ import {
   codeReviewScope,
   type CodeReviewDecision,
   roleBinding,
+  derivedApplicabilityOn,
+  integrationReuseOn,
   integrationReuseProblem,
   executionDigest,
   isolationDigest,
@@ -144,6 +146,7 @@ import {
 } from '../projections/gate-hold.ts';
 import {
   LEAD_RECOVERY_LIMIT,
+  type LocalValue,
   type LeadDiagnosis,
   type LeadDiagnosisCause,
   type LeadReset,
@@ -155,7 +158,9 @@ import {
   freshDiagnosis,
   leadHold,
   normalizedHypothesis,
+  environmentFailures,
   pendingFailures,
+  repeatedDefect,
   type LeadHold,
 } from '../projections/lead-recovery.ts';
 import { REQUIREMENT_GATE } from '../verification/requirements.ts';
@@ -2454,6 +2459,7 @@ export class Engine {
         })),
         changes,
         finalShas,
+        { derived: derivedApplicabilityOn(this.policy) },
       );
     });
   }
@@ -2809,6 +2815,7 @@ export class Engine {
                     record: evidence,
                     proof: proofGates(w.order, contractDocuments(w.order, tx)),
                     ran: [],
+                    derived: derivedApplicabilityOn(this.policy),
                   });
         if (problem) throw new HarnessError('INVALID_INPUT', problem);
       }
@@ -2816,26 +2823,25 @@ export class Engine {
       // политикой, которая это включила, и по правилу переноса; деревья
       // сверил controller, записавший её (и сверяет recovery).
       if (evidence.reusedEvidence) {
-        const problem =
-          this.policy.integrationReuse !== 'identical-tree'
-            ? 'Запись, взятая из кандидата, без integrationReuse в политике'
-            : !a.candidateSha || !a.integrationSha
-              ? 'Запись, взятая из кандидата, до интеграции'
-              : evidence.recheck !== undefined
-                ? 'Запись, взятая из кандидата, не бывает повтором'
-                : reusedEvidenceProblem({
-                    record: {
-                      ...evidence,
-                      id: 'new',
-                      ...(a.checks ? { checks: a.checks.effective } : {}),
-                    },
-                    evidence: a.evidence,
-                    candidateSha: a.candidateSha,
-                    resultSha: a.integrationSha,
-                    proof: proofGates(w.order, contractDocuments(w.order, tx)),
-                    gates: this.repository(a.repositoryId).gates,
-                    trees: null,
-                  });
+        const problem = !integrationReuseOn(this.policy, this.host)
+          ? 'Запись, взятая из кандидата, без integrationReuse в политике'
+          : !a.candidateSha || !a.integrationSha
+            ? 'Запись, взятая из кандидата, до интеграции'
+            : evidence.recheck !== undefined
+              ? 'Запись, взятая из кандидата, не бывает повтором'
+              : reusedEvidenceProblem({
+                  record: {
+                    ...evidence,
+                    id: 'new',
+                    ...(a.checks ? { checks: a.checks.effective } : {}),
+                  },
+                  evidence: a.evidence,
+                  candidateSha: a.candidateSha,
+                  resultSha: a.integrationSha,
+                  proof: proofGates(w.order, contractDocuments(w.order, tx)),
+                  gates: this.repository(a.repositoryId).gates,
+                  trees: null,
+                });
         if (problem) throw new HarnessError('INVALID_INPUT', problem);
       }
       // Повтор ссылается на провал того же gate этой попытки на том же SHA, и
@@ -2985,18 +2991,17 @@ export class Engine {
           // Взятая из кандидата запись — PASS только по правилу переноса под
           // политикой, которая его включила (и после recovery).
           if (record?.kind === 'test' && record.passed) {
-            const reused =
-              this.policy.integrationReuse !== 'identical-tree'
-                ? 'политика не включает integrationReuse'
-                : reusedEvidenceProblem({
-                    record,
-                    evidence: a.evidence,
-                    candidateSha: a.candidateSha,
-                    resultSha: sha,
-                    proof: named,
-                    gates: repoGates,
-                    trees: null,
-                  });
+            const reused = !integrationReuseOn(this.policy, this.host)
+              ? 'политика не включает integrationReuse'
+              : reusedEvidenceProblem({
+                  record,
+                  evidence: a.evidence,
+                  candidateSha: a.candidateSha,
+                  resultSha: sha,
+                  proof: named,
+                  gates: repoGates,
+                  trees: null,
+                });
             if (!reused) continue;
             throw new HarnessError('GATE_FAILED', `Нет PASS: ${phase}/${gate}: ${reused}`);
           }
@@ -3008,6 +3013,7 @@ export class Engine {
                   record,
                   proof: named,
                   ran: ran[phase],
+                  derived: derivedApplicabilityOn(this.policy),
                 })
               : 'нет записи';
           if (problem)
@@ -3022,6 +3028,27 @@ export class Engine {
           !last('review', phase, phase === 'candidate' ? a.candidateSha : sha, 'independent-review')
         )
           throw new HarnessError('REVIEW_REJECTED', `Нет независимого ревью: ${phase}`);
+      // Ревью интеграции, взятое из ревью кандидата (alpha.71), — PASS только
+      // по правилу переноса под политикой, которая его включила.
+      const carried = decisive(['review'], 'integration', sha, 'independent-review');
+      if (carried?.reusedEvidence) {
+        const problem = !integrationReuseOn(this.policy, this.host)
+          ? 'политика не включает integrationReuse'
+          : reusedEvidenceProblem({
+              record: carried,
+              evidence: a.evidence,
+              candidateSha: a.candidateSha,
+              resultSha: sha,
+              proof: named,
+              gates: repoGates,
+              trees: null,
+            });
+        if (problem)
+          throw new HarnessError(
+            'REVIEW_REJECTED',
+            `Нет независимого ревью: integration: ${problem}`,
+          );
+      }
       // Попытка без изменений (кандидат — база) принимается только с
       // подтверждением reviewer обеих фаз, что приёмка уже выполнена.
       if (a.candidateSha === a.baseSha)
@@ -4904,6 +4931,51 @@ export class Engine {
    * выпуска — нет записи или она старше итога прежнего выпуска (`release
    * done`). Записанная база не переписывается. Возвращает записанные.
    */
+  /**
+   * Записать полный прогон `harness gates` (ревью B2 M4): digest файла итога
+   * и основание каждого gate; до 10 последних прогонов на репозиторий и SHA.
+   */
+  recordGatesRun(repositoryId: string, sha: string, run: LocalValue<'gates-runs'>['runs'][number]) {
+    return this.tx('lead.recorded', (tx) => {
+      const key = `${repositoryId}@${sha}`;
+      const prev = tx.local('gates-runs', WORKSPACE_OWNER, key)?.runs ?? [];
+      tx.putLocal('gates-runs', WORKSPACE_OWNER, key, {
+        runs: [...prev.filter((r) => r.id !== run.id), run].slice(-10),
+      });
+    });
+  }
+
+  /**
+   * Записать постановку графа (`.brief.md`, alpha.71 A1) для договора
+   * выпуска: тот же digest — без записи; новая постановка того же графа
+   * заменяет прежнюю. Текст длиннее 512 KiB хранится обрезанным с
+   * пометкой, digest — по полному тексту.
+   */
+  recordBrief(graphId: string, text: string) {
+    const digest = sha256(text);
+    const limit = 512 * 1024;
+    const stored =
+      text.length > limit
+        ? text.slice(0, limit) + `\n[обрезано: ${text.length - limit} символов]`
+        : text;
+    return this.tx('lead.recorded', (tx) => {
+      const prev = tx.local('release-brief', WORKSPACE_OWNER, 'briefs')?.items ?? [];
+      // Та же постановка после итога прежнего выпуска (ревью A1 L1)
+      // записывается заново: она — постановка нынешнего выпуска.
+      const done = tx.local('lead', WORKSPACE_OWNER, 'log')?.release?.doneAt;
+      if (prev.some((b) => b.graphId === graphId && b.digest === digest && !(done && b.at < done)))
+        return false;
+      const at = new Date(this.now()).toISOString();
+      tx.putLocal('release-brief', WORKSPACE_OWNER, 'briefs', {
+        items: [
+          ...prev.filter((b) => b.graphId !== graphId),
+          { graphId, digest, at, text: stored },
+        ].slice(-20),
+      });
+      return true;
+    });
+  }
+
   recordReleaseBases(
     heads: Record<string, string>,
     source: 'register' | 'outline',
@@ -5944,6 +6016,9 @@ export class Engine {
         ? {}
         : { isolation: strictSandbox(this.policy) ? ('os' as const) : ('none' as const) }),
       ...(cause === 'sandbox-process-list' ? {} : { cause }),
+      ...(cause === 'gate-definition' && e.summary.includes('GATE_TOOL_MISSING')
+        ? { tool: true as const }
+        : {}),
     };
   }
 
@@ -5959,9 +6034,57 @@ export class Engine {
       },
       {
         isolation: strictSandbox(this.policy) ? 'os' : 'none',
-        ...(processListSeen.status ? { processList: processListSeen.status } : {}),
+        ...((processListSeen.status ?? view.local('process-list', WORKSPACE_OWNER, 'probe')?.status)
+          ? {
+              processList: (processListSeen.status ??
+                view.local('process-list', WORKSPACE_OWNER, 'probe')?.status)!,
+            }
+          : {}),
       },
     );
+  }
+
+  /**
+   * Удержание gate работы снято исправлением (alpha.71, E2; ревью D/E
+   * MEDIUM-1): удержание записано, но по текущей политике и среде не
+   * действует. Одно правило для ремонта controller и для explain.
+   */
+  holdLifted(work: WorkState, view: ExecutionView): boolean {
+    return (
+      !!work.environmentHold && !this.environmentGateHolds(view).some((x) => x.workId === work.id)
+    );
+  }
+
+  /** Метка запуска run (ревью final M2): процесс `pid` готовит очередь. */
+  recordRunStart(pid: number, ttlMs: number) {
+    const now = this.now();
+    this.tx('lead.recorded', (tx) =>
+      tx.putLocal('run-start', WORKSPACE_OWNER, 'marker', {
+        pid,
+        at: iso(now),
+        until: iso(now + ttlMs),
+      }),
+    );
+  }
+
+  /** Снять метку запуска своего процесса. */
+  clearRunStart(pid: number) {
+    this.tx('lead.recorded', (tx) => {
+      const marker = tx.local('run-start', WORKSPACE_OWNER, 'marker');
+      // Снять — значит истечь сейчас: удаления локальной записи у хранилища нет.
+      if (marker?.pid === pid)
+        tx.putLocal('run-start', WORKSPACE_OWNER, 'marker', { ...marker, until: iso(this.now()) });
+    });
+  }
+
+  /** Записать ответ пробы списка процессов: его читают и другие процессы. */
+  recordProcessList(status: 'available' | 'unavailable' | 'unknown' | 'not-isolated') {
+    return this.tx('lead.recorded', (tx) => {
+      const prev = tx.local('process-list', WORKSPACE_OWNER, 'probe');
+      if (prev?.status === status) return false;
+      tx.putLocal('process-list', WORKSPACE_OWNER, 'probe', { status, at: iso(this.now()) });
+      return true;
+    });
   }
 
   /** Удержания gates, которые нужны работе (её обязательные gates репозитория). */
@@ -6321,11 +6444,25 @@ export class Engine {
           `Идёт попытка ${w.activeRunId}: разбор — после её окончания`,
         );
       const attempts = tx.attempts(workId);
-      const failures = pendingFailures(w, attempts);
+      const counted = pendingFailures(w, attempts);
+      // Попытки съел предел незасчитанных отказов окружения (alpha.71,
+      // P8-4(b)): ведущий разбирает их причиной `environment` с
+      // доказательством исправления (например, прошедший harness smoke).
+      const environment =
+        !counted.length && input.cause === 'environment' && neutralExhausted(w)
+          ? environmentFailures(w, attempts)
+          : [];
+      const failures = counted.length ? counted : environment;
       if (!failures.length)
         throw new HarnessError(
           'NOT_READY',
           'Засчитанных отказов без разбора нет: отказы окружения, провайдера, вопросы и остановки разбора не требуют',
+        );
+      if (environment.length && !(input.evidence ?? []).some((e) => e.trim()))
+        throw new HarnessError(
+          'INVALID_INPUT',
+          '--evidence обязательна для разбора отказов окружения: чем подтверждено, что окружение исправлено (например, harness smoke --writer-probe прошёл)',
+          [{ path: ['--evidence'], message: 'required' }],
         );
       // Разбор хранится и показывается в панели и журнале: секреты (токены,
       // ключи, учётные данные в URL) маскируются до записи, как у заметок ведущего.
@@ -6351,6 +6488,21 @@ export class Engine {
           'INVALID_INPUT',
           `Гипотеза повторяет разбор ${same.id}: третья попытка с той же гипотезой — та же слепая попытка; назовите новую или передайте решение человеку`,
           [{ path: ['--hypothesis'], message: same.id }],
+        );
+      // Тот же дефект дважды подряд (alpha.71, C3): разбор без новой гипотезы
+      // ничего не меняет — третья попытка была бы той же слепой.
+      const repeated = repeatedDefect(w, attempts);
+      if (
+        repeated &&
+        !hypothesis &&
+        input.cause !== 'split' &&
+        input.cause !== 'contradiction' &&
+        failures.includes(repeated.runs[1])
+      )
+        throw new HarnessError(
+          'INVALID_INPUT',
+          `--hypothesis обязательна: попытки ${repeated.runs.join(' и ')} упали на одном и том же дефекте (${repeated.by === 'finding' ? 'находка ' + repeated.finding : 'тот же отпечаток отказа'}); назовите, что следующая попытка с чистого дерева сделает иначе`,
+          [{ path: ['--hypothesis'], message: 'required' }],
         );
       const evidence = (input.evidence ?? []).map((e) => maskSecrets(e).trim()).filter(Boolean);
       if (evidence.length > 10 || evidence.some((e) => e.length > 1000))
@@ -6387,7 +6539,7 @@ export class Engine {
         },
       });
       const rp = recoveryPolicyOf(this.policy);
-      const exhausted = w.attempt >= this.policy.maxAttempts;
+      const exhausted = w.attempt >= this.policy.maxAttempts || neutralExhausted(w);
       const hold = rp.enabled ? leadHold(next, attempts, rp, this.policy.maxAttempts) : undefined;
       const step = exhausted
         ? exhaustedStep(next, attempts, rp, Boolean(this.budgetBlockOf(w.id, tx)))

@@ -39,6 +39,11 @@ export function environmentGateHolds(
 export const holdCause = (h: { cause?: NoRetryEnvironmentCause }): NoRetryEnvironmentCause =>
   h.cause ?? 'sandbox-process-list';
 
+const TOOL_MISSING = {
+  ru: 'его команда не нашла свой инструмент или браузер (GATE_TOOL_MISSING), — это правка команды gate или окружения, а не кода задачи',
+  en: 'its command could not find its tool or browser (GATE_TOOL_MISSING) — the gate command or the environment needs fixing, not the task code',
+};
+
 const HELD_BECAUSE: Record<NoRetryEnvironmentCause, { ru: string; en: string }> = {
   'sandbox-process-list': {
     ru: 'зовёт ps, а в песочнице проверок список процессов недоступен',
@@ -85,17 +90,22 @@ export const gateHoldsFor = (
  * (человек или разбор ведущего), и строка называет его командой.
  */
 export function gateHoldLine(
-  h: Pick<EnvironmentGateHold, 'gate' | 'workId' | 'cause'>,
+  h: Pick<EnvironmentGateHold, 'gate' | 'workId' | 'cause' | 'tool'>,
   workId?: string,
   route?: RetryRoute,
 ): { ru: string; en: string } {
   const own = workId === h.workId;
   const lift = `harness retry --work ${h.workId} --by lead`;
-  const because = HELD_BECAUSE[holdCause(h)];
+  const because = h.tool ? TOOL_MISSING : HELD_BECAUSE[holdCause(h)];
   const head = {
     ru: `gate ${h.gate} удержан: ${because.ru}${own ? '' : ` (отказ работы ${h.workId})`}`,
     en: `gate ${h.gate} is held: ${because.en}${own ? '' : ` (failure of ${h.workId})`}`,
   };
+  if (!route?.limit && h.tool)
+    return {
+      ru: `${head.ru}; ход ведущего — установить инструмент или браузер либо поправить команду gate (или окружение) и повторить ${h.workId} (${lift})`,
+      en: `${head.en}; the lead installs the tool or browser or fixes the gate command (or the environment) and retries ${h.workId} (${lift})`,
+    };
   if (!route?.limit && isGateDefinitionHold(h))
     return {
       ru: `${head.ru}; ход ведущего — поменять команду gate, чтобы при провале она печатала упавшие тесты и строку ошибки, и повторить ${h.workId} (${lift})`,

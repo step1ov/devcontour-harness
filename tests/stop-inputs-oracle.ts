@@ -29,6 +29,7 @@ import type {
 } from '../src/contracts/index.ts';
 import type { Engine } from '../src/engine/engine.ts';
 import { acceptanceGap, repairDecision } from '../src/engine/repair.ts';
+import { repeatedDefectPending } from '../src/projections/lead-recovery.ts';
 import { requestsOf } from '../src/engine/input-requests.ts';
 import { activeOf } from '../src/engine/engine.ts';
 import { inputStateOf } from '../src/projections/input.ts';
@@ -317,9 +318,11 @@ export function referenceStopInputsOf(h: StopSource, options: StopInputOptions):
         },
         maxAttempts: options.maxAttempts,
         repair: {
-          sameFailureRepairs: fingerprint
-            ? identical - 1
-            : repairRepeats(kind, lastContextLimit(attempts)),
+          // alpha.71: тот же дефект дважды подряд без разбора — повторы исчерпаны.
+          sameFailureRepairs:
+            fingerprint && !repeatedDefectPending(work, attempts)
+              ? identical - 1
+              : repairRepeats(kind, lastContextLimit(attempts)),
           groupRepairsUsed: job?.repairs ?? 0,
           groupRepairBudget: job ? options.repairBudget : 0,
           ...(outlook ? { outlook } : {}),
@@ -477,6 +480,7 @@ function outlookOf(
     const retry =
       rule.action === 'retry' &&
       identical - 1 < repeats &&
+      !repeatedDefectPending(w, v.attempts(w.id)) &&
       !acceptanceGap(v, w) &&
       (w.neutralFailures ?? 0) < MAX_NEUTRAL_FAILURES &&
       w.attempt < options.maxAttempts &&

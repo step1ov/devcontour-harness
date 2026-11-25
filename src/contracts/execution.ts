@@ -1088,6 +1088,11 @@ export const workStateSchema = z.strictObject({
        * Нет поля (состояние до этого поля) — `sandbox-process-list`.
        */
       cause: z.enum(noRetryEnvironmentCauses).optional(),
+      /**
+       * `gate-definition` из-за отсутствующего инструмента или браузера
+       * (`GATE_TOOL_MISSING`, alpha.71): чинится команда gate или окружение.
+       */
+      tool: z.literal(true).optional(),
     })
     .optional(),
 });
@@ -1625,6 +1630,76 @@ export const localSchemas = {
     at: isoTimeSchema,
     /** `attempt` — выпуск, начатый до alpha.69: база самой ранней его попытки. */
     source: z.enum(['register', 'outline', 'attempt']),
+  }),
+  /**
+   * Постановки выпуска (alpha.71, A1): запись `briefs` у `@workspace` —
+   * текст `.brief.md` каждого зарегистрированного графа (до 512 KiB, длиннее
+   * — с пометкой обрезки), его digest по полному тексту и время записи.
+   * Читает договор выпуска (`review-release`); пишет регистрация графа.
+   */
+  'release-brief': z.strictObject({
+    items: z
+      .array(
+        z.strictObject({
+          graphId: idSchema,
+          digest: digestSchema,
+          at: isoTimeSchema,
+          text: z.string().max(600 * 1024),
+        }),
+      )
+      .max(20),
+  }),
+  /**
+   * Метка запуска `harness run` (ревью final M2): процесс run жив и ещё не
+   * взял роль controller (регистрация, пробы, ревью плана). Запись `marker`
+   * у `@workspace`; `until` — предел на случай гибели процесса.
+   */
+  'run-start': z.strictObject({
+    pid: z.number().int().positive(),
+    at: isoTimeSchema,
+    until: isoTimeSchema,
+  }),
+  /**
+   * Последний ответ пробы списка процессов в песочнице (alpha.71, ревью D/E
+   * MEDIUM-1): запись `probe` у `@workspace`. По ней снятие удержания gate
+   * отказом `ps` видят и другие процессы (`explain`, `wait`), а не только
+   * controller, который пробу исполнил.
+   */
+  'process-list': z.strictObject({
+    status: z.enum(['available', 'unavailable', 'unknown', 'not-isolated']),
+    at: isoTimeSchema,
+  }),
+  /**
+   * Полные прогоны `harness gates` (alpha.71, ревью B2 M4): запись по
+   * `<репозиторий>@<SHA>` у `@workspace` — до 10 последних прогонов с digest
+   * файла итога и основанием каждого gate (`gateBasis`). Страховка выпуска
+   * засчитывает только прогон из этой записи.
+   */
+  'gates-runs': z.strictObject({
+    runs: z
+      .array(
+        z.strictObject({
+          id: z.string().min(1).max(200),
+          at: isoTimeSchema,
+          digest: digestSchema,
+          passed: z.boolean(),
+          gates: z
+            .array(
+              z.strictObject({
+                gate: idSchema,
+                status: z.string().min(1).max(40),
+                basis: digestSchema,
+                /**
+                 * Провал среды, а не кода (ревью final M3): причина gate
+                 * (`sandbox-process-list`, `gate-definition` — нет инструмента…).
+                 */
+                environment: z.string().min(1).max(100).optional(),
+              }),
+            )
+            .max(500),
+        }),
+      )
+      .max(10),
   }),
   'round-epochs': z.strictObject({
     epochs: z.array(z.strictObject({ at: isoTimeSchema, workId: idSchema })).max(100),

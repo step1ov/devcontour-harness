@@ -21,7 +21,12 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
-import { cliCommands, cliDataSchemas, cliErrorSchema } from '../src/contracts/index.ts';
+import {
+  WORKSPACE_OWNER,
+  cliCommands,
+  cliDataSchemas,
+  cliErrorSchema,
+} from '../src/contracts/index.ts';
 
 import { SqliteExecutionStore } from '../src/storage/sqlite.ts';
 import { example } from './fixtures.ts';
@@ -357,8 +362,17 @@ test('gates: инициализированный каталог состоян�
     res.data!.gates.map((g) => g.status),
     ['passed'],
   );
-  assert.deepEqual(snapshot(), before, 'binding.json и state.sqlite не тронуты');
-  assert.deepEqual(readdirSync(state).sort(), ['binding.json', 'gates-at', 'state.sqlite']);
+  // Прогон записан в состояние (alpha.71, ревью B2 M4): binding не тронут,
+  // в базе — запись прогона с основанием gate; прогон части gates полным не бывает.
+  assert.deepEqual(snapshot()['binding.json'], before['binding.json'], 'binding.json не тронут');
+  const store = new SqliteExecutionStore(join(state, 'state.sqlite'), 'probe');
+  const head = r.git('rev-parse', 'HEAD');
+  const runs = store.read((v) => v.local('gates-runs', WORKSPACE_OWNER, `app@${head}`)?.runs);
+  store.close();
+  assert.equal(runs?.length, 1);
+  assert.equal(runs[0]!.gates[0]!.gate, 'unit');
+  assert.match(runs[0]!.gates[0]!.basis, /^[0-9a-f]{64}$/);
+  assert.ok(readdirSync(state).includes('gates-at'));
 });
 
 test('gates: предупреждение пробы портов (порт на всех адресах держит чужой процесс) — в data.warnings и в таблице', async () => {

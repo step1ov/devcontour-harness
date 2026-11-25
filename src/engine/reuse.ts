@@ -1,3 +1,4 @@
+import { repeatedDefect } from '../projections/lead-recovery.ts';
 import {
   digestOf,
   type AttemptState,
@@ -116,6 +117,9 @@ export function reusableImplementation(
     return { reuse: false, reason: 'кандидат предыдущей попытки не записан' };
   if (previous.implementationBasis !== basis)
     return { reuse: false, reason: 'основания реализации изменились' };
+  // Кандидат пары одного и того же дефекта не берётся (ревью C LOW-4).
+  if (repeatedDefect(work, view.attempts(work.id))?.runs.includes(previous.id))
+    return { reuse: false, reason: 'тот же дефект дважды подряд: попытка с чистого дерева' };
   return { reuse: true, from: previous, candidateSha: previous.candidateSha };
 }
 
@@ -171,6 +175,11 @@ export function continuableDraft(
     )
     .at(-1);
   if (!previous || previous.status !== 'failed') return undefined;
+  // Тот же дефект дважды подряд (alpha.71, C3): следующая попытка — с чистого
+  // дерева, а не третье продолжение того же патча. Только когда источник
+  // черновика — одна из попыток пары (ревью C LOW-4): черновик прерванной
+  // или упавшей на окружении попытки с чистого дерева продолжается.
+  if (repeatedDefect(work, view.attempts(work.id))?.runs.includes(previous.id)) return undefined;
   if (previous.candidateSha && previous.baseSha && previous.failureKind && work.approvedDigest) {
     // Отказ провайдера кода не касается: такой кандидат берётся
     // переиспользованием, а не черновиком.

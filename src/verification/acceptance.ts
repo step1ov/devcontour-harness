@@ -2,7 +2,9 @@ import {
   codeReview,
   roleBinding,
   HarnessError,
+  derivedApplicabilityOn,
   digestOf,
+  integrationReuseOn,
   expandGateRefs,
   selectReviewer,
   vendorOf,
@@ -166,7 +168,12 @@ type ReceivedEvidence = ProofEvidence &
 
 /** Политика получателя: репозитории (gates, группы, зависимости, target), роли и правила ревью. */
 export type ReceiverPolicy = Pick<ExecutionPolicy, 'repositories' | 'roles' | 'review'> &
-  Partial<Pick<ExecutionPolicy, 'integrationReuse'>>;
+  Partial<
+    Pick<
+      ExecutionPolicy,
+      'integrationReuse' | 'harnessMode' | 'derivedApplicability' | 'trustDerivedRecords'
+    >
+  >;
 
 /**
  * Что получатель знает сам и передаёт проверке. Всё, что результат
@@ -235,6 +242,29 @@ export interface ReceiverContext {
    * чистой — Git вызывает получатель.
    */
   trees?: { candidate: string; result: string };
+  /**
+   * Сверка записей применимости по умолчанию (`notApplicable.derived`,
+   * alpha.71, ревью B M2) своим Git (`derivedRecordChecks`): ID записи →
+   * причина отказа или undefined (решение подтверждено). Записи без сверки
+   * засчитываются только при `trustDerivedRecords` политики получателя.
+   */
+  derivedChecks?: ReadonlyMap<string, string | undefined>;
+}
+
+/**
+ * Запись применимости по умолчанию засчитывается получателем только по
+ * своей сверке Git (`derivedChecks`) или при явном доверии исполнителю
+ * (`trustDerivedRecords`): иначе её ни пути, ни diff получатель не проверил.
+ */
+function derivedTrust(
+  check: { id: string; notApplicable?: GateApplicability | undefined },
+  context: ReceiverContext,
+  policy: ReceiverPolicy,
+): string | undefined {
+  if (!check.notApplicable?.derived) return undefined;
+  if (context.derivedChecks?.has(check.id)) return context.derivedChecks.get(check.id);
+  if (policy.trustDerivedRecords) return undefined;
+  return 'запись применимости по умолчанию не сверена получателем (derivedChecks), а политика получателя не доверяет исполнителю (trustDerivedRecords)';
 }
 
 /** Runtime, которые политика получателя назначает writer-ами и reviewer-ами. */
@@ -410,13 +440,25 @@ export const receiptTrust = {
   'evidence[].notApplicable.files': ['informative', 'diff фазы — наблюдение Git исполнителя'],
   'evidence[].notApplicable.files[]': ['informative', 'diff фазы — наблюдение Git исполнителя'],
   'evidence[].notApplicable.pathsDigest': ['informative', 'diff фазы — наблюдение Git исполнителя'],
+  'evidence[].notApplicable.derived': [
+    'consistency',
+    'применимость по умолчанию: gate пакета без when, которому её разрешает политика получателя; сверка Git получателя (derivedChecks) или trustDerivedRecords',
+  ],
+  'evidence[].notApplicable.derived.packages': [
+    'informative',
+    'пакеты привязки gate по наблюдению исполнителя',
+  ],
+  'evidence[].notApplicable.derived.packages[]': [
+    'informative',
+    'пакеты привязки gate по наблюдению исполнителя',
+  ],
   'evidence[].reusedEvidence': [
     'expected',
-    'только у записи test интеграции: PASS по правилу переноса и деревьям получателя (trees)',
+    'только у записи test или ревью интеграции: PASS по правилу переноса и деревьям получателя (trees)',
   ],
   'evidence[].reusedEvidence.evidenceId': [
     'consistency',
-    'решающая PASS-запись того же gate на кандидате в этом результате',
+    'решающая PASS-запись того же gate (или ревью) на кандидате в этом результате',
   ],
   'evidence[].reusedEvidence.phase': ['schema', 'литерал candidate'],
   'evidence[].reusedEvidence.sha': ['consistency', 'SHA кандидата результата'],
@@ -638,9 +680,13 @@ export function resultProblems(result: RunResult, context: ReceiverContext): str
       integrity.push(`запись ${e.id}: сведения о reviewer не согласованы с видом записи`);
     if (
       e.reusedEvidence !== undefined &&
-      (e.kind !== 'test' || e.phase !== 'integration' || e.consumer !== undefined)
+      ((e.kind !== 'test' && e.kind !== 'review') ||
+        e.phase !== 'integration' ||
+        e.consumer !== undefined)
     )
-      integrity.push(`запись ${e.id}: взятой из кандидата бывает только запись test интеграции`);
+      integrity.push(
+        `запись ${e.id}: взятой из кандидата бывает только запись test или ревью интеграции`,
+      );
     if ((e.notApplicable !== undefined) !== (e.kind === 'not-applicable'))
       integrity.push(`запись ${e.id}: сведения о неприменимости не согласованы с видом записи`);
     if (e.kind === 'not-applicable' && (e.passed || e.consumer !== undefined))
@@ -727,7 +773,7 @@ export function resultProblems(result: RunResult, context: ReceiverContext): str
     // Запись, взятая из кандидата, — PASS интеграции только по правилу
     // переноса и деревьям, которые получатель вычислил сам.
     if (check?.passed && check.reusedEvidence) {
-      const reused = !policy.integrationReuse
+      const reused = !integrationReuseOn(policy)
         ? `запись ${check.id} (${gate}) взята из кандидата, а политика получателя не включает integrationReuse`
         : context.trees
           ? reusedEvidenceProblem({
@@ -746,7 +792,7 @@ export function resultProblems(result: RunResult, context: ReceiverContext): str
     if (check?.passed) continue;
     const problem =
       check?.kind === 'not-applicable'
-        ? notApplicableProblem({
+        ? (notApplicableProblem({
             gates: repo.gates,
             gate,
             record: check,
@@ -754,7 +800,8 @@ export function resultProblems(result: RunResult, context: ReceiverContext): str
             ran: decisiveAll
               .filter((d) => d.phase === phase && d.check?.kind === 'test')
               .map((d) => d.gate),
-          })
+            derived: derivedApplicabilityOn(policy),
+          }) ?? derivedTrust(check, context, policy))
         : 'нет записи';
     if (problem)
       problems.push(

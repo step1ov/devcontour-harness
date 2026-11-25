@@ -11,13 +11,17 @@ import { releaseDocsLine, releaseDocsOpen, releaseDocsState } from './release-do
 import {
   HarnessError,
   type CodeReviewRecord,
+  type ExecutionPolicy,
   type ExecutionView,
   type GraphState,
   type WorkState,
   WORKSPACE_OWNER,
+  INPUT_SOURCE_KIND,
   digestOf,
 } from '../contracts/index.ts';
 import { requestsOf } from '../engine/input-requests.ts';
+import { checkGates, commitOf } from './gates-check.ts';
+import { fullGatesProblem, recordGatesRun } from './release-gates.ts';
 import {
   rawGit,
   reviewBranch,
@@ -36,13 +40,34 @@ export interface ReleaseReviewInput {
   base?: string;
   /** Принятая цель; нет — target ref репозитория. */
   head?: string;
+  /** Отмена человеком (сигнал); пределы времени шагов review-release задаёт сам. */
   signal?: AbortSignal;
 }
+
+/**
+ * Предел полного прогона gates в review-release (ревью final M3): свой, не
+ * общий с reviewer — сумма пределов gates репозитория (не меньше предела
+ * попытки) и минута на подготовку.
+ */
+export const fullGatesBudgetMs = (
+  policy: ExecutionPolicy,
+  repo: ExecutionPolicy['repositories'][number],
+) =>
+  Math.max(
+    policy.runTimeoutMs,
+    repo.gates.reduce((sum, g) => sum + g.timeoutMs, 0),
+  ) + 60_000;
+
+const withTimeout = (signal: AbortSignal | undefined, ms: number) =>
+  signal ? AbortSignal.any([signal, AbortSignal.timeout(ms)]) : AbortSignal.timeout(ms);
 
 /** Предел одного файла топологии в запросе. */
 export const RELEASE_TOPOLOGY_FILE_LIMIT = 64 * 1024;
 /** Предел договора выпуска в запросе: больший обрезается с пометкой. */
 export const RELEASE_CONTRACT_LIMIT = 512 * 1024;
+/** Пределы разделов договора (ревью A1 M2): постановки и документы-ответы. */
+export const RELEASE_BRIEFS_LIMIT = 128 * 1024;
+export const RELEASE_ANSWERS_LIMIT = 96 * 1024;
 
 const clip = (text: string, max: number) =>
   text.length > max ? text.slice(0, max) + `\n[обрезано: ${text.length - max} символов]` : text;
@@ -62,6 +87,141 @@ export function releaseBaseOf(view: ExecutionView, repositoryId: string): string
     .attempts()
     .filter((a) => a.repositoryId === repositoryId && a.baseSha && (!done || a.startedAt > done))
     .sort((a, b) => a.startedAt.localeCompare(b.startedAt) || a.id.localeCompare(b.id))[0]?.baseSha;
+}
+
+/** Путь закреплённого документа Relay по его ID (`documents/<id>.md`, как в снимке коннектора). */
+const docPath = (id: string) => `documents/${id.replace(/[^A-Za-z0-9_-]/g, '_')}.md`;
+
+/**
+ * Документы-постановки источника Relay по его `references/provenance.json`:
+ * обязательные документы задачи (требования) и документы, чьё имя называет
+ * постановку, бриф или требования.
+ */
+function provenanceBriefs(source: {
+  references: { path: string; content: { encoding: string; data: string } }[];
+}): string[] {
+  const ref = source.references.find((r) => r.path === 'references/provenance.json');
+  if (!ref || ref.content.encoding !== 'utf8') return [];
+  try {
+    const value = JSON.parse(ref.content.data) as {
+      documents?: { id?: unknown; name?: unknown; key?: unknown; required?: unknown }[];
+    };
+    return (value.documents ?? [])
+      .filter(
+        (d) =>
+          typeof d.id === 'string' &&
+          (d.required === true ||
+            /бриф|brief|постановк|требован|requirement/i.test(
+              `${String(d.name)} ${String(d.key)}`,
+            )),
+      )
+      .map((d) => docPath(d.id as string));
+  } catch {
+    return [];
+  }
+}
+
+/** Постановок выпуска нет (`BRIEF_MISSING`): ни `.brief.md`, ни документа-постановки в контексте. */
+export const BRIEF_MISSING = 'BRIEF_MISSING';
+export const briefMissingLine = (view: ExecutionView) =>
+  releaseBriefsAndAnswers(view).briefs.length
+    ? undefined
+    : `${BRIEF_MISSING}: у выпуска нет постановки — ни .harness/work/<граф>.brief.md рядом с графом при run --graph, ни документа-постановки в закреплённом контексте; ревью выпуска сверяет только критерии работ. Закрепите бриф (документ Relay задачи или .brief.md) и повторите review-release`;
+
+/** Раздел `## Ответ`/`## Answer` документа Relay с непустым текстом (вопрос владельцу с ответом). */
+const answered = (text: string) => /^##\s+(?:ответ|answer)\s*#*\s*$\n+(?!\s*(?:##|$))/im.test(text);
+
+/**
+ * Постановки графов выпуска (`release-brief`, alpha.71 A1) и документы-ответы
+ * владельца из закреплённых контекстов графов и попыток: источники
+ * `input-answer` целиком и документы Relay с разделом «Ответ». Только записи
+ * нынешнего выпуска — после итога прежнего (`release done`): постановки,
+ * попытки и согласования графов. У документа — только последняя редакция
+ * (по источнику и пути; у `input-answer` источник — запрос): решает время
+ * снимка (начало попытки, согласование графа). С `repositoryId` — только
+ * материалы этого репозитория (граф с его работами, попытка в нём); граф
+ * без работ — общий. Порядок вывода — по источнику и пути.
+ */
+export function releaseBriefsAndAnswers(view: ExecutionView, repositoryId?: string) {
+  const done = view.local('lead', WORKSPACE_OWNER, 'log')?.release?.doneAt;
+  const current = (at: string) => !done || at > done;
+  const graphRepos = (graphId: string) =>
+    new Set(view.works(graphId).map((w) => w.order.repositoryId));
+  const forRepo = (repos: Set<string>) => !repositoryId || !repos.size || repos.has(repositoryId);
+  const briefs = (view.local('release-brief', WORKSPACE_OWNER, 'briefs')?.items ?? [])
+    .filter((b) => (!done || b.at >= done) && forRepo(graphRepos(b.graphId)))
+    .map((b) => ({ graph: b.graphId, digest: b.digest, text: b.text }));
+  // Снимок → время, когда его закрепили впервые в этом выпуске: прежний
+  // снимок, закреплённый позже ещё раз, новее новой редакции не становится.
+  const snapshots = new Map<string, string>();
+  const pinned = (digest: string, at: string) => {
+    const prev = snapshots.get(digest);
+    if (!prev || at < prev) snapshots.set(digest, at);
+  };
+  for (const g of view.graphs())
+    if (g.approval?.context?.digest && current(g.approval.at) && forRepo(graphRepos(g.id)))
+      pinned(g.approval.context.digest, g.approval.at);
+  for (const a of view.attempts())
+    if (a.contextSnapshot && current(a.startedAt) && forRepo(new Set([a.repositoryId])))
+      pinned(a.contextSnapshot, a.startedAt);
+  // Ссылки критериев на постановку (`criteriaSources` kind brief, alpha.70).
+  const briefRefs = new Set(
+    view
+      .works()
+      .flatMap((w) => w.order.criteriaSources ?? [])
+      .filter((c) => c.kind === 'brief')
+      .map((c) => docPath(c.ref)),
+  );
+  type Doc = { source: string; path: string; digest: string; text: string };
+  // От раннего снимка к позднему: поздняя редакция документа (тот же
+  // источник и путь) заменяет раннюю, даже если в ней ответа уже нет.
+  const latest = new Map<string, Doc & { kind: 'answer' | 'brief' | 'other' }>();
+  const ordered = [...snapshots].sort(
+    (x, y) => x[1].localeCompare(y[1]) || x[0].localeCompare(y[0]),
+  );
+  for (const [digest] of ordered) {
+    const snapshot = view.local('context-snapshots', WORKSPACE_OWNER, digest);
+    for (const source of snapshot?.sources ?? []) {
+      const briefPaths = new Set([...briefRefs, ...provenanceBriefs(source)]);
+      for (const file of source.files) {
+        if (file.content.encoding !== 'utf8') continue;
+        const text = file.content.data;
+        latest.set(`${source.id}\0${file.path}`, {
+          source: source.id,
+          path: file.path,
+          digest: file.digest,
+          text,
+          kind:
+            source.kind === INPUT_SOURCE_KIND || (/\.md$/i.test(file.path) && answered(text))
+              ? 'answer'
+              : // Постановка в документе Relay (alpha.71, A1): документ, на
+                // который ссылаются критерии как на постановку, обязательный
+                // документ задачи или документ с именем постановки/брифа.
+                briefPaths.has(file.path)
+                ? 'brief'
+                : 'other',
+        });
+      }
+    }
+  }
+  const answers = new Map<string, Doc>();
+  const docs = new Map<string, Doc>();
+  for (const [key, { kind, ...doc }] of latest)
+    if (kind === 'answer') answers.set(key, doc);
+    else if (kind === 'brief') docs.set(key, doc);
+  const sorted = (m: Map<string, Doc>) =>
+    [...m].sort(([a], [b]) => a.localeCompare(b)).map(([, d]) => d);
+  return {
+    briefs: [
+      ...briefs,
+      ...sorted(docs).map((d) => ({
+        graph: `${d.source}/${d.path}`,
+        digest: d.digest,
+        text: d.text,
+      })),
+    ],
+    answers: sorted(answers),
+  };
 }
 
 /** Постановки и ответы владельца — разделы договора выпуска из состояния. */
@@ -124,6 +284,38 @@ export async function reviewRelease(
       'NOT_READY',
       `review-release: ${docsLine}; release.docs: required — сначала примите работу документации (метка docs, зависит от корневых работ)`,
     );
+  // Полный прогон gates на цели выпуска (alpha.71, ревью B): нет годного —
+  // review-release исполняет его сам; не прошёл — отказ до ревью.
+  const path = ctx.repoPath(repo.path);
+  const sha = await commitOf(path, head, repo.id);
+  const problem = () =>
+    ctx.engine.read((v) =>
+      fullGatesProblem(v, ctx.stateDir, ctx.policy, repo, sha, ctx.engine.version),
+    );
+  if (problem()) {
+    const run = await checkGates({
+      policy: ctx.policy,
+      baseDir: '',
+      repoPath: (r) => ctx.repoPath(r.path),
+      stateDir: ctx.stateDir,
+      repositoryId: repo.id,
+      rev: sha,
+      signal: withTimeout(input.signal, fullGatesBudgetMs(ctx.policy, repo)),
+    });
+    // Прерванный прогон не записывается и не провал кода (ревью final M3).
+    if (run.interrupted)
+      throw new HarnessError(
+        'NOT_READY',
+        `review-release: полный прогон gates ${repo.id} на ${sha.slice(0, 12)} прерван (${run.interrupted}) — это не провал кода: повторите review-release (или harness gates --sha ${sha})`,
+      );
+    recordGatesRun(ctx.engine, ctx.policy, run);
+  }
+  const gates = problem();
+  if (gates)
+    throw new HarnessError(
+      'NOT_READY',
+      `review-release: ${gates}. Приёмка выпуска опирается на полный прогон всех gates на цели (без неприменимости и переноса); после исправления повторите review-release`,
+    );
   return reviewBranch(
     ctx,
     {
@@ -132,7 +324,8 @@ export async function reviewRelease(
       ...(input.role ? { role: input.role } : {}),
       ...(input.author ? { author: input.author } : {}),
       repositoryId: repo.id,
-      ...(input.signal ? { signal: input.signal } : {}),
+      // Свой предел reviewer — после прогона gates, не остаток общего (ревью final M3).
+      signal: withTimeout(input.signal, ctx.policy.runTimeoutMs + 5000),
     },
     {
       contract: async ({ path, head: sha }) => {
@@ -157,6 +350,7 @@ export async function releaseContract(
   sha: string,
 ): Promise<{ prompt: string; digest: string }> {
   const state = ctx.engine.read((v) => contractFromState(v, repositoryId));
+  const owner = ctx.engine.read((v) => releaseBriefsAndAnswers(v, repositoryId));
   const topology = ctx.policy.release?.topology ?? [];
   const files: { full: string; clipped: string }[] = [];
   for (const file of topology) {
@@ -173,7 +367,16 @@ export async function releaseContract(
       clipped: `--- ${file}\n${clip(text, RELEASE_TOPOLOGY_FILE_LIMIT)}`,
     });
   }
-  const compose = (list: string[]) =>
+  // Постановки и ответы — в своих пределах (ревью A1 M2); заголовок каждой
+  // постановки несёт digest её полного текста (L2): правка за обрезкой
+  // меняет digest договора.
+  const briefsText = owner.briefs
+    .map((b) => `\n--- brief of graph ${b.graph} (sha256 ${b.digest})\n${b.text}`)
+    .join('');
+  const answersText = owner.answers
+    .map((a) => `\n--- ${a.source}/${a.path} (sha256 ${a.digest})\n${a.text}`)
+    .join('');
+  const head = (limit: (text: string, max: number) => string) =>
     [
       'RELEASE CONTRACT.',
       '(a) Orders of all registered graphs (engine state): every acceptance criterion must hold in the accepted target as deployed, not only in tests. ' +
@@ -182,14 +385,29 @@ export async function releaseContract(
         ? '(b) Owner answers to input requests: the release must follow them. ' +
           JSON.stringify(state.answers)
         : '(b) Owner answers: none recorded.',
-      topology.length
-        ? '(c) Deploy topology (policy release.topology, read from head):\n' + list.join('\n')
-        : '(c) Deploy topology: the policy names no topology files (release.topology). Find the production gateway/proxy configs and production env files in the checkout yourself; their absence for a deployed app is a finding.',
-      'Topology check: compare the production routing and env (gateway/proxy routes, production env files, public base URLs for media, uploads and API) with what the gates and tests exercised (often the API port directly). Every user-visible URL the works produce must be routed by the production gateway; report mismatches as blocking.',
-      '(d) The diff base..head follows.',
+      owner.briefs.length
+        ? "(c) Briefs of the release (the user's own words; every scenario they describe must work in the accepted target, including its failure paths): " +
+          limit(briefsText, RELEASE_BRIEFS_LIMIT)
+        : `(c) Briefs: none recorded (${BRIEF_MISSING}: no .brief.md and no brief document in the pinned context). Review the release against the orders, and report every user scenario the orders imply but do not state as a note.`,
+      owner.answers.length
+        ? '(d) Owner answer documents from the pinned context (the release must follow them): ' +
+          limit(answersText, RELEASE_ANSWERS_LIMIT)
+        : '(d) Owner answer documents: none pinned.',
     ].join('\n\n');
+  // Топология, её проверка и (f) не обрезаются никогда: предел договора
+  // режет только начало (a)–(d).
+  const tail = (list: string[]) =>
+    [
+      topology.length
+        ? '(e) Deploy topology (policy release.topology, read from head):\n' + list.join('\n')
+        : '(e) Deploy topology: the policy names no topology files (release.topology). Find the production gateway/proxy configs and production env files in the checkout yourself; their absence for a deployed app is a finding.',
+      'Topology check: compare the production routing and env (gateway/proxy routes, production env files, public base URLs for media, uploads and API) with what the gates and tests exercised (often the API port directly). Every user-visible URL the works produce must be routed by the production gateway; report mismatches as blocking.',
+      '(f) The diff base..head follows.',
+    ].join('\n\n');
+  const end = tail(files.map((f) => f.clipped));
   return {
-    prompt: clip(compose(files.map((f) => f.clipped)), RELEASE_CONTRACT_LIMIT),
-    digest: digestOf(compose(files.map((f) => f.full))),
+    prompt:
+      clip(head(clip), Math.max(4096, RELEASE_CONTRACT_LIMIT - end.length - 2)) + '\n\n' + end,
+    digest: digestOf(head((t) => t) + '\n\n' + tail(files.map((f) => f.full))),
   };
 }

@@ -17,6 +17,7 @@ import {
   type ExecutionPolicy,
   type GatePolicy,
   type RunResult,
+  whenPaths,
 } from '../src/contracts/index.ts';
 import {
   changedPaths,
@@ -657,7 +658,7 @@ function claimed(policy: ExecutionPolicy) {
 /** Сведения о неприменимости; diff кончается на SHA фазы (`to`). */
 const record = (gate: GatePolicy, to = sha('c')) => ({
   gateDigest: gateDigest(gate),
-  patterns: gate.when!.paths,
+  patterns: whenPaths(gate)!,
   ranges: [{ from: sha('a'), to }],
   count: 1,
   files: ['src/a.ts'],

@@ -1446,7 +1446,7 @@ export const cliCommands = {
       'Исполнить gates компонента на коммите вне попытки — тем же исполнением, что integration (рабочее дерево, снимки зависимостей, ресурсы, lifecycle, prepare, песочница); попыток и состояния поручений не пишет',
     writes: true,
     idempotency:
-      'Каждый вызов — новая проверка со своими логами в <state>/gates-at/<id>; база состояния, попытки и поручения не меняются',
+      'Каждый вызов — новая проверка со своими логами в <state>/gates-at/<id>; в базе состояния — только запись прогона (gates-runs: digest итога и основание gates, alpha.71), попытки и поручения не меняются',
     args: [
       {
         ...state,
@@ -1545,7 +1545,7 @@ export const cliCommands = {
   },
   'review-release': {
     description:
-      'Ревью выпуска перед `release done` (0.1.0-alpha.69): независимый reviewer по правилу ревью кода роли проверяет принятую цель против договора выпуска — постановок и критериев приёмки всех работ зарегистрированных графов, ответов владельца, топологии развёртывания (`release.topology`: шлюз/прокси и окружение production, прочитанные на head) — и diff base..head в отдельном рабочем дереве, только чтение. Запись — `kind: release`, не приёмка; находки исправляют обычные работы',
+      'Ревью выпуска перед `release done` (0.1.0-alpha.69): независимый reviewer по правилу ревью кода роли проверяет принятую цель против договора выпуска — постановок и критериев приёмки всех работ зарегистрированных графов, ответов владельца, топологии развёртывания (`release.topology`: шлюз/прокси и окружение production, прочитанные на head) — и diff base..head в отдельном рабочем дереве, только чтение. Перед ревью (alpha.71) нужен годный полный прогон всех gates на цели: нет его — исполняет и записывает его сам (gates-runs) со своим пределом времени, отдельным от reviewer; провал — NOT_READY с ходом по виду провала (код — работой, среда или инструмент — исправить и повторить harness gates, прерван — повторить). Запись — `kind: release`, не приёмка; находки исправляют обычные работы',
     writes: true,
     idempotency:
       'Предмет — репозиторий, роль и SHA базы выпуска: каждый вызов — следующий раунд, reviewer называет состояние прежних открытых находок. Тот же head, договор выпуска, автор, назначение reviewer и итог gates, уже одобренные последним раундом, — тот же раунд без вызова модели',
@@ -1598,6 +1598,7 @@ export const cliCommands = {
       'BUDGET_EXHAUSTED',
       'BUDGET_UNKNOWN',
       'NOT_FOUND',
+      'NOT_READY',
     ],
   },
   smoke: {
@@ -1605,7 +1606,7 @@ export const cliCommands = {
       'Поднять только окружение репозитория на коммите — снимки зависимостей, рабочее дерево, lifecycle setup/ready, хранилище зависимостей, prepare, teardown — тем же исполнением, что integration, без gates и без вызовов моделей; замер каждого шага и класс отказа (port-busy, timeout, crash, missing-tool, cleanup, tree-changed, environment)',
     writes: true,
     idempotency:
-      'Каждый вызов — новая проверка со своими логами в <state>/gates-at/<id>; база состояния, попытки и поручения не меняются',
+      'Каждый вызов — новая проверка со своими логами в <state>/gates-at/<id>; попытки, поручения и записи прогонов gates не меняются',
     args: [
       {
         ...state,
@@ -1858,6 +1859,59 @@ export const cliCommands = {
       },
     ],
     refusals: ['NOT_FOUND', 'RUNTIME_UNAVAILABLE'],
+  },
+  guide: {
+    description:
+      'Раздел инструкции ведущего по теме (alpha.71): session (читается первой в каждой сессии), setup, plan, review, run, recovery, release, relay; печатает текст раздела без конверта, `--json` — конверт с текстом и заголовками; только чтение файлов пакета',
+    writes: false,
+    idempotency: 'Только чтение. Та же версия пакета и тема дают тот же текст',
+    args: [
+      {
+        name: '--topic',
+        value: 'text',
+        required: true,
+        description:
+          'Тема: session, setup, plan, review, run, recovery, release, relay; можно позиционно: `harness guide run`',
+      },
+      { name: '--json', value: 'flag', required: false, description: 'JSON-конверт вместо текста' },
+    ],
+    refusals: ['NOT_FOUND'],
+  },
+  wait: {
+    description:
+      'Ждать следующего значимого события (alpha.71): принятие, отказ или удержание работы, вопрос исполнителя, готовность выпуска, остановка очереди; итог — что случилось, следующий шаг из explain и строка состояния. Читает журнал событий только на чтение, controller не опрашивает',
+    writes: false,
+    idempotency:
+      'Только чтение состояния (продлевает лишь активную сессию ведущего). Без --after сначала сообщает уже ждущее, затем ждёт событий после конца журнала; с --after <cursor> — событий после курсора; ответ несёт cursor сразу за сообщённым событием. Уже готовый выпуск или очередь без controller и попыток — сразу. Коды выхода — исходы ожидания, не ошибки: 0 accepted, 10 release-ready, 11 question, 12 held, 13 failed, 14 stopped, 15 timeout, 16 aborted (сигнал); решает поле `kind` JSON-ответа (`ok: true` при любом исходе), коды — для скриптов',
+    args: [
+      state,
+      {
+        ...policy,
+        required: true,
+        description: 'ExecutionPolicy JSON: для следующего шага (explain)',
+      },
+      {
+        name: '--until',
+        value: 'text',
+        required: false,
+        description:
+          'Какие исходы ждать через запятую: accepted, failed, held, question, release-ready, stopped; release-ready, stopped и таймаут кончают ожидание всегда',
+      },
+      {
+        name: '--timeout',
+        value: 'duration',
+        required: false,
+        description: 'Предел ожидания: Nm, Nh или Ns; по умолчанию 30m',
+      },
+      {
+        name: '--after',
+        value: 'number',
+        required: false,
+        description:
+          'Курсор прошлого wait (`data.cursor`): события строго после него. Без него wait сначала сообщает уже ждущее (отказ, удержание, вопрос), затем ждёт новых',
+      },
+    ],
+    refusals: ['NOT_FOUND'],
   },
   'lead-outline': {
     description:
@@ -2494,6 +2548,43 @@ export const statusDataSchema = z.strictObject({
       attempts: z.array(attemptViewSchema),
     })
     .optional(),
+});
+
+/** Раздел `harness guide` (alpha.71, E3). */
+export const guideDataSchema = z.strictObject({
+  topic: z.enum(['session', 'setup', 'plan', 'review', 'run', 'recovery', 'release', 'relay']),
+  title: z.string().min(1).max(300),
+  headings: z.array(z.string().max(300)).max(100),
+  text: z.string().min(1).max(100_000),
+});
+
+/** Итог `harness wait` (alpha.71, E1). */
+export const waitDataSchema = z.strictObject({
+  kind: z.enum([
+    'accepted',
+    'failed',
+    'held',
+    'question',
+    'release-ready',
+    'stopped',
+    'timeout',
+    'aborted',
+  ]),
+  event: z
+    .strictObject({ seq: z.number().int().positive(), type: z.string(), at: isoTimeSchema })
+    .optional(),
+  workId: idSchema.optional(),
+  next: z
+    .strictObject({
+      actor: z.string().nullable(),
+      action: z.string(),
+      message: z.string().max(500),
+    })
+    .optional(),
+  status: z.string().max(500),
+  /** Номер события, с которого продолжит `wait --after <cursor>` (ревью D/E HIGH-1). */
+  cursor: z.number().int().min(0),
+  waitedMs: z.number().int().min(0),
 });
 
 export const eventsDataSchema = z.strictObject({
@@ -3712,6 +3803,8 @@ export const cliDataSchemas = {
   run: runDataSchema,
   status: statusDataSchema,
   events: eventsDataSchema,
+  wait: waitDataSchema,
+  guide: guideDataSchema,
   pause: controlDataSchema,
   resume: controlDataSchema,
   cancel: workActionDataSchema,

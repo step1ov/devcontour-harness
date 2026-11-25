@@ -138,6 +138,8 @@ const allowed = [
   // Встроенные слои профилей (lean, alpha.50).
   /^profiles\/layers\/[a-z0-9-]+\.json$/,
   /^skills\/[a-z-]+\/SKILL\.md$/,
+  // Разделы инструкции ведущего (`harness guide`, alpha.71).
+  /^skills\/harness\/guide\/[a-z]+\.md$/,
   /^templates\/(AGENTS\.md|[a-z-]+\.json)$/,
 ];
 const unexpected = packed.files.map((f) => f.path).filter((p) => !allowed.some((r) => r.test(p)));
@@ -151,6 +153,9 @@ for (const required of [
   'profiles/node-checks.json',
   'profiles/layers/lean.json',
   'skills/harness/SKILL.md',
+  'skills/harness/guide/session.md',
+  'skills/harness/guide/run.md',
+  'skills/harness/guide/recovery.md',
   'skills/harness-setup/SKILL.md',
   'templates/policy.json',
   'templates/graph.json',
@@ -573,7 +578,15 @@ if (
   catalog.maxInputBytes !== 100000 ||
   catalog.maxResultBytes !== 1048576 ||
   JSON.stringify(catalog.tools.map((t) => t.name)) !==
-    JSON.stringify(['init', 'explain', 'plan-request', 'plan-check', 'capabilities', 'view'])
+    JSON.stringify([
+      'init',
+      'explain',
+      'plan-request',
+      'plan-check',
+      'capabilities',
+      'view',
+      'wait',
+    ])
 )
   fail(
     'capabilities: ' +

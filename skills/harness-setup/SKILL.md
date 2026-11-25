@@ -330,6 +330,35 @@ case for a pnpm/Turborepo monorepo; Turbo Starter is the worked example
   (for example `DOTENV_CONFIG_PATH: /dev/null`, `CHECKPOINT_DISABLE: 1`);
   secrets only by name in `environment.secrets`, never their values.
 
+- Gate scope by path (alpha.71). A per-package gate (`pnpm --filter <pkg>`,
+  `npm -w <pkg>`, a `cwd` inside the package) is skipped automatically when
+  an attempt touches neither that package nor its workspace dependencies. A
+  root acceptance or e2e gate has no package, so it runs on every attempt
+  and forces every gate in its `dependsOn` to run too. For each such gate
+  that exercises specific apps:
+  - give it `when.paths`: those apps, the workspace packages they import,
+    and the shared test support it reads;
+  - list in `dependsOn` only the builds it actually uses;
+  - mark a gate that really must always run `"when": { "always": true }`.
+
+  `harness doctor` notes every remaining gate as `GATE_ALWAYS_RUNS`. A
+  pilot-like example (an API with a client SDK, a web app, an admin app):
+
+  ```json
+  { "id": "api-acceptance", "kind": "test",
+    "command": ["node", "test/support/run-acceptance.mjs", "--", "node", "--test", "test/api/**/*.test.mjs"],
+    "when": { "paths": ["apps/backend", "packages/admin-rest-api-sdk", "packages/client-rest-api-sdk", "test/api", "test/support"] },
+    "dependsOn": ["backend-build"] },
+  { "id": "site-browser", "kind": "test",
+    "command": ["node", "test/support/run-acceptance.mjs", "--web", "--", "pnpm", "exec", "playwright", "test", "test/browser/site"],
+    "when": { "paths": ["apps/web", "apps/backend", "packages/client-rest-api-sdk", "test/browser/site", "test/support"] },
+    "dependsOn": ["client-sdk-build", "web-build", "backend-build"] }
+  ```
+
+  A browser test that drives the web app against the API also needs the
+  backend paths. Leave a path out only when you know the gate does not read
+  it: a wrong guess skips a gate that should have run.
+
 A gate that is red on the current base stays: fixing the base is a separate
 first work order. List the gates with the command each one runs in the
 report.

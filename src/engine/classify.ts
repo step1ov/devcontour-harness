@@ -46,6 +46,32 @@ const transportFailure = (message: string) =>
     message,
   );
 
+/**
+ * Реестр образов или пакетов оборвал загрузку (alpha.71, C1; ревью C
+ * MEDIUM-3): в одной строке (или звене вывода шага, `|`) — контекст загрузки
+ * (`docker pull`, `Pulling`, `/v2/`, `registry`, `manifest`,
+ * `ERR_PNPM_FETCH`, `npm ERR! network`) и обрыв (`EOF`, таймаут TLS или
+ * ввода-вывода, сброс соединения, `toomanyrequests`, `request canceled`).
+ * Классом отказа это не становится само: решает runner — только до кода
+ * исполнителя или на шаге загрузки (`registryPullStep`).
+ */
+export const registryPullFailure = (full: string) =>
+  full
+    .split(/\n| \| /)
+    .some(
+      (line) =>
+        /docker pull|\bPulling\b|\/v2\/|registry|manifest|ERR_PNPM_FETCH|npm ERR! network/i.test(
+          line,
+        ) &&
+        /\bEOF\b|i\/o timeout|TLS handshake timeout|connection reset by peer|context deadline exceeded|toomanyrequests|request canceled|\bETIMEDOUT\b|\bECONNRESET\b|pull access denied/i.test(
+          line,
+        ),
+    );
+
+/** Упавший шаг — шаг загрузки (`Шаг …pull…:`, `docker pull`, `compose pull`). */
+export const registryPullStep = (full: string) =>
+  /^Шаг [^:\n]*pull[^:\n]*:/im.test(full) || /\b(?:docker|compose) pull\b/i.test(full);
+
 /** Класс отказа для случаев, где он не поставлен в точке обнаружения. */
 /** Отказ движка с кодом, который сам называет класс отказа попытки. */
 const byCode: Partial<Record<ErrorCode, FailureKind>> = {

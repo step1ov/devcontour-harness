@@ -78,6 +78,7 @@ import { staleArtifacts } from '../verification/confirm.ts';
 import { processListBackend } from '../verification/gates.ts';
 import { collectReportInput } from './report.ts';
 import { valueReport, type ValueReportOptions } from '../report/compute.ts';
+import { releaseGatesProblems } from './release-gates.ts';
 
 export interface HarnessOptions {
   /** Каталог состояния исполнения: база, worktrees, артефакты. */
@@ -490,6 +491,7 @@ export class Harness {
   async releaseCheck(): Promise<{
     heads: Record<string, string>;
     contracts: Record<string, string>;
+    fullGates: Record<string, string | undefined>;
   }> {
     const heads = await this.targetHeads();
     const repositories = this.engine.read(
@@ -502,6 +504,18 @@ export class Harness {
         ),
     );
     const contracts: Record<string, string> = {};
+    // Полный прогон gates (ревью B2 M2/M4): у каждого репозитория с
+    // принятыми работами, в том числе с нечитаемой целью — отказ с ходом.
+    const fullGates = this.engine.read((v) =>
+      releaseGatesProblems(
+        v,
+        this.options.stateDir,
+        this.policy,
+        heads,
+        repositories,
+        this.engine.version,
+      ),
+    );
     for (const repo of this.policy.repositories) {
       const head = heads[repo.id];
       if (!head || !repositories.has(repo.id)) continue;
@@ -514,7 +528,7 @@ export class Harness {
         )
       ).digest;
     }
-    return { heads, contracts };
+    return { heads, contracts, fullGates };
   }
 
   /** Записать базу выпуска репозиториев (`release-base`) по текущим target ref. */
@@ -1044,6 +1058,11 @@ export class Harness {
    * провести ревью плана, если его нет, согласовать и вести очередь до
    * простоя. Результаты доставляются получателю с идемпотентным ключом.
    */
+  /**
+   * Запуск очереди. Метка запуска (ревью final M2) — в состоянии до
+   * регистрации, проб и ревью плана: `harness wait` не считает очередь
+   * остановленной, пока процесс run жив и не взял роль controller.
+   */
   async run(input: {
     graph: WorkGraph;
     context?: ContextSnapshot;
@@ -1057,7 +1076,22 @@ export class Harness {
      * доверенных receipt нет.
      */
     source?: WorkSource;
+    /** Граф принят регистрацией (до выдачи попыток): постановку записывает CLI. */
+    onRegistered?: (graphId: string) => void;
   }) {
+    this.engine.recordRunStart(process.pid, Math.max(30 * 60_000, this.policy.runTimeoutMs));
+    try {
+      return await this.runQueue(input);
+    } finally {
+      try {
+        this.engine.clearRunStart(process.pid);
+      } catch {
+        /* метка — подсказка ожиданию, не условие run */
+      }
+    }
+  }
+
+  private async runQueue(input: Parameters<Harness['run']>[0]) {
     // Пауза обновления, умершего до изменений (нет ни процесса, ни
     // незавершённого возврата), выдачу больше не держит: run её снимает.
     this.engine.clearStaleUpdatePause();
@@ -1067,7 +1101,13 @@ export class Harness {
       strictSandbox(this.policy) &&
       this.engine.read((v) => this.engine.environmentGateHolds(v)).length
     )
-      await processListBackend.probe().catch(() => undefined);
+      await processListBackend
+        .probe()
+        .then((c) => {
+          // Ответ пробы — в состояние: снятие удержания видят explain и wait.
+          if (c.status !== 'unknown') this.engine.recordProcessList(c.status);
+        })
+        .catch(() => undefined);
     // Обязательный контекст — одинаково для библиотеки и CLI: без снимка нужных источников граф не исполняется.
     const needed = [...new Set(input.graph.orders.flatMap((o) => o.context))];
     if (needed.length && !input.context)
@@ -1120,6 +1160,7 @@ export class Harness {
       },
     });
     const graph = registered.graph;
+    input.onRegistered?.(graph.id);
     // База выпуска (alpha.69): target ref репозиториев графа при первой
     // регистрации выпуска; записанная не переписывается.
     await this.recordReleaseBases(
@@ -1423,6 +1464,8 @@ export class Harness {
         budgetLeft: this.policy.repairBudget - (job.repairs ?? 0),
         maxAttempts: this.policy.maxAttempts,
         leadHold: (w) => this.engine.leadHoldOf(w, tx),
+        // Удержание gate снято исправлением (alpha.71, E2): повтор без ведущего.
+        holdFixed: (w) => this.engine.holdLifted(w, tx),
       });
       if (!decided || decided.action === 'stop') return decided;
       this.workflows.repair(job, `repair:${decided.kind}`, () => {

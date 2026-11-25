@@ -141,6 +141,12 @@ export const probeSpec = z.object({
     .optional(),
   /** Каталог controller для отчётов и журналов запусков gate; вне проверяемого дерева. */
   artifacts: z.string().optional(),
+  /**
+   * `cwd` — одноразовая копия проверяемого дерева (alpha.71, A4): проверки
+   * reviewer пишут в неё (артефакты сборки, отчёты), controller убирает её
+   * после вызова. Проверяемое дерево остаётся только для чтения.
+   */
+  writable: z.boolean().optional(),
 });
 export type ProbeSpec = z.infer<typeof probeSpec>;
 
@@ -592,8 +598,9 @@ export class ReviewProbes {
         timeoutMs: limitMs,
         signal,
         // Проверяемые исходники — только чтение; пишет проверка во
-        // временный каталог, который runCheck создаёт и убирает сам.
-        write: [],
+        // временный каталог, который runCheck создаёт и убирает сам, и в
+        // одноразовую копию дерева (`writable`, alpha.71).
+        write: this.spec.writable ? [this.spec.cwd] : [],
         readable: this.spec.readable,
         controller: this.spec.controller,
         ...(this.spec.checkouts?.length ? { checkouts: this.spec.checkouts } : {}),
@@ -761,7 +768,7 @@ export class ReviewProbes {
           signal,
           // Писать можно только в scratch отчёта (и собственный TMPDIR
           // runCheck): не в дерево, не в .git, не в каталог controller.
-          write: [scratch],
+          write: [scratch, ...(this.spec.writable ? [this.spec.cwd] : [])],
           readable: this.spec.readable,
           controller: this.spec.controller,
           ...(this.spec.checkouts?.length ? { checkouts: this.spec.checkouts } : {}),
@@ -965,7 +972,10 @@ export function serveReviewProbes(
   const tool = {
     name: probeTool,
     description:
-      `Run a check in the candidate's directory with read-only sources. Either {"argv": [...]} (no shell; exploratory command, temporary files go to TMPDIR) or {"gate": "<id>"} to run a declared gate exactly as the controller defines it (its argv, cwd and environment; the JUnit report goes to a controller scratch directory outside the sources and is saved by the controller). No other fields are accepted. ` +
+      (probes.spec.writable
+        ? 'Run a check in a disposable writable copy of the candidate (the same commit; writes there are discarded after this review, and your verdict is about the candidate). Either'
+        : "Run a check in the candidate's directory with read-only sources. Either") +
+      ` {"argv": [...]} (no shell; exploratory command, temporary files go to TMPDIR) or {"gate": "<id>"} to run a declared gate exactly as the controller defines it (its argv, cwd and environment; the JUnit report goes to a controller scratch directory outside the sources and is saved by the controller). No other fields are accepted. ` +
       (declared.length ? `Declared gates: ${declared.join(', ')}. ` : '') +
       `The controller stops it after ${probes.spec.commandTimeoutMs} ms per command and a total probe budget of ${probes.spec.budgetMs} ms; a timeout is returned as a result. The result carries a runId: cite it in reproduction.run when a finding rests on that run. A gate run is your observation only; it does not replace the mandatory gates.`,
     inputSchema: z.toJSONSchema(probeInput, { target: 'draft-7' }),

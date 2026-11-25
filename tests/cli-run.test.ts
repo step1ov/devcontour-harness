@@ -378,14 +378,15 @@ test('T27: CLI передаёт источник политики барьеру
   graph.orders[0]!.source.revision = '2';
   graph.orders[0]!.goal += ' Вторая редакция.';
   writeFileSync(graphPath, JSON.stringify(graph));
-  // Ревью плана процесса 2 (вызов reviewer 3) переписывает файл политики после её загрузки.
+  // Ревью плана процесса 2 (вызов reviewer 2: план и кандидат процесса 1;
+  // ревью интеграции того же дерева перенесено, alpha.71) переписывает файл
+  // политики после её загрузки.
   const changed = { ...policy, maxAttempts: 6 };
   writeFileSync(
     join(p.root, 'scenario.json'),
     JSON.stringify({
       writer: implement(),
       reviewer: [
-        approve(),
         approve(),
         approve(),
         { ...approve(), files: { 'policy.json': JSON.stringify(changed, null, 2) } },
@@ -398,4 +399,49 @@ test('T27: CLI передаёт источник политики барьеру
   assert.equal(second.json.error?.code, 'APPROVAL_STALE');
   assert.match(JSON.stringify(second.json.error), /policy\.json изменился после загрузки/);
   assert.deepEqual(applied(), first, 'применённой осталась прежняя политика');
+});
+
+test('ревью A1 L3: run --graph записывает постановку <граф>.brief.md, только когда run принял граф', () => {
+  const p = project();
+  const graph = JSON.parse(readFileSync(join(p.app, 'graph.json'), 'utf8')) as {
+    orders: { role: string }[];
+  };
+  graph.orders[0]!.role = 'nobody';
+  writeFileSync(join(p.app, 'bad.json'), JSON.stringify(graph));
+  writeFileSync(join(p.app, 'bad.brief.md'), 'Постановка отклонённого графа\n');
+  writeFileSync(join(p.app, 'graph.brief.md'), 'Постановка: приветствие по имени\n');
+  const briefs = () => {
+    const store = new SqliteExecutionStore(join(p.state, 'state.sqlite'), 'test', {
+      readOnly: true,
+    });
+    try {
+      return store.read(
+        (v) => v.local('release-brief', '@workspace', 'briefs')?.items.map((b) => b.text) ?? [],
+      );
+    } finally {
+      store.close();
+    }
+  };
+  const bad = p.harness(
+    'run',
+    '--graph',
+    'bad.json',
+    '--policy',
+    'policy.json',
+    '--state',
+    p.state,
+  );
+  assert.notEqual(bad.status, 0, 'граф отклонён');
+  assert.deepEqual(briefs(), [], 'постановка отклонённого графа не записана');
+  const run = p.harness(
+    'run',
+    '--graph',
+    'graph.json',
+    '--policy',
+    'policy.json',
+    '--state',
+    p.state,
+  );
+  assert.equal(run.status, 0, run.stderr);
+  assert.deepEqual(briefs(), ['Постановка: приветствие по имени\n']);
 });
