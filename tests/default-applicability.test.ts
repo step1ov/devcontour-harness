@@ -424,3 +424,23 @@ test('runner: gate пакета не исполняется, когда diff н�
   assert.equal(docs.notApplicable!.derived, undefined);
   ctx.store.close();
 });
+
+test('doctor: GATE_ALWAYS_RUNS — gate корня без when.paths и when.always исполняется в каждой попытке; пакет, when и always — без заметки', async () => {
+  const { doctor, alwaysRunsNotes } = await import('../src/control/doctor.ts');
+  const raw = structuredClone(example('policy')) as any;
+  raw.repositories[0].gates.push(
+    { id: 'api-acceptance', kind: 'check', command: ['node', 'test/run-acceptance.mjs'] },
+    { id: 'web-build', kind: 'check', command: ['pnpm', '--filter', '@x/web', 'run', 'build'] },
+    { id: 'docs', kind: 'check', command: ['node', 'd.js'], when: { paths: ['docs/**'] } },
+    { id: 'e2e', kind: 'check', command: ['node', 'e.js'], when: { always: true } },
+  );
+  const policy = executionPolicySchema.parse(raw);
+  assert.deepEqual(alwaysRunsNotes(policy), [
+    'GATE_ALWAYS_RUNS app (unit, api-acceptance): исполняется в каждой попытке — добавьте when.paths (пути приложений, их зависимостей в workspace и общей поддержки тестов) или when.always',
+  ]);
+  const report = await doctor(policy, {}, undefined, undefined, undefined, {
+    resourceDatabase: false,
+  });
+  assert.ok(report.notes?.some((n) => n.startsWith('GATE_ALWAYS_RUNS app (unit, api-acceptance)')));
+  assert.ok(!report.problems?.some((p) => p.includes('GATE_ALWAYS_RUNS')));
+});

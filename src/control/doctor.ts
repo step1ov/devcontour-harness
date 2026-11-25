@@ -37,6 +37,7 @@ import { resourceWarnings } from './resource-advice.ts';
 import { BROWSER_ADVICE, isBrowserRunner } from './browser-checks.ts';
 import { decisionSettingsView, recoveryPolicyOf } from '../projections/decisions.ts';
 import { timeBudgetWarnings } from '../verification/time-budget.ts';
+import { packageBinding } from '../verification/workspace-graph.ts';
 import { processListBackend, sandboxLimitBackend } from '../verification/gates.ts';
 import {
   sandboxLimitLine,
@@ -385,6 +386,7 @@ export async function doctor(
             `UI gate ${repo.id}/${g.id} (mobile, Maestro): в этой версии harness передаёт gate переменные платформы, устройства и приложения; выбор устройства из пула, сборку и установку приложения делают команда gate и lifecycle проекта (docs/ui-gates.md)`,
           );
   }
+  if (policy) notes.push(...alwaysRunsNotes(policy));
   if (decisions?.warning) warnings.push(decisions.warning.ru);
   const noBudget = policy ? lightBudgetWarning(policy) : undefined;
   const contractBudget = policy ? lightContractBudgetNote(policy) : undefined;
@@ -799,4 +801,23 @@ export function loginCopyNote(policy: ExecutionPolicy): string | undefined {
   return keyed
     ? undefined
     : 'light-login-copy: исполнители получают копию входа; если исполнитель обновит токен, Codex может однажды попросить `codex login` — с API-ключом для исполнителей (OPENAI_API_KEY / ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN в environment.inherit) этого не бывает';
+}
+
+/**
+ * Gates, которые исполняются в каждой попытке (alpha.71, `GATE_ALWAYS_RUNS`):
+ * без `when`, не генеративные и без привязки к пакету workspace
+ * (`packageBinding`) — ни явного условия, ни применимости по умолчанию.
+ * Заметка, не проблема: явный выбор — `when.always`.
+ */
+export function alwaysRunsNotes(policy: Pick<ExecutionPolicy, 'repositories'>): string[] {
+  return policy.repositories.flatMap((repo) => {
+    const ids = repo.gates
+      .filter((g) => !g.when && !g.property && packageBinding(g) === undefined)
+      .map((g) => g.id);
+    return ids.length
+      ? [
+          `GATE_ALWAYS_RUNS ${repo.id} (${ids.join(', ')}): исполняется в каждой попытке — добавьте when.paths (пути приложений, их зависимостей в workspace и общей поддержки тестов) или when.always`,
+        ]
+      : [];
+  });
 }
