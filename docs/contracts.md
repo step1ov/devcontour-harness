@@ -409,7 +409,14 @@ Diff — `git diff --no-renames --no-ext-diff --no-textconv --no-relative
 свою запись `test` поле `gateBasis`.
 
 **Применимость по умолчанию (alpha.71).** Gate без `when`, привязанный к
-пакету workspace, условен и без `when.paths`. Привязку читает
+пакету workspace, условен и без `when.paths` (облегчённый режим; строгий —
+`derivedApplicability: on`; правила привязки и замыкания после ревью B —
+[slow-environments](slow-environments.md#применимость-по-умолчанию-gate-пакета-workspace):
+только pnpm/npm/yarn, пути `file:`/`link:` и tsconfig, исполняемая
+предпосылка исполняет и gate). Получатель засчитывает запись `derived` по
+своей сверке Git (`derivedRecordChecks`) или при `trustDerivedRecords`;
+выпуск опирается на полный прогон gates на цели (`release done`,
+`review-release`). Привязку читает
 `packageBinding(gate)` из определения: `pnpm --filter <имя>` / `-F`
 (суффикс `...` допустим; `./каталог` и `{./каталог}` — каталог), `pnpm -C
 <каталог>`, `npm --workspace <имя|каталог>` / `-w`, `npm --prefix

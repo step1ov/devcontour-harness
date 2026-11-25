@@ -879,6 +879,11 @@ connector — is invisible unless you say it:
   owner answers and the deploy topology (`release.topology`: gateway/proxy
   configs, production env files). Blocking findings are fixed by works (plan
   them like any task), then run `review-release` again on the new target.
+  Before the review, `review-release` needs a full `harness gates` run on
+  the target: all gates, with no skips and no carry-over (alpha.71). If there
+  is none, it ran on another target, or a gate definition changed since,
+  `review-release` runs it itself and refuses when a gate fails. Fix the
+  failure with a work. `release done` refuses without a passing full run.
   `release done` refuses in both modes until the latest round on the current
   target is approved without blocking findings (only an explicit
   `release.review: advisory` makes it a warning); open non-blocking notes do
