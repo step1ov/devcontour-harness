@@ -1361,7 +1361,7 @@ export function valueReport(
       })()
     : null;
   const rechecks = recheckCounts(windowEvidence.map(({ e }) => e));
-  const reused = windowEvidence.filter(({ e }) => e.reusedEvidence).length;
+  const reused = windowEvidence.filter(({ e }) => e.kind === 'test' && e.reusedEvidence).length;
 
   const sentBackCount = { defect: 0, setup: 0, unknown: 0, no: 0 };
   for (const f of accepted) sentBackCount[sentBack(f)] += 1;

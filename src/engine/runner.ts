@@ -58,6 +58,7 @@ import {
   strictSandbox,
   gateDigest,
   harnessModeOf,
+  integrationReuseOn,
   writeGuardActive,
   blockingOf,
   mergePasses,
@@ -4711,8 +4712,11 @@ export class Runner {
     gates: GatePolicy[],
     cwd: string,
     sha: string,
-  ): Promise<{ tree: string; gates: Set<string>; records: EvidenceRecord[] } | undefined> {
-    if (this.policy.integrationReuse !== 'identical-tree') return undefined;
+  ): Promise<
+    | { tree: string; gates: Set<string>; records: EvidenceRecord[]; review?: EvidenceRecord }
+    | undefined
+  > {
+    if (!integrationReuseOn(this.policy, this.engine.host)) return undefined;
     const candidate = attempt.candidateSha!;
     if (candidate === attempt.baseSha) return undefined;
     const tree = await git(cwd, 'rev-parse', sha + '^{tree}');
@@ -4760,12 +4764,53 @@ export class Runner {
       const needed = new Set(running.flatMap((g) => gatePrerequisites(repo.gates, g.id)));
       for (const id of needed) if (sources.delete(id)) changed = true;
     }
-    if (!sources.size) return undefined;
+    // Ревью кандидата (alpha.71): его решающая запись прошла — дерево
+    // интеграции то же, второе ревью того же дерева не вызывается.
+    const review = evidence.findLast(
+      (e) =>
+        e.kind === 'review' &&
+        e.phase === 'candidate' &&
+        e.sha === candidate &&
+        e.consumer === undefined &&
+        e.checks === checks,
+    );
+    const carried = review?.passed && !review.reusedEvidence ? review : undefined;
+    if (!sources.size && !carried) return undefined;
     return {
       tree,
       gates: new Set(sources.keys()),
       records: gates.flatMap((g) => (sources.has(g.id) ? [sources.get(g.id)!] : [])),
+      ...(carried ? { review: carried } : {}),
     };
+  }
+
+  /**
+   * Ревью интеграции, взятое из решающего PASS ревью кандидата при том же
+   * дереве (alpha.71): reviewer не вызывается, запись ссылается на ревью
+   * кандидата (`reusedEvidence`) и находок не несёт — история находок
+   * поручения остаётся у записи кандидата.
+   */
+  private recordReviewCarried(
+    attempt: AttemptState,
+    sha: string,
+    source: EvidenceRecord,
+    tree: string,
+  ) {
+    this.engine.evidence(attempt.id, attempt.token, {
+      kind: 'review',
+      phase: 'integration',
+      sha,
+      gate: 'independent-review',
+      passed: true,
+      command: source.command,
+      exitCode: 0,
+      log: source.log,
+      digest: source.digest,
+      summary: `PASS ${REUSED_LABEL}: ревью кандидата ${source.id} перенесено — дерево integration-коммита ${tree.slice(0, 12)} совпадает с проверенным деревом кандидата ${source.sha.slice(0, 12)}`,
+      findings: [],
+      ...(source.inspection ? { inspection: source.inspection } : {}),
+      reusedEvidence: { evidenceId: source.id, phase: 'candidate', sha: source.sha, tree },
+    });
   }
 
   /** Запись интеграции, взятая из решающей записи кандидата при том же дереве. */
@@ -4885,6 +4930,12 @@ export class Runner {
       await this.consumers(attempt, cwd, sha, artifacts, signal);
       this.requirements(attempt, work, repoPath, cwd, sha, 'integration');
       rearm();
+      // Дерево интеграции — проверенное дерево кандидата: PASS его ревью
+      // переносится (`integrationReuse`), второго ревью нет.
+      if (reuse?.review) {
+        this.recordReviewCarried(attempt, sha, reuse.review, reuse.tree);
+        return;
+      }
       // База ревью интеграции — target, на который сделано слияние (первый
       // родитель integration SHA), а не база попытки: работа, принятая в
       // target после начала попытки, в diff этого поручения не входит.

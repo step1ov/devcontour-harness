@@ -571,19 +571,23 @@ export const executionPolicySchema = z.strictObject({
     })
     .optional(),
   /**
-   * Перенос evidence кандидата на интеграцию (opt-in). `identical-tree`: если
-   * дерево integration-коммита равно дереву кандидата, а политика, версия
-   * движка и снимок провайдеров не сдвинулись, gate, прошедший на кандидате,
-   * на интеграции не исполняется — пишется запись PASS со ссылкой на запись
-   * кандидата (`reusedEvidence`). Доказательства (требования, свойства,
-   * договоры) и gates с `artifacts` исполняются всегда. Нет поля — каждый
-   * gate исполняется на интеграции; умолчание не подставляется, digest
-   * прежних политик не меняется. Поле входит в `executionDigest`. Хост,
-   * который ведёт попытки сам, должен объявить поддержку
-   * (`ExecutionHost.capabilities.integrationReuse`), иначе движок с такой
-   * политикой не создаётся.
+   * Перенос evidence кандидата на интеграцию. `identical-tree`: если дерево
+   * integration-коммита равно дереву кандидата, а политика, версия движка и
+   * снимок провайдеров не сдвинулись, gate, прошедший на кандидате, на
+   * интеграции не исполняется — пишется запись PASS со ссылкой на запись
+   * кандидата (`reusedEvidence`); с alpha.71 так же переносится PASS ревью
+   * кандидата (второе ревью того же дерева не вызывается). Доказательства
+   * (требования, свойства, договоры) и gates с `artifacts` исполняются
+   * всегда. `off` — каждый gate и ревью исполняются на интеграции.
+   *
+   * Нет поля (alpha.71): в облегчённом режиме — `identical-tree`, если хост
+   * объявил поддержку (`ExecutionHost.capabilities.integrationReuse`), иначе
+   * и в строгом режиме — `off` (`integrationReuseOn`). Умолчание в политику
+   * не подставляется: digest прежних политик не меняется. Поле входит в
+   * `executionDigest`. Явное `identical-tree` под хостом без поддержки —
+   * отказ создания движка (`integrationReuseProblem`).
    */
-  integrationReuse: z.literal('identical-tree').optional(),
+  integrationReuse: z.enum(['identical-tree', 'off']).optional(),
   /**
    * Проверка окружения перед `run` (opt-in). `cached`: до ревью плана и
    * первой попытки controller поднимает окружение каждого репозитория с
@@ -725,6 +729,24 @@ export const executionDigest = (policy: ExecutionPolicy) =>
     // Второй проход ревью (alpha.70) — надзор ревью, не условие исполнения.
     review: { ...policy.review, passes: undefined },
   });
+
+/**
+ * Переносит ли интеграция PASS кандидата при том же дереве (gates и ревью):
+ * явное `identical-tree` — да, явное `off` — нет; без поля — да в облегчённом
+ * режиме, если хост объявил поддержку (`host` не передан — проверяющий
+ * получатель: решает его политика), иначе нет (alpha.71).
+ */
+export const integrationReuseOn = (
+  policy: {
+    integrationReuse?: 'identical-tree' | 'off' | undefined;
+    harnessMode?: HarnessMode | undefined;
+  },
+  host?: { capabilities?: { integrationReuse?: boolean | undefined } | undefined },
+): boolean =>
+  policy.integrationReuse !== undefined
+    ? policy.integrationReuse === 'identical-tree'
+    : harnessModeOf(policy) === 'light' &&
+      (host === undefined || host.capabilities?.integrationReuse === true);
 
 /** Действующий режим политики: нет поля — `light` (alpha.69). */
 export const harnessModeOf = (policy: { harnessMode?: HarnessMode | undefined }): HarnessMode =>

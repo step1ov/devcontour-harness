@@ -3,6 +3,7 @@ import {
   roleBinding,
   HarnessError,
   digestOf,
+  integrationReuseOn,
   expandGateRefs,
   selectReviewer,
   vendorOf,
@@ -166,7 +167,7 @@ type ReceivedEvidence = ProofEvidence &
 
 /** Политика получателя: репозитории (gates, группы, зависимости, target), роли и правила ревью. */
 export type ReceiverPolicy = Pick<ExecutionPolicy, 'repositories' | 'roles' | 'review'> &
-  Partial<Pick<ExecutionPolicy, 'integrationReuse'>>;
+  Partial<Pick<ExecutionPolicy, 'integrationReuse' | 'harnessMode'>>;
 
 /**
  * Что получатель знает сам и передаёт проверке. Всё, что результат
@@ -638,9 +639,13 @@ export function resultProblems(result: RunResult, context: ReceiverContext): str
       integrity.push(`запись ${e.id}: сведения о reviewer не согласованы с видом записи`);
     if (
       e.reusedEvidence !== undefined &&
-      (e.kind !== 'test' || e.phase !== 'integration' || e.consumer !== undefined)
+      ((e.kind !== 'test' && e.kind !== 'review') ||
+        e.phase !== 'integration' ||
+        e.consumer !== undefined)
     )
-      integrity.push(`запись ${e.id}: взятой из кандидата бывает только запись test интеграции`);
+      integrity.push(
+        `запись ${e.id}: взятой из кандидата бывает только запись test или ревью интеграции`,
+      );
     if ((e.notApplicable !== undefined) !== (e.kind === 'not-applicable'))
       integrity.push(`запись ${e.id}: сведения о неприменимости не согласованы с видом записи`);
     if (e.kind === 'not-applicable' && (e.passed || e.consumer !== undefined))
@@ -727,7 +732,7 @@ export function resultProblems(result: RunResult, context: ReceiverContext): str
     // Запись, взятая из кандидата, — PASS интеграции только по правилу
     // переноса и деревьям, которые получатель вычислил сам.
     if (check?.passed && check.reusedEvidence) {
-      const reused = !policy.integrationReuse
+      const reused = !integrationReuseOn(policy)
         ? `запись ${check.id} (${gate}) взята из кандидата, а политика получателя не включает integrationReuse`
         : context.trees
           ? reusedEvidenceProblem({

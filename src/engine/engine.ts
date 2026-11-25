@@ -12,6 +12,7 @@ import {
   codeReviewScope,
   type CodeReviewDecision,
   roleBinding,
+  integrationReuseOn,
   integrationReuseProblem,
   executionDigest,
   isolationDigest,
@@ -2816,26 +2817,25 @@ export class Engine {
       // политикой, которая это включила, и по правилу переноса; деревья
       // сверил controller, записавший её (и сверяет recovery).
       if (evidence.reusedEvidence) {
-        const problem =
-          this.policy.integrationReuse !== 'identical-tree'
-            ? 'Запись, взятая из кандидата, без integrationReuse в политике'
-            : !a.candidateSha || !a.integrationSha
-              ? 'Запись, взятая из кандидата, до интеграции'
-              : evidence.recheck !== undefined
-                ? 'Запись, взятая из кандидата, не бывает повтором'
-                : reusedEvidenceProblem({
-                    record: {
-                      ...evidence,
-                      id: 'new',
-                      ...(a.checks ? { checks: a.checks.effective } : {}),
-                    },
-                    evidence: a.evidence,
-                    candidateSha: a.candidateSha,
-                    resultSha: a.integrationSha,
-                    proof: proofGates(w.order, contractDocuments(w.order, tx)),
-                    gates: this.repository(a.repositoryId).gates,
-                    trees: null,
-                  });
+        const problem = !integrationReuseOn(this.policy, this.host)
+          ? 'Запись, взятая из кандидата, без integrationReuse в политике'
+          : !a.candidateSha || !a.integrationSha
+            ? 'Запись, взятая из кандидата, до интеграции'
+            : evidence.recheck !== undefined
+              ? 'Запись, взятая из кандидата, не бывает повтором'
+              : reusedEvidenceProblem({
+                  record: {
+                    ...evidence,
+                    id: 'new',
+                    ...(a.checks ? { checks: a.checks.effective } : {}),
+                  },
+                  evidence: a.evidence,
+                  candidateSha: a.candidateSha,
+                  resultSha: a.integrationSha,
+                  proof: proofGates(w.order, contractDocuments(w.order, tx)),
+                  gates: this.repository(a.repositoryId).gates,
+                  trees: null,
+                });
         if (problem) throw new HarnessError('INVALID_INPUT', problem);
       }
       // Повтор ссылается на провал того же gate этой попытки на том же SHA, и
@@ -2985,18 +2985,17 @@ export class Engine {
           // Взятая из кандидата запись — PASS только по правилу переноса под
           // политикой, которая его включила (и после recovery).
           if (record?.kind === 'test' && record.passed) {
-            const reused =
-              this.policy.integrationReuse !== 'identical-tree'
-                ? 'политика не включает integrationReuse'
-                : reusedEvidenceProblem({
-                    record,
-                    evidence: a.evidence,
-                    candidateSha: a.candidateSha,
-                    resultSha: sha,
-                    proof: named,
-                    gates: repoGates,
-                    trees: null,
-                  });
+            const reused = !integrationReuseOn(this.policy, this.host)
+              ? 'политика не включает integrationReuse'
+              : reusedEvidenceProblem({
+                  record,
+                  evidence: a.evidence,
+                  candidateSha: a.candidateSha,
+                  resultSha: sha,
+                  proof: named,
+                  gates: repoGates,
+                  trees: null,
+                });
             if (!reused) continue;
             throw new HarnessError('GATE_FAILED', `Нет PASS: ${phase}/${gate}: ${reused}`);
           }
@@ -3022,6 +3021,27 @@ export class Engine {
           !last('review', phase, phase === 'candidate' ? a.candidateSha : sha, 'independent-review')
         )
           throw new HarnessError('REVIEW_REJECTED', `Нет независимого ревью: ${phase}`);
+      // Ревью интеграции, взятое из ревью кандидата (alpha.71), — PASS только
+      // по правилу переноса под политикой, которая его включила.
+      const carried = decisive(['review'], 'integration', sha, 'independent-review');
+      if (carried?.reusedEvidence) {
+        const problem = !integrationReuseOn(this.policy, this.host)
+          ? 'политика не включает integrationReuse'
+          : reusedEvidenceProblem({
+              record: carried,
+              evidence: a.evidence,
+              candidateSha: a.candidateSha,
+              resultSha: sha,
+              proof: named,
+              gates: repoGates,
+              trees: null,
+            });
+        if (problem)
+          throw new HarnessError(
+            'REVIEW_REJECTED',
+            `Нет независимого ревью: integration: ${problem}`,
+          );
+      }
       // Попытка без изменений (кандидат — база) принимается только с
       // подтверждением reviewer обеих фаз, что приёмка уже выполнена.
       if (a.candidateSha === a.baseSha)

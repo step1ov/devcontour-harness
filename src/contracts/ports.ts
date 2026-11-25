@@ -647,13 +647,14 @@ export interface HostCapabilities {
 
 /**
  * Почему политика не может исполняться под этим хостом, или undefined:
- * `integrationReuse` требует объявленной поддержки хоста.
+ * явное `integrationReuse: 'identical-tree'` требует объявленной поддержки
+ * хоста (без поля перенос под таким хостом просто выключен).
  */
 export function integrationReuseProblem(
   policy: { integrationReuse?: string | undefined },
   host: ExecutionHost,
 ): string | undefined {
-  if (policy.integrationReuse === undefined || host.capabilities?.integrationReuse)
+  if (policy.integrationReuse !== 'identical-tree' || host.capabilities?.integrationReuse)
     return undefined;
   return `integrationReuse: '${policy.integrationReuse}' требует поддержки хоста (capabilities.integrationReuse): хост этой установки записи интеграции, взятые из кандидата, не принимает`;
 }
