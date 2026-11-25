@@ -114,7 +114,7 @@ manifest снимка и в необязательном поле `baseline` о�
 | `stallSweep{intervalMs, quietMs, stalledMs, action}`         | Необязательное: обход зависших попыток controller ([ниже](#зависшие-попытки)); нет поля — 30 000 / 180 000 / 600 000 мс и `report`, умолчание не подставляется и digest политики не меняет                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `reviewProtocolRetries`                                      | Необязательное: дополнительные вызовы reviewer кода при ошибке протокола ответа (0–2; нет поля — 1, умолчание не подставляется и digest политики не меняет), [review-protocol.md](review-protocol.md)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `gateTimeoutFloorMs`                                         | Необязательное: нижняя граница предела времени каждого исполнения gate, мс (1000–600 000). Действующий предел — `max(gate.timeoutMs, gateTimeoutFloorMs)` на всех фазах (кандидат, интеграция, потребители, совместная проверка, проверки reviewer); объявленный `timeoutMs` в политике не меняется. Отказ по пределу называет действующий предел в секундах и объявленный, если его подняла граница. Граница не больше `runTimeoutMs`, иначе политика отклоняется. Нет поля — объявленный предел; умолчание не подставляется и digest политики не меняет. `timeoutMs` gate — защита от зависания, а не предел производительности: бюджеты производительности проверяются внутри самой проверки                                                                                                                                                                |
-| `integrationReuse`                                           | Необязательное, только `identical-tree`: перенос evidence кандидата на интеграцию ([ниже](#перенос-evidence-кандидата-на-интеграцию)). Нет поля — каждый gate исполняется на интеграции; умолчание не подставляется и digest политики не меняет. Поле входит в `executionDigest`. Хост, который ведёт попытки сам, должен объявить поддержку (`ExecutionHost.capabilities.integrationReuse`), иначе `Engine` с такой политикой не создаётся                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| `integrationReuse`                                           | Необязательное, `identical-tree` или `off`: перенос evidence и ревью кандидата на интеграцию ([ниже](#перенос-evidence-кандидата-на-интеграцию)). Нет поля (alpha.71) — `identical-tree` в облегчённом режиме при поддержке хоста, иначе `off`; умолчание не подставляется и digest политики не меняет. Поле входит в `executionDigest`. Явное `identical-tree` требует поддержки хоста (`ExecutionHost.capabilities.integrationReuse`), иначе `Engine` с такой политикой не создаётся                                                                                                                                                                                                                                                                                                                                                                         |
 | `lifecyclePreflight`                                         | Необязательное, только `cached`: перед `run` (до ревью плана и первой попытки) controller поднимает окружение каждого репозитория с незавершёнными поручениями на его `targetRef`, как `harness smoke`, и записывает успех в `<state>/preflight/` по ключу (дерево базы и зависимостей, `executionDigest`, `stallSweep`, digest окружения процесса, версия harness); тот же ключ — без повторной проверки, отказ не переиспользуется. Отказ — `LIFECYCLE_FAILED` до любого платного вызова. Нет поля — проверки нет. В `executionDigest` не входит                                                                                                                                                                                                                                                                                                             |
 | `recovery{mode, diagnoseAfter, leadResets}`                  | Необязательное: кто восстанавливает работу после повторных отказов ([принцип](principles.md#кто-принимает-решения)). `mode: lead` — после `diagnoseAfter` (1–10, по умолчанию 2) засчитанных отказов следующая попытка не выдаётся без разбора ведущего (`harness diagnose`, отказ `DIAGNOSIS_REQUIRED`), а при исчерпании ведущий сам даёт новый предел по свежему техническому разбору (`retry --reset --by lead --diagnosis`) не больше `leadResets` (0–5, по умолчанию 2) раз на предел попыток; `diagnoseAfter ≥ maxAttempts` — разбор только при исчерпании. `mode: user` — прежнее поведение. Нет поля — `lead` при `inputPolicy.leadAnswers.technical: true`, иначе `user`. Разборы и сбросы — `WorkState.leadRecovery`, события `work.diagnosed` и `work.retried` (`by: lead`, `diagnosis`, `index`, `cap`, `granted`). В `executionDigest` не входит |
 | `toolchain{node}`                                            | Необязательное: закреплённый node (`policy.toolchain.node`) — абсолютный каталог с `node` или версия `24.22.3` / `24.22` / `24` (самая новая установленная подходящая: каталог текущего node, PATH, nvm, fnm, volta, asdf, mise, Homebrew, `/usr/local/bin`). Каталог ставится первым в PATH каждого процесса прогона (gates, `harness gates`, lifecycle и `smoke`, `prepare`, writer, reviewers, совместная проверка), кто бы ни запустил harness. Не разрешился — отказ окружения до работы (`toolchain`/`preflight`, не засчитан). Фактический node (версия, путь; pnpm у команд с pnpm) — строка `# toolchain:` лога gate и поле `toolchain` evidence и итога `harness gates`. Нет поля — PATH процесса harness. В `executionDigest` не входит ([toolchains](toolchains.md#закреплённый-node))                                                             |
@@ -340,7 +340,8 @@ lockfile, установка докачивает разницу; `miss` — о�
 совместной проверки (`<каталог проверки>/<gate>.artifacts/`).
 
 `repositories[].gates[].when` — необязательное условие применимости gate
-задачи: `{ paths: [...] }`, 1–64 шаблона путей **от корня репозитория**
+задачи: `{ paths: [...] }` или (alpha.71) `{ always: true }` — gate
+исполняется всегда, без применимости по умолчанию (ниже). `paths` — 1–64 шаблона путей **от корня репозитория**
 (POSIX-glob: `**` целым сегментом — любое число сегментов, `*` и `?` — внутри
 сегмента, `{a,b}` без вложенности; без `..` и `.` (в том числе внутри `{}`),
 пустых сегментов, ведущего `/`, `\`, `[]` и отрицания). Шаблон привязан к
@@ -352,9 +353,9 @@ lockfile, установка докачивает разницу; `miss` — о�
 `vendor` на месте каталога), как и путь, чьи сегменты совпадают с первыми
 сегментами шаблона до `**` (`packages/*/src/**` — gitlink `packages/ui`).
 Подмодули и ссылки под `**` называют в `when.paths` явно. Сравнение — без учёта регистра и в NFC: лишнее
-совпадение только чаще исполняет gate. Без поля поведение и digest политики
-прежние. `policyIssues` отклоняет репозиторий, у которого нет ни одного test
-gate без `when`, и `when` у генеративного gate (`property`). У
+совпадение только чаще исполняет gate. Без поля digest политики прежний.
+`policyIssues` отклоняет репозиторий, у которого нет ни одного test
+gate без `when.paths` (`when.always` считается безусловным), и `when.paths` у генеративного gate (`property`). У
 `workspaceGates` поля нет (строгая схема его отклоняет). В режиме порядка
 массива (gate без `dependsOn`) каждый более ранний check gate — предпосылка
 следующих, поэтому `when` у check gate перед безусловным test gate не
@@ -407,6 +408,41 @@ Diff — `git diff --no-renames --no-ext-diff --no-textconv --no-relative
 такой записи несёт `notApplicable: true`. Исполненный условный gate пишет в
 свою запись `test` поле `gateBasis`.
 
+**Применимость по умолчанию (alpha.71).** Gate без `when`, привязанный к
+пакету workspace, условен и без `when.paths`. Привязку читает
+`packageBinding(gate)` из определения: `pnpm --filter <имя>` / `-F`
+(суффикс `...` допустим; `./каталог` и `{./каталог}` — каталог), `pnpm -C
+<каталог>`, `npm --workspace <имя|каталог>` / `-w`, `npm --prefix
+<каталог>`, `yarn workspace <имя>`, иначе `cwd` gate не в корне — пакет, в
+котором он лежит; ведущий `env` с присваиваниями пропускается. Привязки нет
+(gate корня, `pnpm -r`, `-w`, `--workspaces`, фильтры зависимых `...x` и
+`^`, шаблоны имён) — gate исполняется, как прежде. Граф пакетов
+(`workspaceGraphAt`) читается из объектов Git на SHA фазы: `packages:`
+`pnpm-workspace.yaml` или `workspaces` корневого `package.json` (`!`
+исключает, `node_modules` — никогда), не больше 500 пакетов. Условие gate —
+каталоги его пакетов и их зависимостей в workspace (`dependencies`,
+`devDependencies`, `peerDependencies`, `optionalDependencies`, транзитивно;
+`packageClosure`), не больше 64. Gate исполняется, если граф не прочитан,
+пакет не найден, в замыкании корневой пакет или script пакета замыкания
+ссылается выше своего каталога (`../`). Неявные входы — те же, что у
+`when.paths`, и, кроме того, любой файл корня репозитория, кроме `*.md`
+(общие `tsconfig*.json`, `eslint.config.*`, `turbo.json`). Смена любого
+`package.json` или `pnpm-workspace.yaml` — неявный вход, поэтому граф на SHA
+фазы тот же, что на зелёном SHA. Опора — тот же последний зелёный SHA под
+`gateBasis`; исполненный такой gate пишет `gateBasis`. Применимость по
+умолчанию не действует у gate с `when` (явные `paths` — свои пути,
+`always` — всегда), у генеративного gate и у test gate, если в репозитории
+не остаётся test gate, который исполняется всегда. Запись `not-applicable`
+несёт `notApplicable.derived: { packages }` (пакеты привязки), `patterns` —
+каталоги замыкания; сводка называет их. Приёмка и получатель засчитывают
+такую запись только gate без `when`, которому применимость по умолчанию
+разрешена по их политике (`derivationAllowed`); покрытие набора
+(`uncoveredGates`) решает её по объединению `patterns` записей с тем же
+правилом неявных входов. Функции: `packageBinding`, `packageClosure`,
+`workspaceGraphAt`, `derivationAllowed`, `conditionalGate`,
+`explicitCondition`; `pathApplicability` и `gateDecisions` принимают
+условие (`GateCondition`).
+
 Неприменимость — не PASS. `Engine.evidence` принимает её только на SHA фазы
 попытки (diff кончается на нём) и только пока на этом SHA нет записи `test`
 того же gate. Приёмка (`finish`) и получатель receipt (`resultProblems`)
@@ -447,7 +483,9 @@ diff — или без `changes`, или под другим определен�
 
 #### Перенос evidence кандидата на интеграцию
 
-`integrationReuse: 'identical-tree'` (opt-in). Runner сравнивает дерево
+`integrationReuse: 'identical-tree'`; с alpha.71 без поля — то же в облегчённом
+режиме, если хост объявил `capabilities.integrationReuse` (`integrationReuseOn`);
+`'off'` и строгий режим без поля — каждый gate и ревью на интеграции. Runner сравнивает дерево
 integration-коммита (`git rev-parse <integration>^{tree}`) с деревом
 кандидата. Перенос возможен, только если деревья равны (target не
 сдвинулся с базы кандидата), кандидат не пустой, `policyDigest` попытки
@@ -469,7 +507,12 @@ lifecycle, хранилище зависимостей, `prepare`, провер�
 поднимается: дерево и его выходы те же, что у кандидата. С потребителями
 окружение поднимается всегда: их проверка снимает провайдера с дерева
 интеграции и ждёт его подготовки и сервисов lifecycle. Проверки
-потребителей, источник требований и ревью интеграции идут как прежде.
+потребителей и источник требований идут как прежде. Ревью интеграции
+(alpha.71) не вызывается, если решающая запись ревью кандидата под той же
+версией проверок — PASS: пишется запись `review` интеграции с
+`passed: true`, без находок и с `reusedEvidence` на эту запись (сводка
+«PASS взято из кандидата: ревью кандидата … перенесено»); история находок
+остаётся у записи кандидата. Иначе ревью интеграции идёт как прежде.
 Принятый остаточный риск: разрешение зависимостей хранилищем вне lockfile
 (например, смена ответа registry между фазами) при переносе не
 перепроверяется — ни исполнением перенесённого gate, ни проверкой
@@ -484,15 +527,20 @@ lifecycle, хранилище зависимостей, `prepare`, провер�
 кандидата; её gate объявлен, не доказательство и без `artifacts`; запись
 `evidenceId` существует, это собственная проверка того же gate на кандидате,
 PASS, под той же версией проверок и решающая (последняя) для gate; деревья
-кандидата и результата равны и равны `reusedEvidence.tree`. Деревья сверяет
+кандидата и результата равны и равны `reusedEvidence.tree`. Для записи
+`review` (alpha.71): PASS ревью интеграции на result SHA, ссылка на SHA
+кандидата, запись `evidenceId` — собственное (не перенесённое) ревью
+кандидата, PASS, под той же версией проверок и решающее (последнее); деревья
+— как выше. Деревья сверяет
 тот, кто владеет Git: controller при записи и recovery (`rev-parse ^{tree}`
 обоих SHA до `adopt`), получатель — своим Git: `ReceiverContext.trees:
 {candidate, result}` — деревья `shas.candidate` и `shas.result`,
 вычисленные получателем. Проверка остаётся чистой; без `trees` запись,
 взятая из кандидата, не PASS («получатель не передал деревья»).
-`Engine.evidence` принимает `reusedEvidence` только под политикой с
-`integrationReuse`; получатель — только когда `integrationReuse` есть в его
-политике (`ReceiverPolicy.integrationReuse`), иначе запись не PASS. Удалённая ссылка превращает запись в обычное утверждение
+`Engine.evidence` принимает `reusedEvidence` только под политикой, где
+перенос включён (`integrationReuseOn(policy, host)`); получатель — только
+когда он включён его политикой (`integrationReuseOn(policy)`: явное
+`identical-tree` или облегчённый режим без поля), иначе запись не PASS. Удалённая ссылка превращает запись в обычное утверждение
 об исполнении, подлинность которого получатель не удостоверяет (как у любой
 записи); подмена ссылки или дерева — отказ.
 
@@ -1002,8 +1050,11 @@ Schema строит подделку каждого поля (другое зн�
 | `evidence[].notApplicable.files`                        | сведение            | diff фазы — наблюдение Git исполнителя                                                                |
 | `evidence[].notApplicable.files[]`                      | сведение            | diff фазы — наблюдение Git исполнителя                                                                |
 | `evidence[].notApplicable.pathsDigest`                  | сведение            | diff фазы — наблюдение Git исполнителя                                                                |
-| `evidence[].reusedEvidence`                             | ожидание получателя | только у записи test интеграции: PASS по правилу переноса и деревьям получателя (trees)               |
-| `evidence[].reusedEvidence.evidenceId`                  | согласованность     | решающая PASS-запись того же gate на кандидате в этом результате                                      |
+| `evidence[].notApplicable.derived`                      | согласованность     | применимость по умолчанию: gate пакета без when, которому её разрешает политика получателя            |
+| `evidence[].notApplicable.derived.packages`             | сведение            | пакеты привязки gate по наблюдению исполнителя                                                        |
+| `evidence[].notApplicable.derived.packages[]`           | сведение            | пакеты привязки gate по наблюдению исполнителя                                                        |
+| `evidence[].reusedEvidence`                             | ожидание получателя | только у записи test или ревью интеграции: PASS по правилу переноса и деревьям получателя (trees)     |
+| `evidence[].reusedEvidence.evidenceId`                  | согласованность     | решающая PASS-запись того же gate (или ревью) на кандидате в этом результате                          |
 | `evidence[].reusedEvidence.phase`                       | схема               | литерал candidate                                                                                     |
 | `evidence[].reusedEvidence.sha`                         | согласованность     | SHA кандидата результата                                                                              |
 | `evidence[].reusedEvidence.tree`                        | ожидание получателя | дерево кандидата и результата, вычисленное получателем своим Git                                      |
@@ -2625,7 +2676,7 @@ wildcard-предупреждение — в `warnings`. Проба doctor — �
 | `HostGuards`                                                   | `claimable`, `claimBarrier`, `current`, `beforeAccept` — дополнительные запреты хоста в той же транзакции; необязательный `busy(view)` — работы хоста (поставка, preview), которых применение новой политики дожидается так же, как попыток; необязательный `joint(verification, view, kind)` — продуктовые условия совместной проверки в каждой её записи, кроме продления срока                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
 | `ContractApprovals` (необязательный `ExecutionHost.contracts`) | `approved({id, digest}, view)` — хост, ведущий согласование контрактов сам, подтверждает редакцию этого digest (`null`) или называет причину; без порта согласованием служит одобренный последний раунд технического ревью этого digest при текущем назначении reviewer. Записи ревью из сведений хоста не создаются                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | `ExecutionHost.readyAt` (необязательный)                       | `readyAt(work, view)` — когда поручение стало готово к выдаче (согласовано и дождалось зависимостей) по сведениям хоста; движок пишет его в `wait.readyAt` новой попытки в транзакции выдачи. Нет порта или `undefined` — время неизвестно и не выдумывается                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| `ExecutionHost.capabilities` (необязательный)                  | `{ integrationReuse?: boolean }` — возможности, которые политика включает только с согласия хоста. `integrationReuse: true` — хост принимает записи интеграции, взятые из кандидата (`reusedEvidence`), и его получатель передаёт `trees` в `resultProblems`. Без объявления `new Engine` с политикой `integrationReuse` отказывает `INVALID_INPUT` (`integrationReuseProblem`); `standaloneHost` объявляет поддержку                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `ExecutionHost.capabilities` (необязательный)                  | `{ integrationReuse?: boolean }` — возможности, которые политика включает только с согласия хоста. `integrationReuse: true` — хост принимает записи интеграции, взятые из кандидата (`reusedEvidence`), и его получатель передаёт `trees` в `resultProblems`. Без объявления `new Engine` с явным `integrationReuse: 'identical-tree'` отказывает `INVALID_INPUT` (`integrationReuseProblem`), а без поля перенос выключен; `standaloneHost` объявляет поддержку                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | `InputHost` (необязательный `ExecutionHost.input`)             | Продолжение после ответа у хоста, который ведёт согласование сам: `contextDigestOf(work, view)` — действующий снимок, который claim закрепит; `review(work, contextDigest, actor, view, request)` — раунд ревью цели по правилам хоста или отказ; `activate(tx, work, target, request)` — активация цели в транзакции `applyInput` или `carryInput` (`request`: `{id, answerDigest, mode: apply \| carry}`); необязательный `snapshot(digest, view)` — снимок для сверки manifest ответа. Без порта — `graph.approval` и раунды ревью плана                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | `BudgetScopes`                                                 | Группа поручения, её состав, атрибуция прежних записей вызовов                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `RuntimeAdapter`                                               | `capabilities()`, `invoke(request, signal)`: сессия `fresh` для reviewer и planner (`continue` — только writer той же попытки), JSON Schema ответа, сообщённая модель и версия runtime, usage, диагностика, отмена дерева процессов; необязательный `probe` — сервер проверок reviewer кода (команда, имена переменных окружения, предел команды), адаптер подключает его как MCP-сервер `devcontour_probe`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
