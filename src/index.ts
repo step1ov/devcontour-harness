@@ -426,3 +426,11 @@ export {
 } from './explain/state.ts';
 export * from './planning/index.ts';
 export * from './catalog/index.ts';
+
+export {
+  waitFor,
+  waitKinds,
+  WAIT_EXIT_CODES,
+  type WaitData,
+  type WaitKind,
+} from './control/wait.ts';

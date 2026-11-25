@@ -23,6 +23,8 @@ export const sharedOperationNames = [
   'plan-check',
   'capabilities',
   'view',
+  // Ожидание значимого события (alpha.71, E1).
+  'wait',
 ] as const;
 export type SharedOperationName = (typeof sharedOperationNames)[number];
 
@@ -34,6 +36,7 @@ const apiOf = {
   'plan-check': 'planCheck',
   capabilities: 'harnessCapabilities',
   view: 'harnessView',
+  wait: 'waitFor',
 } as const satisfies Record<SharedOperationName, string>;
 
 export interface SharedOperation<C extends SharedOperationName = SharedOperationName> {
@@ -86,6 +89,7 @@ export const sharedOperations: { readonly [C in SharedOperationName]: SharedOper
   'plan-check': declare('plan-check'),
   capabilities: declare('capabilities'),
   view: declare('view'),
+  wait: declare('wait'),
 };
 
 export const isSharedOperation = (command: string): command is SharedOperationName =>

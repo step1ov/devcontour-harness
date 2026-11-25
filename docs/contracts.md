@@ -3400,7 +3400,7 @@ required`.
 хост строит тот же вид по своей попытке.
 
 **Общие операции и граница транспорта.** `init`, `explain`, `plan-request`,
-`plan-check` и `capabilities` — общие операции агентского слоя
+`plan-check`, `capabilities`, `view` и `wait` (alpha.71, `waitFor`) — общие операции агентского слоя
 (`sharedOperations`): описание, `readOnly` (= `!writes`), вход (по `args`) и
 схема ответа (`cliDataSchemas`) берутся из одной декларации — договора CLI;
 `capabilities` возвращает их каталог (`operationCatalog`, тот же построитель,
