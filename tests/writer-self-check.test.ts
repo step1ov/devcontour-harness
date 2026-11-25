@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
+  FAILURE_PATHS_RELEASE_TEXT,
   FAILURE_PATHS_REVIEW_TEXT,
   FAILURE_PATHS_WRITER_TEXT,
   WRITER_SELF_CHECK_TEXT,
@@ -69,17 +70,28 @@ test('writer: подсказка называет команды и cwd gates о
 const PATHS =
   'the response is lost or times out (the client retries or gives up); the same request is retried or submitted twice; the client is offline or the network drops mid-request; a dependency (database, queue, storage, external API) is down or slow; state is expired or abandoned (an upload, session, reservation or link left half-way); concurrent requests touch the same data';
 
-test('A2/A3: тексты чеклиста сбойных путей', () => {
+/** Ревью A1 M4: доказательство, применимость, без брифа у попытки, область исполнителя. */
+const TAIL =
+  '. Check only the paths that apply to the scenarios this change touches and skip the rest. A failure-path finding is blocking only with concrete evidence: a code path (file:line) or a run that shows the break. A scenario that, so shown, loses or corrupts data, deletes what it should keep, gets stuck in an error that a retry cannot clear, or takes down another page or screen is a blocking finding, even when no acceptance criterion names that path. Without such evidence, report the risk as a note.';
+
+test('A2/A3, ревью A1 M4: тексты чеклиста сбойных путей', () => {
   assert.equal(
     FAILURE_PATHS_REVIEW_TEXT,
-    'Failure paths: for each user scenario in the order (and in the brief), check what happens when ' +
+    "Failure paths: for the order's goal and the user scenarios it changes, consider what happens when " +
       PATHS +
-      '. A scenario that loses or corrupts data, deletes what it should keep, gets stuck in an error that a retry cannot clear, or takes down another page or screen on such a path is a blocking finding, even when no acceptance criterion names that path.',
+      TAIL,
   );
   assert.equal(
-    FAILURE_PATHS_WRITER_TEXT,
-    'Before you hand back, check the failure paths of your scenarios and handle them: ' +
+    FAILURE_PATHS_RELEASE_TEXT,
+    'Failure paths: for each user scenario of the release (orders and briefs) that this release changes, consider what happens when ' +
       PATHS +
-      '. The reviewer rejects a scenario that breaks on one of these paths even when no acceptance criterion names it.',
+      TAIL,
+  );
+  assert.doesNotMatch(FAILURE_PATHS_REVIEW_TEXT, /brief/);
+  assert.equal(
+    FAILURE_PATHS_WRITER_TEXT,
+    'Before you hand back, check the failure paths that apply to the scenarios your order changes and handle them within its scope: ' +
+      PATHS +
+      '. Do not widen the work beyond the order for paths it does not touch. The reviewer rejects a scenario that is shown to break on one of these paths even when no acceptance criterion names it.',
   );
 });

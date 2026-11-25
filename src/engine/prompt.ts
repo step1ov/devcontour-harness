@@ -161,17 +161,29 @@ export const FAILURE_PATHS = [
   'concurrent requests touch the same data',
 ] as const;
 
-/** Чеклист сбойных путей для reviewer (попытка и выпуск). */
+// Ревью A1 M4: блокирует только находка с доказательством; неприменимые
+// пути пропускаются; reviewer попытки работает от цели и сценариев
+// поручения (брифа у него нет), reviewer выпуска — и от брифа.
+const reviewTail =
+  '. Check only the paths that apply to the scenarios this change touches and skip the rest. A failure-path finding is blocking only with concrete evidence: a code path (file:line) or a run that shows the break. A scenario that, so shown, loses or corrupts data, deletes what it should keep, gets stuck in an error that a retry cannot clear, or takes down another page or screen is a blocking finding, even when no acceptance criterion names that path. Without such evidence, report the risk as a note.';
+
+/** Чеклист сбойных путей для reviewer попытки. */
 export const FAILURE_PATHS_REVIEW_TEXT =
-  'Failure paths: for each user scenario in the order (and in the brief), check what happens when ' +
+  "Failure paths: for the order's goal and the user scenarios it changes, consider what happens when " +
   FAILURE_PATHS.join('; ') +
-  '. A scenario that loses or corrupts data, deletes what it should keep, gets stuck in an error that a retry cannot clear, or takes down another page or screen on such a path is a blocking finding, even when no acceptance criterion names that path.';
+  reviewTail;
+
+/** Чеклист сбойных путей для reviewer выпуска (договор с брифами). */
+export const FAILURE_PATHS_RELEASE_TEXT =
+  'Failure paths: for each user scenario of the release (orders and briefs) that this release changes, consider what happens when ' +
+  FAILURE_PATHS.join('; ') +
+  reviewTail;
 
 /** Тот же чеклист исполнителю: проверить до сдачи. */
 export const FAILURE_PATHS_WRITER_TEXT =
-  'Before you hand back, check the failure paths of your scenarios and handle them: ' +
+  'Before you hand back, check the failure paths that apply to the scenarios your order changes and handle them within its scope: ' +
   FAILURE_PATHS.join('; ') +
-  '. The reviewer rejects a scenario that breaks on one of these paths even when no acceptance criterion names it.';
+  '. Do not widen the work beyond the order for paths it does not touch. The reviewer rejects a scenario that is shown to break on one of these paths even when no acceptance criterion names it.';
 
 /**
  * Самопроверка исполнителя (alpha.71): те же команды gates области, что

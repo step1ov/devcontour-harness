@@ -42,7 +42,7 @@ import {
 import type { Engine } from '../src/engine/engine.ts';
 import { cliAdapter } from '../src/agents/cli-adapter.ts';
 import { releaseDone } from '../src/control/lead.ts';
-import { FAILURE_PATHS_REVIEW_TEXT } from '../src/engine/prompt.ts';
+import { FAILURE_PATHS_RELEASE_TEXT } from '../src/engine/prompt.ts';
 import {
   releaseBaseOf,
   briefMissingLine,
@@ -261,7 +261,7 @@ test('P7-6: review-release — договор выпуска в запросе: 
   const prompt = recordedPrompt(f.scenarioPath, 'reviewer', 0);
   assert.match(prompt, /RELEASE CONTRACT/);
   // A2: чеклист сбойных путей в ревью выпуска.
-  assert.ok(prompt.includes(FAILURE_PATHS_REVIEW_TEXT), 'чеклист сбойных путей');
+  assert.ok(prompt.includes(FAILURE_PATHS_RELEASE_TEXT), 'чеклист сбойных путей');
   // (a) постановки и критерии приёмки
   assert.match(prompt, /Add a greeting function/);
   assert.match(prompt, /greet\('Ada'\) returns 'Hello, Ada!'/);
