@@ -253,16 +253,21 @@ export function leadHold(
   // Тот же дефект дважды подряд — разбор до следующей попытки при любом
   // `diagnoseAfter` (alpha.71): третье продолжение того же патча не выдаётся.
   const repeated = repeatedDefect(work, attempts);
-  // Время и зависание — известные технические причины (alpha.71, E2): их
-  // повторяет harness сам в пределе попыток, разбора они не требуют; попытки
-  // они по-прежнему тратят, и при исчерпании их разбирает ведущий.
+  // Время и зависание — известные технические причины (alpha.71, E2): один
+  // такой отказ harness повторяет сам, разбора он не требует. Второй подряд
+  // (ревью D/E MEDIUM-3, при любой метке активности) — уже не случайность:
+  // зависание исполнителя разбирает ведущий, как прочие дефекты.
   const byId = new Map(attempts.map((a) => [a.id, a]));
-  const defects = pending.filter((id) => {
-    const kind = byId.get(id)?.failureKind;
-    return kind !== 'timeout' && kind !== 'stalled';
-  });
+  const hang = (id: string | undefined) => {
+    const kind = id === undefined ? undefined : byId.get(id)?.failureKind;
+    return kind === 'timeout' || kind === 'stalled';
+  };
+  const hangTwice = pending.some((id, i) => i > 0 && hang(id) && hang(pending[i - 1]));
+  const defects = pending.filter((id) => !hang(id));
   if (
-    (defects.length >= policy.diagnoseAfter || (repeated && pending.includes(repeated.runs[1]))) &&
+    (defects.length >= policy.diagnoseAfter ||
+      hangTwice ||
+      (repeated && pending.includes(repeated.runs[1]))) &&
     work.attempt < maxAttempts
   )
     return { kind: 'diagnosis-required', failures: pending };

@@ -193,14 +193,19 @@ test('ревью C LOW-4: повтор — только дефекты gate и �
   assert.equal(continuableDraft(onlyPair, approved, 'next'), undefined);
 });
 
-test('E2: время и зависание разбора ведущего не требуют — harness повторяет их сам; дефекты gate — по-прежнему разбор', () => {
+test('E2, ревью D/E MEDIUM-3: одиночное время или зависание harness повторяет сам; второе подряд (любая метка) — разбор ведущего', () => {
   const policy = { enabled: true, mode: 'lead', diagnoseAfter: 2, leadResets: 1 } as any;
   const kinds = (a: AttemptState['failureKind'], b: AttemptState['failureKind']) => [
     failed('k1', { failureKind: a, failureFingerprint: 'x1' }),
     failed('k2', { failureKind: b, failureFingerprint: 'x2' }),
   ];
-  assert.equal(leadHold(work, kinds('timeout', 'stalled'), policy, 6), undefined);
   assert.equal(leadHold(work, kinds('gate', 'timeout'), policy, 6), undefined);
+  assert.equal(leadHold(work, kinds('timeout', 'gate'), policy, 6), undefined);
+  // Зависание на gate api, затем на gate web: отпечатки разные, но это второй подряд.
+  assert.equal(leadHold(work, kinds('stalled', 'stalled'), policy, 6)?.kind, 'diagnosis-required');
+  assert.equal(leadHold(work, kinds('timeout', 'stalled'), policy, 6)?.kind, 'diagnosis-required');
+  const single = [failed('k1', { failureKind: 'timeout', failureFingerprint: 'x1' })];
+  assert.equal(leadHold({ ...work, attempt: 1 } as any, single, policy, 6), undefined);
   assert.equal(leadHold(work, kinds('gate', 'review'), policy, 6)?.kind, 'diagnosis-required');
 });
 
