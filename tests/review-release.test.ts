@@ -753,8 +753,20 @@ test('ревью 3: отмена во время второго прохода �
     refuter: { sleepMs: 5000, result: { summary: 'x', verdicts: [], missed: [] } },
   });
   const abort = new AbortController();
-  setTimeout(() => abort.abort(), 1500);
-  await assert.rejects(f.review({ signal: abort.signal }));
+  // Отмена — когда второй проход действительно начался (не по таймеру: под нагрузкой первый проход
+  // мог не закончиться за фиксированное время).
+  const started = `${f.scenarioPath}.refuter.0.started`;
+  const poll = setInterval(() => {
+    if (existsSync(started)) {
+      clearInterval(poll);
+      abort.abort();
+    }
+  }, 50);
+  try {
+    await assert.rejects(f.review({ signal: abort.signal }));
+  } finally {
+    clearInterval(poll);
+  }
   assert.ok(
     existsSync(`${f.scenarioPath}.refuter.0.started`),
     'отмена пришла во время второго прохода',
