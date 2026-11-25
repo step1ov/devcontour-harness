@@ -6,8 +6,17 @@ import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { toolchainBaseline } from '../environment/toolchain-pin.ts';
-import { mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from 'node:fs/promises';
+import { basename, dirname, isAbsolute, join, relative, resolve, posix } from 'node:path';
 import {
   roleBinding,
   selectReviewer,
@@ -3644,6 +3653,68 @@ export class Runner {
    * ограничивает срок. Спецификация лежит в каталоге ревью; значения
    * переменных окружения CLI передаёт серверу по имени, на диск они не пишутся.
    */
+  /** Reviewer этой попытки запускает проверки (как решит `reviewProbe`). */
+  private probesWanted(attempt: AttemptState, work: WorkState) {
+    const chosen = selectReviewer(
+      this.policy,
+      'code',
+      { runtime: attempt.runtime },
+      work.order.role,
+      work.order.repositoryId,
+    );
+    const name = chosen.ok ? chosen.reviewer.toolProfile : undefined;
+    const profile = name ? this.policy.toolProfiles[name] : undefined;
+    return attempt.reviewer !== 'fixture' && reviewerRunsChecks(attempt.reviewer, profile);
+  }
+
+  /**
+   * Одноразовая копия проверяемого коммита для проверок reviewer (alpha.71,
+   * A4): detached-дерево `sha` во временном каталоге controller, сверенное
+   * (HEAD — `sha`, чистое), с каталогами `node_modules` проверяемого дерева
+   * ссылками (установленные зависимости кандидата). `dispose` убирает его
+   * при любом исходе; отказ создания — проверки идут, как прежде, в
+   * проверяемом дереве только для чтения.
+   */
+  async probeCopy(
+    cwd: string,
+    sha: string,
+    dir: string,
+  ): Promise<{ cwd: string; dispose: () => Promise<void> } | undefined> {
+    const tree = await mkdtemp(join(controllerTemp.dir(), 'hx-probe-'));
+    const checkout = join(tree, 'tree');
+    const dispose = async () => {
+      await git(cwd, 'worktree', 'remove', '--force', checkout).catch(() => undefined);
+      // Каталог создан выше этим вызовом (mkdtemp под временным каталогом controller).
+      await rm(tree, { recursive: true, force: true }).catch(() => undefined);
+    };
+    try {
+      await git(cwd, 'worktree', 'add', '--detach', checkout, sha);
+      if (
+        (await git(checkout, 'rev-parse', 'HEAD')) !== sha ||
+        (await git(checkout, 'status', '--porcelain', '--untracked-files=all'))
+      )
+        throw new Error('копия проверок не на проверяемом коммите');
+      const modules = (
+        await git(cwd, 'ls-files', '--others', '--ignored', '--exclude-standard', '--directory')
+      )
+        .split('\n')
+        .map((p) => p.replace(/\/$/, ''))
+        .filter((p) => p && posix.basename(p) === 'node_modules' && !p.includes('/node_modules/'));
+      for (const m of modules) {
+        await mkdir(dirname(join(checkout, m)), { recursive: true });
+        await symlink(join(cwd, m), join(checkout, m)).catch(() => undefined);
+      }
+      await writeFile(
+        join(dir, 'probe-copy.json'),
+        JSON.stringify({ sha, cwd: checkout, links: modules }, null, 2),
+      ).catch(() => undefined);
+      return { cwd: checkout, dispose };
+    } catch {
+      await dispose();
+      return undefined;
+    }
+  }
+
   private async reviewProbe(
     attempt: AttemptState,
     work: WorkState,
@@ -3666,6 +3737,8 @@ export class Runner {
      * проверок переходят от первого вызова, а не выдаются заново.
      */
     shared?: { deadline: number; spentMs: number },
+    /** Одноразовая записываемая копия дерева для проверок (`probeCopy`). */
+    probeCwd?: string,
   ) {
     const chosen = selectReviewer(
       this.policy,
@@ -3688,9 +3761,10 @@ export class Runner {
     const execution = this.environment(attempt, phase, cwd, name);
     const secrets = new Set(execution.redact.secrets ?? []);
     const spec: ProbeSpec = {
-      cwd,
+      cwd: probeCwd ?? cwd,
       controller: boundary.hidden,
-      readable: [cwd, ...boundary.readable],
+      readable: [...(probeCwd ? [probeCwd] : []), cwd, ...boundary.readable],
+      ...(probeCwd ? { writable: true } : {}),
       ...(boundary.checkouts.length ? { checkouts: boundary.checkouts } : {}),
       isolation: this.policy.isolation,
       harnessMode: harnessModeOf(this.policy),
@@ -3725,7 +3799,7 @@ export class Runner {
         env: spec.env,
         commandTimeoutMs: limits.commandTimeoutMs,
       } satisfies ProbeServer,
-      prompt: `Run checks with the ${probeTool} tool (argv, no shell; sources are read-only, temporary files go to TMPDIR). The controller stops each command after ${seconds(limits.commandTimeoutMs)} s and all checks share ${seconds(budgetMs)} s; ${seconds(limits.reserveMs)} s stay reserved for your verdict. A timeout is an observation about that command on that input, not proof of a defect: name the input and the limit if you report it, and give your verdict with what you have when the budget runs out. When a finding rests on a run, put its runId into reproduction.run.${spec.gates?.length ? ' ' + gateProbePrompt(spec.gates) : ''}`,
+      prompt: `Run checks with the ${probeTool} tool (argv, no shell; ${probeCwd ? 'checks run in a disposable writable copy of the same commit, discarded after your review — your verdict is about the candidate' : 'sources are read-only'}, temporary files go to TMPDIR). The controller stops each command after ${seconds(limits.commandTimeoutMs)} s and all checks share ${seconds(budgetMs)} s; ${seconds(limits.reserveMs)} s stay reserved for your verdict. A timeout is an observation about that command on that input, not proof of a defect: name the input and the limit if you report it, and give your verdict with what you have when the budget runs out. When a finding rests on a run, put its runId into reproduction.run.${spec.gates?.length ? ' ' + gateProbePrompt(spec.gates) : ''}`,
     };
   }
 
@@ -4153,45 +4227,57 @@ export class Runner {
       }
       const callDir = call === 1 ? dir : join(dir, `call-${call}`);
       await mkdir(callDir, { recursive: true });
-      const probe = await this.reviewProbe(
-        attempt,
-        work,
-        cwd,
-        callDir,
-        phase,
-        sha,
-        base,
-        gates,
-        call,
-        shared,
-      );
-      const response = await this.call(
-        this.adapter(attempt.reviewer),
-        {
-          task: 'review-code',
+      // Проверки reviewer — в одноразовой записываемой копии того же
+      // коммита (alpha.71, A4): проверяемое дерево только для чтения.
+      const copy = this.probesWanted(attempt, work)
+        ? await this.probeCopy(cwd, sha, callDir)
+        : undefined;
+      let probe: Awaited<ReturnType<Runner['reviewProbe']>>;
+      let response: Awaited<ReturnType<Runner['call']>>;
+      try {
+        probe = await this.reviewProbe(
           attempt,
+          work,
           cwd,
-          dir: callDir,
+          callDir,
           phase,
-          prompt:
-            prompt({
-              work,
-              attempt: { ...attempt, baseSha: base },
-              history: this.history(attempt),
-              context,
-              gates: gates.map((g) => ({ id: g.id, command: g.command })),
-              review: { sha, phase, diff },
-              notes,
-              ...(legacy ? {} : { findings: history }),
-              ...(call > 1 ? { retry: { call, calls, issues } } : {}),
-            }) + (probe ? '\n\n' + probe.prompt : ''),
-          ...(probe ? { probe: probe.server } : {}),
-          ...(legacy ? {} : { findings: requestFindings(history) }),
-          timeoutMs: remaining,
-          ...(unchanged ? { outputSchema: alreadySatisfiedReviewOutputSchema } : {}),
-        },
-        signal,
-      );
+          sha,
+          base,
+          gates,
+          call,
+          shared,
+          copy?.cwd,
+        );
+        response = await this.call(
+          this.adapter(attempt.reviewer),
+          {
+            task: 'review-code',
+            attempt,
+            cwd,
+            dir: callDir,
+            phase,
+            prompt:
+              prompt({
+                work,
+                attempt: { ...attempt, baseSha: base },
+                history: this.history(attempt),
+                context,
+                gates: gates.map((g) => ({ id: g.id, command: g.command })),
+                review: { sha, phase, diff },
+                notes,
+                ...(legacy ? {} : { findings: history }),
+                ...(call > 1 ? { retry: { call, calls, issues } } : {}),
+              }) + (probe ? '\n\n' + probe.prompt : ''),
+            ...(probe ? { probe: probe.server } : {}),
+            ...(legacy ? {} : { findings: requestFindings(history) }),
+            timeoutMs: remaining,
+            ...(unchanged ? { outputSchema: alreadySatisfiedReviewOutputSchema } : {}),
+          },
+          signal,
+        );
+      } finally {
+        await copy?.dispose();
+      }
       // Reviewer не меняет закреплённые зависимости, как и своё дерево.
       await assertDependencies(attempt.dependencies ?? []);
       const redact = response.redact;
