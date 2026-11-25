@@ -739,7 +739,7 @@ test('recovery (P8-4(b), alpha.71): предел незасчитанных от
   );
 });
 
-test('recovery (P8-4(b), alpha.71): засчитанные попытки исчерпаны, разбор environment с доказательством — сброс ведущего; без доказательства — человек', () => {
+test('ревью C MEDIUM-2: засчитанные дефекты gate исчерпали попытки — разбор environment с доказательством сброс ведущему не даёт, решает человек', () => {
   const ctx = setup({ mode: 'lead', diagnoseAfter: 3 });
   const e = ctx.engine;
   for (let i = 0; i < 3; i++) {
@@ -748,12 +748,16 @@ test('recovery (P8-4(b), alpha.71): засчитанные попытки исч
   }
   const d = e.diagnose('a', {
     cause: 'environment',
-    evidence: ['gate упал на Docker pull EOF; harness smoke --writer-probe после сбоя прошёл'],
+    evidence: ['harness smoke --writer-probe прошёл'],
   });
-  assert.equal(d.next, 'lead-reset');
-  assert.equal(
-    e.retry('a', { reason: 'окружение исправлено', diagnosis: d.diagnosis.id }, 'lead').reset
-      ?.performed,
-    true,
+  assert.equal(d.next, 'user-reset');
+  refused(
+    () => e.retry('a', { reason: 'окружение', diagnosis: d.diagnosis.id }, 'lead'),
+    'ATTEMPTS_EXHAUSTED',
+    /не техническая/,
   );
+  assert.deepEqual((({ actor, action }) => ({ actor, action }))(explain(ctx)), {
+    actor: 'user',
+    action: 'reset-attempts',
+  });
 });

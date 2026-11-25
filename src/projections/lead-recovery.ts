@@ -48,17 +48,24 @@ export const epochOf = (w: Pick<WorkState, 'rework'>) => w.rework?.budgets ?? 0;
 
 /**
  * Технический разбор: ведущий сам даёт новый предел по нему. `environment`
- * с доказательством исправления (например, прошедший `harness smoke`) —
- * технический с alpha.71 (P8-4(b), решение владельца): попытки, съеденные
- * отказами окружения, ведущий возвращает сам, в пределе `leadResets`.
+ * — технический с alpha.71 (P8-4(b), решение владельца; ревью C MEDIUM-2)
+ * только с доказательством исправления (например, прошедший `harness
+ * smoke`) и только когда каждый разобранный отказ harness сам отнёс к
+ * окружению (`failureKind: environment`): засчитанные дефекты gate и ревью
+ * причиной «окружение» не сбрасываются — их исчерпание решает человек.
  */
 export const technicalCause = (
-  d: Pick<LeadDiagnosis, 'cause' | 'hypothesis'> & Partial<Pick<LeadDiagnosis, 'evidence'>>,
+  d: Pick<LeadDiagnosis, 'cause' | 'hypothesis'> &
+    Partial<Pick<LeadDiagnosis, 'evidence' | 'failures'>>,
+  attempts: readonly Pick<AttemptState, 'id' | 'failureKind'>[] = [],
 ) =>
   d.cause === 'coverage' ||
   d.cause === 'approach' ||
   (d.cause === 'other' && !!d.hypothesis) ||
-  (d.cause === 'environment' && (d.evidence?.length ?? 0) > 0);
+  (d.cause === 'environment' &&
+    (d.evidence?.length ?? 0) > 0 &&
+    (d.failures?.length ?? 0) > 0 &&
+    d.failures!.every((id) => attempts.find((a) => a.id === id)?.failureKind === 'environment'));
 
 /** Предел незасчитанных отказов работы исчерпан (`MAX_NEUTRAL_FAILURES`). */
 export const neutralFailuresExhausted = (w: Pick<WorkState, 'neutralFailures'>) =>
@@ -296,7 +303,7 @@ export function exhaustedStep(
   // технический ход ведущего, и новый предел попыток по этому разбору даёт
   // он сам — в пределе `leadResets`, как по любому техническому разбору.
   const replanned = fresh.cause === 'split' && fresh.approvedDigest !== work.approvedDigest;
-  if (!technicalCause(fresh) && !replanned)
+  if (!technicalCause(fresh, attempts) && !replanned)
     return { actor: 'user', why: 'cause', diagnosis: fresh };
   return {
     actor: 'lead',
