@@ -1646,7 +1646,13 @@ export class Runner {
    * (alpha.71, C3, `continuableDraft`): исполнитель узнаёт почему.
    */
   private freshStartNotes(work: WorkState): string[] {
-    const defect = this.engine.read((v) => repeatedDefect(work, v.attempts(work.id)));
+    const defect = this.engine.read((v) => {
+      const attempts = v.attempts(work.id);
+      const found = repeatedDefect(work, attempts);
+      // Только когда попытка и правда начата без черновика пары.
+      const previous = attempts.filter((a) => a.status !== 'active').at(-1);
+      return found && previous && found.runs.includes(previous.id) ? found : undefined;
+    });
     return defect
       ? [
           `Fresh start: attempts ${defect.runs.join(' and ')} failed on the same defect (${defect.by === 'finding' ? 'blocking review finding ' + defect.finding : 'the same failure'}), so this attempt starts from a clean tree instead of continuing their patch. Do not rebuild the same patch: follow the lead's diagnosis below and take a different approach, then make the gates pass.`,

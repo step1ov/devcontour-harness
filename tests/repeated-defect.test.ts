@@ -7,6 +7,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { HarnessError, type AttemptState, type WorkState } from '../src/contracts/index.ts';
 import { leadHold, repeatedDefect } from '../src/projections/lead-recovery.ts';
+import { continuableDraft } from '../src/engine/reuse.ts';
 import { approve, implement, setup } from './runner-fixture.ts';
 import { planReview, trustNone } from './engine-fixture.ts';
 
@@ -147,4 +148,33 @@ test('runner: тот же провал gate дважды подряд — раз
   // Вторая попытка (после разных отказов — одного) продолжала черновик первой.
   assert.ok(a2!.continuedFrom, 'обычное продолжение до повтора');
   ctx.store.close();
+});
+
+test('ревью C LOW-4: повтор — только дефекты gate и ревью; черновик попытки с чистого дерева продолжается', () => {
+  const pair = (kind: AttemptState['failureKind']) => [
+    failed('t1', { failureKind: kind, failureFingerprint: 'same' }),
+    failed('t2', { failureKind: kind, failureFingerprint: 'same' }),
+  ];
+  for (const kind of ['timeout', 'context-exhausted', 'review-protocol'] as const)
+    assert.equal(repeatedDefect(work, pair(kind)), undefined, kind);
+  assert.ok(repeatedDefect(work, pair('gate')));
+  // Пара gate X, X; затем попытка C с чистого дерева прервана с черновиком:
+  // следующая продолжает черновик C, а не начинает заново.
+  const approved = { ...work, approvedDigest: 'd'.repeat(64), order: { contracts: [] } } as any;
+  const partial = {
+    patch: '/tmp/p.patch',
+    digest: 'x',
+    files: ['src/a.js'],
+    spec: 'd'.repeat(64),
+    contracts: {},
+  };
+  const attempts = [
+    ...pair('gate'),
+    { ...failed('c', { failureKind: 'environment', partial } as any), startedAt: 'z' },
+  ];
+  const view = { attempts: () => attempts } as any;
+  assert.equal(continuableDraft(view, approved, 'next')?.runId, 'c', 'черновик C');
+  // Источник черновика — попытка пары: с чистого дерева.
+  const onlyPair = { attempts: () => pair('gate') } as any;
+  assert.equal(continuableDraft(onlyPair, approved, 'next'), undefined);
 });

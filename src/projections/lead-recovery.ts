@@ -143,7 +143,8 @@ export function pendingFailures(work: WorkFacts, attempts: readonly AttemptFacts
 }
 
 /**
- * Тот же дефект в двух засчитанных отказах подряд (alpha.71, C3): тот же
+ * Тот же дефект в двух засчитанных отказах подряд (alpha.71, C3) — только
+ * провал gate или отклонение ревью: тот же
  * отпечаток отказа или та же блокирующая находка ревью (её ID протокола) в
  * решающих отклонениях обеих попыток. Отказы окружения и провайдера серию не
  * обрывают и не продолжают. Следующая попытка начинается с чистого дерева,
@@ -171,6 +172,10 @@ export function repeatedDefect(
   const counted = countedFailures(work, attempts);
   const [before, last] = counted.slice(-2);
   if (!before || !last) return undefined;
+  // Только дефекты исполнителя — провал gate и отклонение ревью (ревью C
+  // LOW-4): время, окно контекста и протокол ревью — не дефект решения.
+  const defect = (a: AttemptFacts) => a.failureKind === 'gate' || a.failureKind === 'review';
+  if (!defect(before) || !defect(last)) return undefined;
   const runs: [string, string] = [before.id, last.id];
   if (last.failureFingerprint && last.failureFingerprint === before.failureFingerprint)
     return { runs, by: 'fingerprint' };
