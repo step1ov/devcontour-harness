@@ -2,7 +2,7 @@ import { appendFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { controllerTemp } from '../environment/controller-temp.ts';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { homedir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { z } from 'zod';
 import type {
@@ -207,8 +207,57 @@ export interface CliAdapterOptions {
 }
 
 /**
- * Адаптер CLI codex или claude. Каждый вызов — новая сессия: reviewer и
- * planner не получают сессии writer (`continue` отклоняется). Граница
+ * Умеет ли CLI продолжить сессию со структурированным ответом (тонкий режим,
+ * alpha.73): codex — `exec resume` с --json, --output-schema и -o; claude —
+ * `--resume`. Проба — справка CLI, один раз на процесс.
+ */
+const resumeProbes = new Map<string, Promise<boolean>>();
+export function sessionContinueSupport(
+  runtime: 'codex' | 'claude',
+  executable: string,
+  env?: NodeJS.ProcessEnv,
+): Promise<boolean> {
+  const key = JSON.stringify([runtime, executable, env?.PATH ?? process.env.PATH]);
+  if (!resumeProbes.has(key))
+    resumeProbes.set(
+      key,
+      command(
+        runtime === 'codex' ? [executable, 'exec', 'resume', '--help'] : [executable, '--help'],
+        tmpdir(),
+        { timeoutMs: 15_000, ...(env ? { env } : {}) },
+      )
+        .then((h) => {
+          if (h.code) return false;
+          const flags = runtime === 'codex' ? ['--json', '--output-schema', '-o'] : ['--resume'];
+          const words = new Set(h.stdout.split(/[\s,=<>[\]]+/));
+          return flags.every((f) => words.has(f));
+        })
+        .catch(() => false),
+    );
+  return resumeProbes.get(key)!;
+}
+
+/**
+ * Codex `exec resume` (0.165) не знает `--sandbox`: режим песочницы — той
+ * же настройкой через `-c sandbox_mode=…`; остальные флаги прежние.
+ */
+export function codexResumeArgv(argv: readonly string[], id: string): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--sandbox') {
+      out.push('-c', `sandbox_mode="${argv[++i]}"`);
+      continue;
+    }
+    out.push(argv[i]!);
+    if (i === 1 && argv[i] === 'exec') out.push('resume', id);
+  }
+  return out;
+}
+
+/**
+ * Адаптер CLI codex или claude. Каждый вызов — новая сессия, кроме writer
+ * тонкого режима: `continue` продолжает его сессию (`codex exec resume`,
+ * `claude --resume`); reviewer и planner сессии writer не получают. Граница
  * доступа — нативная песочница runtime с политикой harness: запись только
  * в разрешённые каталоги, состояние controller и учётные данные закрыты.
  * Ответ возвращается сырым (`output`); разбирает и проверяет его движок.
@@ -222,6 +271,7 @@ export function cliAdapter(
     runtime,
     async capabilities(): Promise<RuntimeCapabilities> {
       const version = await runtimeVersion(executable);
+      const sessionContinue = version ? await sessionContinueSupport(runtime, executable) : false;
       return {
         runtime,
         ...(version ? { version } : {}),
@@ -232,11 +282,14 @@ export function cliAdapter(
         fixture: false,
         // Запрос и wire-схема несут протокол переходов находок (docs/review-protocol.md).
         reviewProtocol: 1,
+        ...(sessionContinue ? { sessionContinue } : {}),
       };
     },
     async invoke(r: RuntimeRequest, signal: AbortSignal): Promise<RuntimeResponse> {
-      if (r.session.kind !== 'fresh')
+      // Продолжить можно только сессию writer (тонкий режим, alpha.73).
+      if (r.session.kind === 'fork' || (r.session.kind === 'continue' && r.task !== 'implement'))
         throw new Error(`${runtime}: продолжение сессии не поддерживается`);
+      const resume = r.session.kind === 'continue' ? r.session.id : undefined;
       const review = r.task !== 'implement';
       const dir = r.artifactDir ?? (await mkdtemp(join(controllerTemp.dir(), 'harness-call-')));
       await mkdir(dir, { recursive: true });
@@ -287,7 +340,7 @@ export function cliAdapter(
         ...(r.sandbox.checkouts?.length ? { checkouts: r.sandbox.checkouts } : {}),
       });
       const policy: Isolation = runtime === 'claude' ? withWriterNetwork(bounds, network) : bounds;
-      const argv =
+      const built =
         runtime === 'codex'
           ? [
               executable,
@@ -392,9 +445,13 @@ export function cliAdapter(
               '--setting-sources',
               '',
               '--strict-mcp-config',
-              '--no-session-persistence',
+              // Сессия writer с постоянным домашним каталогом (тонкий режим)
+              // сохраняется: её продолжит следующая сдача.
+              ...(light?.home ? [] : ['--no-session-persistence']),
+              ...(resume ? ['--resume', resume] : []),
               ...(r.binding.model ? ['--model', r.binding.model] : []),
             ];
+      const argv = runtime === 'codex' && resume ? codexResumeArgv(built, resume) : built;
       const redact = redactor(r.secrets ?? []);
       // Граница записи облегчённого режима: процесс runtime и все его
       // потомки пишут только в свои каталоги, кеши и состояние своего CLI.
@@ -402,17 +459,19 @@ export function cliAdapter(
       // Свой домашний каталог CLI на вызов (под каталогом controller, не в
       // артефактах): настройки пользователя исполнителю на запись не
       // открыты; в нём — копия файла входа, обратно ничего не переносится
-      // (решение владельца 2026-11-24).
+      // (решение владельца 2026-11-24). Постоянный каталог работы
+      // (`light.home`, тонкий режим) остаётся после вызова: в нём сессия.
       const runtimeHome = light
-        ? join(controllerTemp.dir(), `hx-home-${randomUUID().slice(0, 12)}`)
+        ? (light.home ?? join(controllerTemp.dir(), `hx-home-${randomUUID().slice(0, 12)}`))
         : undefined;
+      const transientHome = light && !light.home ? runtimeHome : undefined;
       const userHome = r.env.HOME ?? homedir();
       let homeEnv: Record<string, string> = {};
       // Входа для своего каталога не нашлось: вызов идёт (вход может прийти
       // иначе), а отказ runtime получит подсказку, что сделать.
       let homeHint: string | undefined;
       const cleanup = async () => {
-        for (const d of [runtimeHome, outDir])
+        for (const d of [transientHome, outDir])
           if (d) await rm(d, { recursive: true, force: true }).catch(() => undefined);
       };
       if (light?.guard)
@@ -521,8 +580,8 @@ export function cliAdapter(
       } finally {
         // Домашний каталог вызова с копией входа убирается на любом исходе;
         // обратно ничего не переносится (решение владельца 2026-11-24).
-        if (runtimeHome)
-          await rm(runtimeHome, { recursive: true, force: true }).catch(() => undefined);
+        if (transientHome)
+          await rm(transientHome, { recursive: true, force: true }).catch(() => undefined);
       }
       try {
         const usage = telemetry.usage(result.code === 0 && !result.timedOut && !signal.aborted);
@@ -570,8 +629,10 @@ export function cliAdapter(
             .at(-1);
           return text ? redact(text).slice(0, 300) : undefined;
         };
+        const sessionId = telemetry.sessionId();
         const base = {
           text: redact(result.stdout).slice(-20000),
+          ...(sessionId ? { sessionId } : {}),
           model,
           runtimeVersion: version,
           usage,
@@ -593,6 +654,20 @@ export function cliAdapter(
           };
         if (signal.aborted)
           return { ...base, status: 'cancelled', diagnostics: diagnostics('прогон прерван') };
+        // Продолжение не началось: сессии нет (удалена, другой каталог) —
+        // отказ этого продолжения, а не недоступный runtime: следующая сдача
+        // начнёт новую сессию.
+        if (result.code !== 0 && resume && !started)
+          return {
+            ...base,
+            status: 'failed',
+            diagnostics: {
+              ...diagnostics(
+                `сессия ${resume} не продолжена: код ${result.code}${reason() ? ': ' + reason() : ''}`,
+              ),
+              sessionLost: true,
+            },
+          };
         if (result.code !== 0)
           return {
             ...base,

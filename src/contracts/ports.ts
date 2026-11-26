@@ -360,6 +360,8 @@ export interface RuntimeResponse {
     reason?: string;
     log?: string;
     contextExhausted?: ContextLimit;
+    /** Продолжение сессии writer не началось: сессии нет у CLI (alpha.73). */
+    sessionLost?: boolean;
   };
   /** Что reviewer выполнил по событиям runtime (только для ревью). */
   inspection?: NonNullable<EvidenceRecord['inspection']>;

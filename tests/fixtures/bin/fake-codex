@@ -11,6 +11,17 @@ if (args.includes('--version')) {
   console.log(`fake-${runtime} 0.0.1 (fixture)`);
   process.exit(0);
 }
+// Справка — для пробы продолжения сессии (alpha.73): флаги, которые harness
+// передаёт продолжению. FIXTURE_NO_RESUME — CLI без продолжения.
+if (args.includes('--help')) {
+  if (process.env.FIXTURE_NO_RESUME) console.log('Usage: fixture (no resume)');
+  else if (runtime === 'codex')
+    console.log(
+      'Usage: codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]\n  --json\n  --output-schema <FILE>\n  -o, --output-last-message <FILE>',
+    );
+  else console.log('Usage: claude [options]\n  -r, --resume [value]  Resume a conversation');
+  process.exit(0);
+}
 // Проверка входа (`claude auth status`, `codex login status`): fixture «вошёл».
 if (args.length === 2 && (args[0] === 'auth' || args[0] === 'login') && args[1] === 'status') {
   console.log(args[0] === 'auth' ? JSON.stringify({ loggedIn: true }) : 'Logged in (fixture)');
@@ -26,6 +37,22 @@ const arg = (name) => {
   const i = args.indexOf(name);
   return i >= 0 ? args[i + 1] : undefined;
 };
+// Сессии (alpha.73): новая сессия оставляет метку в домашнем каталоге CLI
+// вызова; продолжение без метки — «session not found», как у настоящего CLI
+// после потери каталога. Шаг сценария при этом не расходуется.
+const sessionHome = runtime === 'codex' ? process.env.CODEX_HOME : process.env.CLAUDE_CONFIG_DIR;
+const resumed =
+  runtime === 'codex' ? (args[1] === 'resume' ? args[2] : undefined) : arg('--resume');
+const sessionMark = (id) => (sessionHome ? join(sessionHome, 'fixture-sessions', id) : undefined);
+if (resumed && !(sessionMark(resumed) && existsSync(sessionMark(resumed)))) {
+  console.error(`session not found: ${resumed}`);
+  process.exit(1);
+}
+const sessionId = resumed ?? `fixture-${process.pid}-${Date.now().toString(36)}`;
+if (!resumed && sessionMark(sessionId)) {
+  mkdirSync(dirname(sessionMark(sessionId)), { recursive: true });
+  writeFileSync(sessionMark(sessionId), '');
+}
 const schema =
   runtime === 'codex'
     ? JSON.parse(readFileSync(arg('--output-schema'), 'utf8'))
@@ -54,6 +81,8 @@ if (!step) {
   process.exit(2);
 }
 writeFileSync(`${scenarioPath}.${role}.${index}.started`, '');
+// Продолжение сессии: тест видит, какой вызов продолжил какую сессию.
+if (resumed) writeFileSync(`${scenarioPath}.${runtime}.${role}.${index}.resumed`, resumed);
 const prompt = readFileSync(0, 'utf8');
 // Ключи окружения вызова (значения — только у FIXTURE_/PROFILE_): тесты проверяют, что профиль применён.
 writeFileSync(
@@ -251,7 +280,13 @@ if (step.crashHarness) {
 const started = step.started !== false;
 const out = (event) => process.stdout.write(JSON.stringify(event) + '\n');
 if (runtime === 'codex') {
-  out({ type: 'thread.started', thread_id: 'fixture' });
+  out({ type: 'thread.started', thread_id: sessionId });
+  // Переполнение контекста сессии (alpha.73): отказ хода после начала работы.
+  if (step.contextExhausted) {
+    out({ type: 'item.completed', item: { type: 'agent_message', text: 'fixture' } });
+    out({ type: 'error', message: 'fixture: context window exceeded' });
+    process.exit(1);
+  }
   if (started) out({ type: 'item.completed', item: { type: 'agent_message', text: 'fixture' } });
   if (role === 'reviewer' && step.observedCommand)
     out({
