@@ -74,7 +74,7 @@ interface AgentRecord {
 /** Драйвер над состоянием теста с поддельным ведущим (`mode`: wait-go | exit). */
 function driveOf(
   env: Env | { dir: string; engine: { policy: Engine['policy'] } },
-  options: { mode?: 'wait-go' | 'exit'; code?: number; extraArgs?: string[] } = {},
+  options: { mode?: 'wait-go' | 'exit' | 'hang'; code?: number; extraArgs?: string[] } = {},
   extra: Partial<Parameters<typeof driveLead>[0]> = {},
 ) {
   const dir = mkdtempSync(join(tmpdir(), 'harness-drive-agent-'));
@@ -206,26 +206,97 @@ test('lead drive: каталога состояния ещё нет — веду
   assert.match((await sessionRecord(agentDir, 1)).stdin, /каталог состояния ещё не создан/);
 });
 
-test('lead drive: вопрос, на который ведущему отвечать нельзя, — выход owner (код 20) без сессии; разрешённый ведущему — сессия', async () => {
-  const owner = engineOf(
-    policyOf((p: Record<string, unknown>) => (p.inputPolicy = { threshold: 7 })),
-  );
-  ready(owner.engine, graphOf({ a: [], b: [] }));
-  const a = owner.engine.claim('c1')!;
-  owner.engine.claim('c1');
-  owner.engine.fail(a.id, a.token, 'вопрос', { kind: 'needs-input', input: questionOutcome() });
-  const first = driveOf(owner);
-  const data = await first.promise;
+const ownerPolicy = () =>
+  policyOf((p: Record<string, unknown>) => {
+    p.inputPolicy = { threshold: 7 };
+    p.maxAttempts = 1;
+  });
+
+test('lead drive: вопрос владельца, а больше идти нечему (run не идёт) — уведомление и выход owner (20) без сессии ведущего', async () => {
+  const env = engineOf(ownerPolicy());
+  ready(env.engine, graphOf({ a: [] }));
+  const a = env.engine.claim('c1')!;
+  env.engine.fail(a.id, a.token, 'вопрос', { kind: 'needs-input', input: questionOutcome() });
+  const lines: string[] = [];
+  const { dir, promise } = driveOf(env, {}, { onLog: (l) => lines.push(l) });
+  const data = await promise;
   assert.equal(data.outcome, 'owner');
   assert.equal(DRIVE_EXIT_CODES[data.outcome], 20);
   assert.deepEqual(data.sessions, []);
-  assert.deepEqual(sessionFiles(first.dir), []);
+  assert.deepEqual(sessionFiles(dir), []);
+  assert.match(data.message, /run не идёт, а дальше всё ждёт ответа владельца/);
   assert.match(data.message, /IR-[a-f0-9]{24}/);
   assert.match(data.message, /Какой формат приветствия/);
-  assert.equal(data.last?.kind, 'question');
+  assert.equal(data.notices.length, 1);
+  assert.equal(data.notices[0]!.kind, 'owner-question');
+  assert.equal(data.notices[0]!.workId, a.workId);
+  assert.ok(lines.some((l) => l.startsWith('владельцу: вопрос исполнителя IR-')));
   leadDriveDataSchema.parse(data);
-  owner.store.close();
+  env.store.close();
+});
 
+test('lead drive: вопрос владельца не останавливает драйвер, пока другое идёт; отказ независимой работы — сессия ведущего; ответ владельца — сессия ведущего', async () => {
+  const env = engineOf(ownerPolicy());
+  ready(env.engine, graphOf({ a: [], b: [], c: [] }));
+  const a = env.engine.claim('c1')!;
+  const b = env.engine.claim('c1')!;
+  env.engine.fail(a.id, a.token, 'вопрос', { kind: 'needs-input', input: questionOutcome() });
+  const c = env.engine.claim('c1')!; // c работает до конца: очередь не стоит
+  assert.ok(c);
+  const abort = new AbortController();
+  const { dir, promise } = driveOf(env, { mode: 'wait-go' }, { signal: abort.signal });
+  await new Promise((r) => setTimeout(r, 500));
+  assert.deepEqual(sessionFiles(dir), [], 'вопрос владельца ведущего не будит');
+  // Независимая работа b падает без повтора: дело ведущего.
+  env.engine.fail(b.id, b.token, 'gate unit упал', { kind: 'gate' });
+  const first = await sessionRecord(dir, 1);
+  assert.equal(first.env.HARNESS_LEAD_DRIVE_EVENT, 'failed');
+  assert.ok(first.stdin.includes(b.workId));
+  env.engine.recordLead((log, now) => ({
+    log: {
+      ...log,
+      entries: [
+        ...log.entries,
+        { at: new Date(now).toISOString(), kind: 'note', action: 'lead.note', plain: 'разбираю b' },
+      ],
+    },
+    result: undefined,
+  }));
+  go(dir, 1);
+  await new Promise((r) => setTimeout(r, 600));
+  assert.equal(sessionFiles(dir).length, 1, 'драйвер продолжил ждать');
+  // Владелец ответил (оператор) — ведущий применяет ответ.
+  const request = env.engine.read((v) => v.locals('input-requests'))[0]!.value;
+  env.engine.answerInput(
+    request.id,
+    { text: 'Hello', optionId: 'hello', actor: { kind: 'operator' } },
+    request.version,
+  );
+  const second = await sessionRecord(dir, 2);
+  assert.equal(second.env.HARNESS_LEAD_DRIVE_EVENT, 'question');
+  assert.match(second.stdin, /владелец ответил на вопрос исполнителя/);
+  assert.match(second.stdin, /input-resolve/);
+  go(dir, 2);
+  await new Promise((r) => setTimeout(r, 1300));
+  abort.abort();
+  const data = await promise;
+  assert.equal(data.outcome, 'aborted');
+  assert.deepEqual(
+    data.sessions.map((s) => s.kind),
+    ['failed', 'question'],
+  );
+  assert.deepEqual(
+    data.notices.map((n) => [n.kind, n.requestId]),
+    [
+      ['owner-question', request.id],
+      ['owner-answered', request.id],
+    ],
+  );
+  leadDriveDataSchema.parse(data);
+  env.store.close();
+});
+
+test('lead drive: вопрос, на который ведущему отвечать можно, — сессия ведущего', async () => {
   const lead = engineOf(
     policyOf(
       (p: Record<string, unknown>) =>
@@ -239,8 +310,29 @@ test('lead drive: вопрос, на который ведущему отвеч�
   const second = driveOf(lead, {}, { idleSessions: 1 });
   const woke = await second.promise;
   assert.equal(woke.sessions[0]?.kind, 'question');
+  assert.deepEqual(woke.notices, []);
   assert.match((await sessionRecord(second.dir, 1)).stdin, /\$H input-show/);
   lead.store.close();
+});
+
+test('lead drive: сессия дольше --session-timeout снята (SIGTERM, затем SIGKILL) и считается неудачной', async () => {
+  const env = engineOf();
+  ready(env.engine, graphOf({ a: [] }));
+  const started = Date.now();
+  const { promise } = driveOf(
+    env,
+    { mode: 'hang' },
+    { idleSessions: 1, sessionTimeoutMs: 400, killGraceMs: 300 },
+  );
+  const data = await promise;
+  assert.ok(Date.now() - started < 8000, 'снята по сроку, не дождались 15 с поддельного ведущего');
+  assert.equal(data.outcome, 'no-progress');
+  assert.equal(data.sessions.length, 1);
+  assert.equal(data.sessions[0]!.timedOut, true);
+  assert.equal(data.sessions[0]!.exitCode, null);
+  assert.match(data.message, /превысила --session-timeout/);
+  leadDriveDataSchema.parse(data);
+  env.store.close();
 });
 
 test('lead drive: весь код принят — сессия ведущего; release done записан — выход 0; сессия с изменениями сбрасывает счёт простоя', async () => {

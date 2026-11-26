@@ -1918,7 +1918,7 @@ export const cliCommands = {
       'Ждать за ведущего без модели (alpha.72): цикл harness wait с тем же курсором; команду ведущего хоста (--agent) запускает только на значимом событии — отказ или удержание, которые harness сам не чинит, вопрос, на который может ответить ведущий, готовый выпуск, очередь без harness run (или ещё без каталога состояния). Каждая сессия новая: цели оператора (--prompt-file) и короткая сводка события с командами на stdin, окружение HARNESS_LEAD_DRIVE=1, HARNESS_LEAD_DRIVE_CURSOR, HARNESS_LEAD_DRIVE_SESSION, HARNESS_LEAD_DRIVE_EVENT. Принятие работы, таймаут ожидания и отказ, который harness повторит сам, ведущего не будят. Синоним: harness lead drive',
     writes: false,
     idempotency:
-      'Сам драйвер состояние только читает (продлевает лишь активную сессию ведущего); пишут запущенные им сессии ведущего. Коды выхода — исходы, не ошибки (`ok: true`, решает `outcome`): 0 release-done (release done записан, весь код принят), 20 owner (вопрос, на который ведущему отвечать нельзя, бюджет, доступ к провайдеру, пауза оператора), 21 no-progress (--idle-sessions сессий подряд без изменения состояния), 22 max-sessions, 23 agent-error (команда не запустилась), 16 aborted (сигнал)',
+      'Сам драйвер состояние только читает (продлевает лишь активную сессию ведущего); пишут запущенные им сессии ведущего. Коды выхода — исходы, не ошибки (`ok: true`, решает `outcome`): 0 release-done (release done записан, весь код принят), 20 owner (run не идёт, а дальше всё ждёт ответа владельца на вопрос, на который ведущему отвечать нельзя; или шаг только человека — бюджет, доступ к провайдеру, пауза оператора; пока другое идёт, вопрос владельца — только уведомление в stderr и notices, сессия ведущего не начинается, а ответ владельца будит ведущего), 21 no-progress (--idle-sessions сессий подряд без изменения состояния), 22 max-sessions, 23 agent-error (команда не запустилась), 16 aborted (сигнал)',
     args: [
       state,
       {
@@ -1957,6 +1957,13 @@ export const cliCommands = {
         value: 'duration',
         required: false,
         description: 'Предел одного внутреннего ожидания: Nm, Nh или Ns; по умолчанию 60m',
+      },
+      {
+        name: '--session-timeout',
+        value: 'duration',
+        required: false,
+        description:
+          'Предел одной сессии ведущего (по умолчанию 60m): дольше — SIGTERM, через 10 с SIGKILL; такая сессия считается неудачной (--idle-sessions)',
       },
       {
         name: '--log',
@@ -2662,10 +2669,22 @@ export const leadDriveDataSchema = z.strictObject({
         cursor: z.number().int().min(0),
         exitCode: z.number().int().nullable(),
         progressed: z.boolean(),
+        timedOut: z.literal(true).optional(),
         ms: z.number().int().min(0),
       }),
     )
     .max(200),
+  notices: z
+    .array(
+      z.strictObject({
+        at: isoTimeSchema,
+        kind: z.enum(['owner-question', 'owner-answered']),
+        requestId: z.string().min(1).max(200),
+        workId: idSchema.optional(),
+        message: z.string().max(500),
+      }),
+    )
+    .max(50),
   waits: z.number().int().min(0),
   cursor: z.number().int().min(0),
   status: z.string().max(500),

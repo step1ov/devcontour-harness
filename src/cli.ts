@@ -563,6 +563,7 @@ const options = {
   'prompt-file': { type: 'string' },
   'max-sessions': { type: 'string' },
   'idle-sessions': { type: 'string' },
+  'session-timeout': { type: 'string' },
   log: { type: 'string' },
 } as const;
 
@@ -595,6 +596,7 @@ const flagOwners = {
   'prompt-file': ['lead-drive'],
   'max-sessions': ['lead-drive'],
   'idle-sessions': ['lead-drive'],
+  'session-timeout': ['lead-drive'],
   log: ['lead-drive'],
   'as-of': ['report'],
   format: ['report', 'handoff'],
@@ -1586,6 +1588,14 @@ async function run(
             ? {}
             : {
                 waitTimeoutMs: parseDurationFlag('timeout', v.timeout, {
+                  minMs: 1000,
+                  maxMs: 24 * 3_600_000,
+                }),
+              }),
+          ...(v['session-timeout'] === undefined
+            ? {}
+            : {
+                sessionTimeoutMs: parseDurationFlag('session-timeout', v['session-timeout'], {
                   minMs: 1000,
                   maxMs: 24 * 3_600_000,
                 }),

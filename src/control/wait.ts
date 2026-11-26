@@ -142,6 +142,12 @@ export async function waitFor(input: {
   /** Раз в `tickMs` (по умолчанию минута): продление сессии ведущего (CLI). */
   onTick?: () => void;
   tickMs?: number;
+  /**
+   * Внутренний вызов (`lead drive`, alpha.72): событие, которое тоже кончает
+   * ожидание — исходом `question` с этим событием (ответ владельца на
+   * вопрос). CLI `wait` его не передаёт: договор wait прежний.
+   */
+  wakeOn?: (event: RunEvent) => boolean;
   now?: () => number;
 }): Promise<WaitData> {
   const now = input.now ?? Date.now;
@@ -214,9 +220,13 @@ export async function waitFor(input: {
       if (input.signal?.aborted) return finish('aborted');
       const events = store.events(cursor, 500);
       for (const e of events) {
-        const kind = store.read((view) => classify(e, view));
         const event = { seq: e.seq, type: e.type, at: e.at };
         const work = e.workId ? { workId: e.workId } : {};
+        if (input.wakeOn?.(e)) {
+          cursor = e.seq;
+          return finish('question', { event, ...work });
+        }
+        const kind = store.read((view) => classify(e, view));
         if (kind === 'failure') {
           // Отказ и ремонт harness — разные транзакции (ревью D/E LOW-2): отказ
           // проверяется опросом позже; назначенный повтор (работа уже не
