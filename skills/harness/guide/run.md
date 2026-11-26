@@ -51,9 +51,11 @@ your turn with a short summary. Do not call `$H wait` and do not loop: the
 driver wakes you on the next failure, hold, question for you, ready release
 or stopped queue; accepted works and failures harness retries by itself do
 not wake you. A decision only the owner can make: name it in plain words in
-your summary. An executor question you may not answer does not wake you
-either: the driver tells the owner and keeps waiting; the owner's answer
-wakes you to apply it.
+your summary. A new executor question you may not answer wakes you once
+(`HARNESS_LEAD_DRIVE_EVENT=owner-question`): do not answer it yourself — pass
+it to the owner's channel (a Relay open question, see `$H guide session`),
+keep independent works running and end your turn. The same pending question
+does not wake you again; the owner's answer wakes you to apply it.
 
 **Running the driver (operator).** Instead of a lead session that waits:
 
@@ -75,8 +77,9 @@ stays small; the agent gets `HARNESS_LEAD_DRIVE=1`,
 `.err`. A session longer than `--session-timeout` is stopped (SIGTERM, then
 SIGKILL after 10 s; only the agent process, not a `harness run` it started)
 and counts as a failed session. A question the lead may not answer is an
-owner notice (stderr and `data.notices`), not a lead session, while other
-work can go on: failures of independent works still wake the lead, and the
+owner notice (stderr and `data.notices`) and one lead session
+(`owner-question`) to pass it on; the driver keeps waiting while other work
+can go on: failures of independent works still wake the lead, and the
 owner's answer (panel or `input-answer`) wakes it to apply the answer. Exit
 codes (`ok: true`, the JSON `outcome` decides): 0 release-done (release done
 recorded, all code accepted), 20 owner (no run going and everything left

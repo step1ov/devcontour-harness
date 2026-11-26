@@ -9,8 +9,10 @@
 // оператора и короткая сводка события на stdin, не история. Принятие работы,
 // таймаут ожидания и отказ, который harness повторит сам, ведущего не будят.
 // Вопрос, на который ведущему отвечать нельзя, — уведомление владельцу
-// (stderr и `notices`) без сессии ведущего: драйвер ждёт дальше, отказы
-// независимых работ будят ведущего, ответ владельца — тоже. Выход с отдельным
+// (stderr и `notices`) и одна сессия ведущего (`owner-question`): передать
+// вопрос в канал владельца (Relay), не отвечая; тот же вопрос ведущего больше
+// не будит. Драйвер ждёт дальше, отказы независимых работ будят ведущего,
+// ответ владельца — тоже. Выход с отдельным
 // кодом — когда идти дальше нечему (run не идёт, готовых работ нет, ждут
 // только ответа владельца) или шаг только человека (бюджет, доступ к
 // провайдеру, пауза оператора). Сессии без изменений состояния подряд и
@@ -67,8 +69,8 @@ const OWNER_ACTIONS = new Set(['raise-budget', 'fix-access']);
 
 export interface DriveSession {
   session: number;
-  /** Чем разбужен ведущий. */
-  kind: WaitData['kind'];
+  /** Чем разбужен ведущий; `owner-question` — передать новый вопрос владельцу. */
+  kind: WaitData['kind'] | 'owner-question';
   workId?: string;
   cursor: number;
   /** Код выхода команды ведущего (`null` — снят сигналом). */
@@ -260,8 +262,13 @@ export function eventSummary(
   input: Pick<DriveInput, 'stateDir' | 'policyPath' | 'harnessBin'> & {
     session: number;
     maxSessions: number;
+    /** Новые вопросы владельцу, о которых ведущий ещё не знает. */
+    owner?: InputRequest[];
+    /** Сессия только ради них (`owner-question`). */
+    ownerOnly?: boolean;
   },
 ): string {
+  const owner = input.owner ?? [];
   const S = resolve(input.stateDir);
   const P = resolve(input.policyPath);
   const work = w.workId ? ` --work ${w.workId}` : '';
@@ -274,6 +281,7 @@ export function eventSummary(
         : `исполнитель задал вопрос${w.workId ? ` (работа ${w.workId})` : ''}, на который можете ответить вы`,
     'release-ready': 'весь код выпуска принят: нужны ревью выпуска и итоговый отчёт',
     stopped: '`harness run` не идёт (нет controller и попыток), а выпуск не закончен',
+    'owner-question': 'исполнитель задал вопрос, на который отвечает только владелец',
   };
   const commands: Record<string, string[]> = {
     failed: [
@@ -300,18 +308,35 @@ export function eventSummary(
       `$H explain --state ${S} --policy ${P} --human`,
       `nohup $H run --graph <граф> --policy ${P} --state ${S} --author <claude|codex> > <журнал> 2>&1 &`,
     ],
+    'owner-question': [
+      `$H input-show --state ${S} --request <IR-…>`,
+      `$H explain --state ${S} --policy ${P} --human   # готовые работы — запустите run, вопрос держит только свои`,
+    ],
   };
+  const kind = input.ownerOnly ? 'owner-question' : w.kind;
+  const ownerLines = owner.length
+    ? [
+        '',
+        'Новые вопросы владельцу (драйвер уведомил оператора):',
+        ...owner.map((r) => `  - ${questionLine(r)}`),
+        'Это вопрос владельцу: не отвечайте сами, передайте его владельцу (Relay) и завершите ход.',
+        'Независимые работы пусть идут; ответ владельца драйвер передаст вам отдельной сессией.',
+      ]
+    : [];
   return [
     `Сообщение драйвера ведущего (harness lead drive), сессия ${input.session} из ${input.maxSessions}.`,
-    `Событие: ${w.kind}${w.workId ? ` ${w.workId}` : ''}${w.event ? ` (${w.event.type} #${w.event.seq})` : ''} — ${what[w.kind] ?? w.kind}. Курсор ${w.cursor}.`,
+    input.ownerOnly
+      ? `Событие: owner-question — ${what['owner-question']}. Курсор ${w.cursor}.`
+      : `Событие: ${w.kind}${w.workId ? ` ${w.workId}` : ''}${w.event ? ` (${w.event.type} #${w.event.seq})` : ''} — ${what[w.kind] ?? w.kind}. Курсор ${w.cursor}.`,
     `Состояние: ${w.status || '—'}`,
-    w.next
+    ...ownerLines,
+    !input.ownerOnly && w.next
       ? `Следующий шаг по explain: ${w.next.actor ?? '—'} ${w.next.action}: ${w.next.message}`
       : '',
     '',
     `H=${input.harnessBin}`,
     'Команды для этого события:',
-    ...(commands[w.kind] ?? []).map((c) => '  ' + c),
+    ...(commands[kind] ?? []).map((c) => '  ' + c),
     `Правила: $H guide session (lead begin, журнал), $H guide recovery (остановки), $H guide run, $H guide release.`,
     '',
     'HARNESS_LEAD_DRIVE=1: ждёт драйвер. Разберите это событие, при необходимости запустите `harness run` в фоне,',
@@ -489,6 +514,8 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
   const notices: DriveNotice[] = [];
   /** Вопросы, о которых владелец уже уведомлён: их ответ будит ведущего. */
   const noticed = new Set<string>();
+  /** Новые вопросы владельца, которые ведущий ещё не получил (будят его один раз). */
+  let relay: InputRequest[] = [];
   let waits = 0;
   let cursor: number | undefined;
   let idle = 0;
@@ -523,6 +550,7 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
     for (const r of questions)
       if (!noticed.has(r.id)) {
         noticed.add(r.id);
+        relay.push(r);
         fresh = true;
         notice({
           kind: 'owner-question',
@@ -559,8 +587,14 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
         const pending = await scanPending(input, cursor);
         noticeOwner(pending.owner);
         if (pending.ownerStop) return ownerExit(pending.ownerStop);
-        if (!pending.lead) continue;
-        w = pending.lead;
+        if (!pending.lead && !relay.length) continue;
+        w = pending.lead ?? {
+          kind: 'question',
+          ...(relay[0]?.workId ? { workId: relay[0].workId } : {}),
+          status: status(),
+          cursor,
+          waitedMs: 0,
+        };
       } else {
         waits++;
         w = await waitFor({
@@ -593,15 +627,12 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
           ...(w.workId ? { workId: w.workId } : {}),
           message: `владелец ответил${w.workId ? ` (работа ${w.workId})` : ''}: будим ведущего применить ответ`,
         });
-      // Новый вопрос владельца: уведомление, ведущего не будим, ждём дальше.
+      // Вопрос владельца: уведомление; ведущего будит только новый — один раз.
       if (w.kind === 'question' && !answered) {
         const owner = readState(input.stateDir, (view) =>
           ownerQuestions(view, input.policy, w.workId),
         );
-        if (owner?.length) {
-          noticeOwner(owner);
-          continue;
-        }
+        if (owner?.length && !noticeOwner(owner) && !relay.length) continue;
       }
       // Только что закончившаяся сессия могла запустить run в фоне: метка
       // запуска появится не сразу — `stopped` перепроверяется после паузы.
@@ -622,12 +653,34 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
         const pending = await scanPending(input, w.cursor);
         noticeOwner(pending.owner);
         if (pending.ownerStop) return ownerExit(pending.ownerStop);
-        if (pending.owner.length && !pending.runnable && !pending.lead)
+        // Новый вопрос владельца сначала получает ведущий (передать владельцу).
+        if (pending.owner.length && !pending.runnable && !pending.lead && !relay.length)
           return ownerExit(
             `run не идёт, а дальше всё ждёт ответа владельца: ${pending.owner.map(questionLine).join('; ')}`,
           );
         if (pending.lead && !pending.runnable) w = { ...pending.lead, cursor: w.cursor };
+        else if (!pending.runnable && relay.length)
+          w = {
+            kind: 'question',
+            ...(relay[0]?.workId ? { workId: relay[0].workId } : {}),
+            status: w.status,
+            cursor: w.cursor,
+            waitedMs: 0,
+          };
       }
+      // Сессия только ради новых вопросов владельцу: ни своего события, ни запуска.
+      const ownerOnly =
+        relay.length > 0 &&
+        w.kind === 'question' &&
+        w.event?.type !== 'input.answered' &&
+        !!readState(input.stateDir, (view) =>
+          ownerQuestions(view, input.policy, w.workId).some((r) =>
+            relay.some((x) => x.id === r.id),
+          ),
+        );
+      const owner = relay;
+      relay = [];
+      const sessionKind: DriveSession['kind'] = ownerOnly ? 'owner-question' : w.kind;
       last = {
         kind: w.kind,
         ...(w.workId ? { workId: w.workId } : {}),
@@ -642,7 +695,7 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
       const prompt =
         input.goals.trimEnd() +
         '\n\n---\n\n' +
-        eventSummary(w, { ...input, session, maxSessions }) +
+        eventSummary(w, { ...input, session, maxSessions, owner, ownerOnly }) +
         '\n';
       const promptFile = join(promptDir, `session-${session}.prompt.md`);
       writeFileSync(promptFile, prompt);
@@ -652,7 +705,7 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
           .replaceAll('{cursor}', String(w.cursor))
           .replaceAll('{prompt-file}', promptFile),
       );
-      log(`сессия ${session}: ${w.kind}${w.workId ? ` ${w.workId}` : ''}, курсор ${w.cursor}`);
+      log(`сессия ${session}: ${sessionKind}${w.workId ? ` ${w.workId}` : ''}, курсор ${w.cursor}`);
       const before = fingerprint(input.stateDir);
       const sessionTimeoutMs = input.sessionTimeoutMs ?? 60 * 60_000;
       lastRun = await runAgent(argv, prompt, {
@@ -662,7 +715,7 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
           HARNESS_LEAD_DRIVE: '1',
           HARNESS_LEAD_DRIVE_CURSOR: String(w.cursor),
           HARNESS_LEAD_DRIVE_SESSION: String(session),
-          HARNESS_LEAD_DRIVE_EVENT: w.kind,
+          HARNESS_LEAD_DRIVE_EVENT: sessionKind,
         },
         ...(input.logDir
           ? {
@@ -678,7 +731,7 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
       const progressed = fingerprint(input.stateDir) !== before;
       sessions.push({
         session,
-        kind: w.kind,
+        kind: sessionKind,
         ...(w.workId ? { workId: w.workId } : {}),
         cursor: w.cursor,
         exitCode: lastRun.exitCode,

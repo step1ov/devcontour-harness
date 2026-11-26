@@ -2664,7 +2664,7 @@ export const leadDriveDataSchema = z.strictObject({
     .array(
       z.strictObject({
         session: z.number().int().positive(),
-        kind: waitDataSchema.shape.kind,
+        kind: z.union([waitDataSchema.shape.kind, z.literal('owner-question')]),
         workId: idSchema.optional(),
         cursor: z.number().int().min(0),
         exitCode: z.number().int().nullable(),
