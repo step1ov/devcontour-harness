@@ -51,14 +51,17 @@ your turn with a short summary. Do not call `$H wait` and do not loop: the
 driver wakes you on the next failure, hold, question for you, ready release
 or stopped queue; accepted works and failures harness retries by itself do
 not wake you. A decision only the owner can make: name it in plain words in
-your summary; the driver itself stops for an owner question it can see.
+your summary. An executor question you may not answer does not wake you
+either: the driver tells the owner and keeps waiting; the owner's answer
+wakes you to apply it.
 
 **Running the driver (operator).** Instead of a lead session that waits:
 
 ```sh
 $H lead drive --state <manifest.paths.state> --policy .harness/policy.json \
   --agent 'codex exec --dangerously-bypass-approvals-and-sandbox --json -C /path/to/repo -' \
-  --prompt-file goals.md --log transcripts/drive [--max-sessions 20] [--idle-sessions 3] [--timeout 60m]
+  --prompt-file goals.md --log transcripts/drive [--max-sessions 20] [--idle-sessions 3] \
+  [--timeout 60m] [--session-timeout 60m]
 ```
 
 `--agent` is the host's lead command as one string, run without a shell
@@ -69,11 +72,18 @@ the driver appends the event summary. Each session is new, so the context
 stays small; the agent gets `HARNESS_LEAD_DRIVE=1`,
 `HARNESS_LEAD_DRIVE_CURSOR`, `HARNESS_LEAD_DRIVE_SESSION` and
 `HARNESS_LEAD_DRIVE_EVENT`. `--log` keeps `session-N.prompt.md`, `.out` and
-`.err`. Exit codes (`ok: true`, the JSON `outcome` decides): 0 release-done
-(release done recorded, all code accepted), 20 owner (a question the lead
-may not answer, budget, provider access, an operator pause: answer it, then
-start the driver again), 21 no-progress (`--idle-sessions` sessions in a row
-changed nothing: check the agent command and its logs), 22 max-sessions, 23
+`.err`. A session longer than `--session-timeout` is stopped (SIGTERM, then
+SIGKILL after 10 s; only the agent process, not a `harness run` it started)
+and counts as a failed session. A question the lead may not answer is an
+owner notice (stderr and `data.notices`), not a lead session, while other
+work can go on: failures of independent works still wake the lead, and the
+owner's answer (panel or `input-answer`) wakes it to apply the answer. Exit
+codes (`ok: true`, the JSON `outcome` decides): 0 release-done (release done
+recorded, all code accepted), 20 owner (no run going and everything left
+waits for the owner's answer, or an owner-only step — budget, provider
+access, an operator pause: decide it, then start the driver again), 21
+no-progress (`--idle-sessions` sessions in a row changed nothing or timed
+out: check the agent command and its logs), 22 max-sessions, 23
 agent-error (the command did not start), 16 aborted (signal). Progress lines
 go to stderr.
 
