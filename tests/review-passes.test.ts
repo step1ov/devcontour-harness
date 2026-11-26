@@ -327,3 +327,11 @@ test('ревью 3: запрос второго прохода называет 
   assert.match(text, /no installed dependencies, build output or running services/);
   assert.match(text, /do not rely on running the project commands/);
 });
+
+test('alpha.72: в режиме always второй проход ищет все пропущенные находки, а не только опровергает', () => {
+  const always = refutePromptText([], 'always');
+  assert.match(always, /EVERY blocking defect the first pass did not report/);
+  assert.match(always, /Search, do not only refute/);
+  assert.match(always, /keep going after the first missed defect/);
+  assert.doesNotMatch(refutePromptText([], 'on-reject'), /Search, do not only refute/);
+});

@@ -1,4 +1,4 @@
-import { FAILURE_PATHS_RELEASE_TEXT } from '../engine/prompt.ts';
+import { FAILURE_PATHS_RELEASE_TEXT, RELEASE_REVIEW_COMPLETENESS_TEXT } from '../engine/prompt.ts';
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, rm, rmdir, stat, writeFile } from 'node:fs/promises';
@@ -400,6 +400,7 @@ export async function reviewBranch(
       : '',
     contract?.prompt ?? '',
     release ? FAILURE_PATHS_RELEASE_TEXT : '',
+    release ? RELEASE_REVIEW_COMPLETENESS_TEXT : '',
     'Report execution.commands or an empty list with execution.noCommandsReason. Findings need a message; use null where a field does not apply.',
     names.length
       ? 'Exact diff to review:\n' + diff

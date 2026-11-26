@@ -68,7 +68,7 @@ test('writer: подсказка называет команды и cwd gates о
 
 /** Тексты чеклиста — договор (alpha.71 A2/A3), записаны независимо от реализации. */
 const PATHS =
-  'the response is lost or times out (the client retries or gives up); the same request is retried or submitted twice; the client is offline or the network drops mid-request; a dependency (database, queue, storage, external API) is down or slow; state is expired or abandoned (an upload, session, reservation or link left half-way); concurrent requests touch the same data';
+  'the response is lost or times out (the client retries or gives up); the same request is retried or submitted twice; the client is offline or the network drops mid-request; a dependency (database, queue, storage, external API) is down or slow; state is expired or abandoned (an upload, session, reservation or link left half-way); concurrent requests touch the same data; the network is slow or the payload is large: a client, proxy or SDK timeout is shorter than the time the server needs to receive and process the request, or a server or proxy timeout or body limit cuts a slow upload; the request does heavy work inline (synchronous processing) instead of handing it to a background job: when the client times out or retries, the work runs twice, is lost half-way or leaves a duplicate (is the retried request idempotent?)';
 
 /** Ревью A1 M4: доказательство, применимость, без брифа у попытки, область исполнителя. */
 const TAIL =

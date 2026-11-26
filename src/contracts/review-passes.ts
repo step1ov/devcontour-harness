@@ -220,7 +220,7 @@ export function refutePromptText(
     'Return one entry in `verdicts` per finding with its exact `index`, `verdict` (confirmed | refuted) and a concrete `basis`. A finding without a verdict counts as confirmed.',
     'Your working directory is a clean checkout of the same commit made for this pass: it has no installed dependencies, build output or running services, and any change you make there is discarded and fails this pass. Judge from the code, the diff, the acceptance criteria and the gate evidence of the first pass; do not rely on running the project commands here.',
     mode === 'always'
-      ? 'This work requires two passes on every review: also check the commit yourself and list in `missed` any blocking defect the first pass did not report (concrete path, line and evidence). Leave `missed` empty when there is none.'
+      ? 'This work requires two passes on every review: also check the commit yourself and list in `missed` EVERY blocking defect the first pass did not report (concrete path, line and evidence). Search, do not only refute: go through each scenario and acceptance criterion and each applicable failure path yourself, and keep going after the first missed defect — all of them in this one answer. Leave `missed` empty when there is none.'
       : 'Return `missed` as an empty list.',
     'Blocking findings of the first pass:\n' +
       JSON.stringify(

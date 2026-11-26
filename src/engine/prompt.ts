@@ -159,6 +159,10 @@ export const FAILURE_PATHS = [
   'a dependency (database, queue, storage, external API) is down or slow',
   'state is expired or abandoned (an upload, session, reservation or link left half-way)',
   'concurrent requests touch the same data',
+  // alpha.72 (пилот 9): таймаут клиента короче синхронной загрузки или
+  // обработки на сервере; тяжёлая работа в самом запросе и её повтор.
+  'the network is slow or the payload is large: a client, proxy or SDK timeout is shorter than the time the server needs to receive and process the request, or a server or proxy timeout or body limit cuts a slow upload',
+  'the request does heavy work inline (synchronous processing) instead of handing it to a background job: when the client times out or retries, the work runs twice, is lost half-way or leaves a duplicate (is the retried request idempotent?)',
 ] as const;
 
 // Ревью A1 M4: блокирует только находка с доказательством; неприменимые
@@ -178,6 +182,15 @@ export const FAILURE_PATHS_RELEASE_TEXT =
   'Failure paths: for each user scenario of the release (orders and briefs) that this release changes, consider what happens when ' +
   FAILURE_PATHS.join('; ') +
   reviewTail;
+
+/**
+ * Полнота раунда ревью выпуска (alpha.72, пилот 9: по одной находке
+ * сбойного пути за раунд, 3 раунда ≈155 мин): все блокирующие находки —
+ * за один проход, по каждому сценарию × каждому пункту, без остановки на
+ * первой.
+ */
+export const RELEASE_REVIEW_COMPLETENESS_TEXT =
+  'Release review completeness: list ALL blocking findings of this release in this one pass. Before you answer, go through every user scenario of the release (orders and briefs) against each of its acceptance criteria, the owner answers, the deploy topology and every applicable failure path above; record each blocking finding as you establish it and keep going — do not stop at the first blocker. Every finding left for a later round costs the release another fix work and another review round; a new blocking finding in a later round on code that did not change is a late finding, raised only with evidence that was not available before.';
 
 /** Тот же чеклист исполнителю: проверить до сдачи. */
 export const FAILURE_PATHS_WRITER_TEXT =

@@ -42,7 +42,10 @@ import {
 import type { Engine } from '../src/engine/engine.ts';
 import { cliAdapter } from '../src/agents/cli-adapter.ts';
 import { releaseDone } from '../src/control/lead.ts';
-import { FAILURE_PATHS_RELEASE_TEXT } from '../src/engine/prompt.ts';
+import {
+  FAILURE_PATHS_RELEASE_TEXT,
+  RELEASE_REVIEW_COMPLETENESS_TEXT,
+} from '../src/engine/prompt.ts';
 import {
   releaseBaseOf,
   briefMissingLine,
@@ -262,6 +265,10 @@ test('P7-6: review-release — договор выпуска в запросе: 
   assert.match(prompt, /RELEASE CONTRACT/);
   // A2: чеклист сбойных путей в ревью выпуска.
   assert.ok(prompt.includes(FAILURE_PATHS_RELEASE_TEXT), 'чеклист сбойных путей');
+  // alpha.72: все блокирующие находки — за один проход, без остановки на первой.
+  assert.ok(prompt.includes(RELEASE_REVIEW_COMPLETENESS_TEXT), 'полнота раунда выпуска');
+  assert.match(RELEASE_REVIEW_COMPLETENESS_TEXT, /ALL blocking findings/);
+  assert.match(RELEASE_REVIEW_COMPLETENESS_TEXT, /do not stop at the first blocker/);
   // (a) постановки и критерии приёмки
   assert.match(prompt, /Add a greeting function/);
   assert.match(prompt, /greet\('Ada'\) returns 'Hello, Ada!'/);
@@ -620,6 +627,7 @@ test('alpha.70: приёмка выпуска — второй проход по
   g.scenario({
     reviewer: verdict(true),
     refuter: {
+      recordPrompt: true,
       result: {
         summary: 'пропущено',
         verdicts: [],
@@ -639,6 +647,11 @@ test('alpha.70: приёмка выпуска — второй проход по
   assert.equal(r2.approved, false);
   assert.equal(r2.passes?.missed, 1);
   assert.equal(r2.findings[0]?.message, 'prod.env без MEDIA_URL');
+  // alpha.72: второй проход ищет пропущенные находки, а не только опровергает.
+  const refutePrompt = recordedPrompt(g.scenarioPath, 'refuter', 0);
+  assert.match(refutePrompt, /EVERY blocking defect the first pass did not report/);
+  assert.match(refutePrompt, /Search, do not only refute/);
+  assert.ok(refutePrompt.includes(RELEASE_REVIEW_COMPLETENESS_TEXT));
 
   const h = fixture((p) => (p.review.passes = { release: 'off' }));
   ready(h.engine, graphOf({ w: [] }));

@@ -111,8 +111,12 @@ The lead session rules (`lead begin`, roles of your commands, notes) are in
   `status` → `releaseReview.base`); pass `--base` only to override it. An independent
   reviewer checks the accepted target against the brief, acceptance criteria,
   owner answers and the deploy topology (`release.topology`: gateway/proxy
-  configs, production env files). Blocking findings are fixed by works (plan
-  them like any task), then run `review-release` again on the new target.
+  configs, production env files). The reviewer lists all blocking findings
+  of the round at once. Fix **all blocking findings of one round with one fix
+  work** (one per repository when they span several), its acceptance naming
+  every finding — never one work per finding, and never fix one finding and
+  rerun the review to see the next. Plan it like any task, then run
+  `review-release` again on the new target.
   If `review-release` prints `BRIEF_MISSING`, the release has no brief.
   There is no `.harness/work/<graph-id>.brief.md` next to a registered
   graph, and no brief document (a required task-source document, or one
