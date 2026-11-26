@@ -190,7 +190,7 @@ export const FAILURE_PATHS_RELEASE_TEXT =
  * первой.
  */
 export const RELEASE_REVIEW_COMPLETENESS_TEXT =
-  'Release review completeness: list ALL blocking findings of this release in this one pass. Before you answer, go through every user scenario of the release (orders and briefs) against each of its acceptance criteria, the owner answers, the deploy topology and every applicable failure path above; record each blocking finding as you establish it and keep going — do not stop at the first blocker. Every finding left for a later round costs the release another fix work and another review round; a new blocking finding in a later round on code that did not change is a late finding, raised only with evidence that was not available before.';
+  'Release review completeness: list ALL blocking findings of this release in this one pass. Before you answer, go through every user scenario of the release (orders and briefs) against each of its acceptance criteria, the owner answers, the deploy topology and every applicable failure path above; record each blocking finding as you establish it and keep going — do not stop at the first blocker. Every finding left for a later round costs the release another fix work and another review round. A blocker you find that was missed in an earlier round is still blocking: report it and say that it was already present.';
 
 /** Тот же чеклист исполнителю: проверить до сдачи. */
 export const FAILURE_PATHS_WRITER_TEXT =

@@ -126,7 +126,10 @@ The lead session rules (`lead begin`, roles of your commands, notes) are in
   Before the review, `review-release` needs a full `harness gates` run on
   the target: all gates, with no skips and no carry-over (alpha.71). If there
   is none, it ran on another target, or a gate definition changed since,
-  `review-release` runs it itself and refuses when a gate fails. The refusal
+  `review-release` runs it itself and refuses when a gate fails. Do not run
+  `harness gates` by hand before `review-release`: it runs the full set
+  itself only when the target has no valid run, and a hand run on the same
+  target only repeats ≈20+ minutes of gates (pilot 9). The refusal
   says which kind: a code failure is fixed with a work; an environment or
   tool failure (`[среда: …]`) needs the environment or the gate definition
   fixed and `harness gates` rerun; an interrupted run is simply rerun. A gate
