@@ -1441,6 +1441,7 @@ export function collectOperatorViewInput(
         callsRecorded: !!a.callsRecorded,
         runtime: a.runtime,
         ...(a.model ? { model: a.model } : {}),
+        ...(a.writerSession ? { writerSession: a.writerSession.mode } : {}),
         stages: a.timings ?? [],
         ...((reached) => (reached ? { reached } : {}))(reachedStage(a.timings ?? [])),
       })),

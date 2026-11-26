@@ -495,7 +495,7 @@ test('UP08: view и status --human показывают доступное об�
     const view = p.harness('view', '--state', p.state);
     assert.equal(view.status, 0, view.stderr);
     const doc = operatorViewSchema.parse(view.json.data);
-    assert.equal(doc.viewRevision, 10);
+    assert.equal(doc.viewRevision, 11);
     assert.equal(doc.updates?.state, 'available');
     assert.equal(doc.updates?.mode, 'notify');
     assert.deepEqual(doc.updates?.available, { harness: NEW, ui: '0.1.0-alpha.5' });

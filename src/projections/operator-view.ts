@@ -109,7 +109,7 @@ export interface ViewSettings {
    * Ревизия 9: режим harness (alpha.69) — `light` по умолчанию или `strict`;
    * `default` — поля в политике нет; `writeGuard` — граница записи действует.
    */
-  harnessMode?: { mode: 'light' | 'strict'; default: boolean; writeGuard: boolean };
+  harnessMode?: { mode: 'light' | 'strict' | 'thin'; default: boolean; writeGuard: boolean };
 }
 
 export interface FindingView {
@@ -855,6 +855,7 @@ export interface AttemptRow {
   model?: string;
   startedAt: string;
   finishedAt?: string;
+  writerSession?: 'fresh' | 'resumed' | 'fallback';
   stages: { stage: string; durationMs?: number; outcome?: 'passed' | 'failed'; unused?: true }[];
 }
 
@@ -1075,6 +1076,8 @@ export interface OperatorAttemptInput {
   callsRecorded?: boolean;
   runtime: string;
   model?: string;
+  /** Ревизия 11: режим сессии writer тонкого режима. */
+  writerSession?: 'fresh' | 'resumed' | 'fallback';
   /** Самый дальний этап попытки (`prepare` … `integration`) по её замерам: прогресс не падает на повторе. */
   reached?: string;
   stages?: readonly {
@@ -1970,9 +1973,7 @@ function settingsOf(i: OperatorViewInput, truncated: Record<string, number>): Vi
     },
     defaulted: [...new Set(i.defaulted)].sort(),
     harnessMode: {
-      // Тонкий режим (alpha.73) представление называет облегчённым до
-      // ревизии 11: окружение у них одно, перечисление UI прежнее.
-      mode: p.harnessMode === 'strict' ? 'strict' : 'light',
+      mode: p.harnessMode ?? 'light',
       default: p.harnessMode === undefined,
       writeGuard: p.harnessMode !== 'strict' && p.isolation?.mode !== 'none' && !p.writeGuard?.off,
     },
@@ -5229,6 +5230,7 @@ export function workDetailView(
     ...((model) => (model ? { model } : {}))(text(c, a.model, T.model)),
     startedAt: a.startedAt,
     ...(a.finishedAt ? { finishedAt: a.finishedAt } : {}),
+    ...(a.writerSession ? { writerSession: a.writerSession } : {}),
     stages: take(a.stages ?? [], L.stagesPerAttempt, truncated, 'stages').map((s) => {
       const d = ms(s.finishedAt) - ms(s.startedAt);
       return {

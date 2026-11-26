@@ -151,7 +151,7 @@ function viewOf(env: ReturnType<typeof engineOf>, lang: 'ru' | 'en' = 'ru', with
 test('a68: decisions[] — разбор по желанию, переоткрытие ведущим, отмена человеком; новые сверху', () => {
   const env = pilot();
   const view = viewOf(env);
-  assert.equal(view.viewRevision, 10);
+  assert.equal(view.viewRevision, 11);
   const d = view.decisions!;
   assert.deepEqual(
     d.map((x) => [x.kind, x.by, x.workId]),
@@ -437,7 +437,7 @@ test('a68: harnessView над каталогом состояния выдаёт
     viewRevision: number;
     decisions?: unknown[];
   };
-  assert.equal(view.viewRevision, 10);
+  assert.equal(view.viewRevision, 11);
   assert.ok(Array.isArray(view.decisions));
 });
 

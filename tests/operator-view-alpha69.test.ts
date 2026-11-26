@@ -19,7 +19,7 @@ test('settings.harnessMode: без поля — облегчённый по ум
   const light = operatorViewSchema.parse(
     operatorView(baseInput({ policy: policy((p) => delete p.harnessMode) })),
   );
-  assert.equal(light.viewRevision, 10);
+  assert.equal(light.viewRevision, 11);
   assert.deepEqual(light.settings.harnessMode, { mode: 'light', default: true, writeGuard: true });
   assert.equal(light.settings.thresholds.reviewRoundsUnlimited, true);
   const strict = operatorViewSchema.parse(operatorView(baseInput()));
