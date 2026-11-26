@@ -98,6 +98,8 @@ const laterCommands: readonly string[] = [
   // Ожидание значимого события вместо цикла status (0.1.0-alpha.71).
   'guide',
   'wait',
+  // Ожидание за ведущего без модели (0.1.0-alpha.72).
+  'lead-drive',
 ];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [

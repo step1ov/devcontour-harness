@@ -119,7 +119,7 @@ function classify(event: RunEvent, view: ExecutionView): WaitKind | 'failure' | 
 }
 
 /** Весь выпуск принят: работы есть и все приняты или отменены. */
-const releaseReady = (view: ExecutionView) => {
+export const releaseReady = (view: ExecutionView) => {
   const works = view.works();
   return (
     works.length > 0 &&

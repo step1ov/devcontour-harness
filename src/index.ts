@@ -434,3 +434,11 @@ export {
   type WaitData,
   type WaitKind,
 } from './control/wait.ts';
+export {
+  driveLead,
+  parseAgentTemplate,
+  DRIVE_EXIT_CODES,
+  type DriveData,
+  type DriveInput,
+  type DriveOutcome,
+} from './control/drive.ts';

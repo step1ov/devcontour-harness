@@ -1913,6 +1913,61 @@ export const cliCommands = {
     ],
     refusals: ['NOT_FOUND'],
   },
+  'lead-drive': {
+    description:
+      'Ждать за ведущего без модели (alpha.72): цикл harness wait с тем же курсором; команду ведущего хоста (--agent) запускает только на значимом событии — отказ или удержание, которые harness сам не чинит, вопрос, на который может ответить ведущий, готовый выпуск, очередь без harness run (или ещё без каталога состояния). Каждая сессия новая: цели оператора (--prompt-file) и короткая сводка события с командами на stdin, окружение HARNESS_LEAD_DRIVE=1, HARNESS_LEAD_DRIVE_CURSOR, HARNESS_LEAD_DRIVE_SESSION, HARNESS_LEAD_DRIVE_EVENT. Принятие работы, таймаут ожидания и отказ, который harness повторит сам, ведущего не будят. Синоним: harness lead drive',
+    writes: false,
+    idempotency:
+      'Сам драйвер состояние только читает (продлевает лишь активную сессию ведущего); пишут запущенные им сессии ведущего. Коды выхода — исходы, не ошибки (`ok: true`, решает `outcome`): 0 release-done (release done записан, весь код принят), 20 owner (вопрос, на который ведущему отвечать нельзя, бюджет, доступ к провайдеру, пауза оператора), 21 no-progress (--idle-sessions сессий подряд без изменения состояния), 22 max-sessions, 23 agent-error (команда не запустилась), 16 aborted (сигнал)',
+    args: [
+      state,
+      {
+        ...policy,
+        required: true,
+        description: 'ExecutionPolicy JSON: для explain и команд сводки',
+      },
+      {
+        name: '--agent',
+        value: 'text',
+        required: true,
+        description:
+          "Команда ведущего хоста одной строкой, без оболочки (кавычки склеивают аргументы), prompt — на stdin; подстановки {session}, {cursor}, {prompt-file}. Пример: 'codex exec --json -C /repo -'",
+      },
+      {
+        name: '--prompt-file',
+        value: 'path',
+        required: true,
+        description: 'Короткий prompt оператора с целями выпуска: начало каждой сессии',
+      },
+      {
+        name: '--max-sessions',
+        value: 'number',
+        required: false,
+        description: 'Предел сессий ведущего за запуск драйвера (1–500, по умолчанию 20)',
+      },
+      {
+        name: '--idle-sessions',
+        value: 'number',
+        required: false,
+        description:
+          'Сессий подряд без изменения состояния до остановки с диагнозом (1–20, по умолчанию 3)',
+      },
+      {
+        name: '--timeout',
+        value: 'duration',
+        required: false,
+        description: 'Предел одного внутреннего ожидания: Nm, Nh или Ns; по умолчанию 60m',
+      },
+      {
+        name: '--log',
+        value: 'path',
+        required: false,
+        description:
+          'Каталог журналов: session-N.prompt.md, session-N.out (stdout), session-N.err (stderr)',
+      },
+    ],
+    refusals: ['NOT_FOUND', 'INVALID_INPUT'],
+  },
   'lead-outline': {
     description:
       'План выпуска ведущего до первого графа (и до первого run — с --policy): этапы × компоненты с грубым размером (S/M/L или число задач) и тем, кто их делает (writers, environment, owner). Прогноз считает незарегистрированные части плана объёмом выпуска; без плана status и панель подсказывают RELEASE_OUTLINE_MISSING, run не блокируется (0.1.0-alpha.68). Синоним: harness lead outline --file F',
@@ -2585,6 +2640,42 @@ export const waitDataSchema = z.strictObject({
   /** Номер события, с которого продолжит `wait --after <cursor>` (ревью D/E HIGH-1). */
   cursor: z.number().int().min(0),
   waitedMs: z.number().int().min(0),
+});
+
+/** Итог `harness lead drive` (alpha.72, P9-9). */
+export const leadDriveDataSchema = z.strictObject({
+  outcome: z.enum([
+    'release-done',
+    'aborted',
+    'owner',
+    'no-progress',
+    'max-sessions',
+    'agent-error',
+  ]),
+  message: z.string().max(2000),
+  sessions: z
+    .array(
+      z.strictObject({
+        session: z.number().int().positive(),
+        kind: waitDataSchema.shape.kind,
+        workId: idSchema.optional(),
+        cursor: z.number().int().min(0),
+        exitCode: z.number().int().nullable(),
+        progressed: z.boolean(),
+        ms: z.number().int().min(0),
+      }),
+    )
+    .max(200),
+  waits: z.number().int().min(0),
+  cursor: z.number().int().min(0),
+  status: z.string().max(500),
+  last: z
+    .strictObject({
+      kind: waitDataSchema.shape.kind,
+      workId: idSchema.optional(),
+      next: waitDataSchema.shape.next,
+    })
+    .optional(),
 });
 
 export const eventsDataSchema = z.strictObject({
@@ -3804,6 +3895,7 @@ export const cliDataSchemas = {
   status: statusDataSchema,
   events: eventsDataSchema,
   wait: waitDataSchema,
+  'lead-drive': leadDriveDataSchema,
   guide: guideDataSchema,
   pause: controlDataSchema,
   resume: controlDataSchema,

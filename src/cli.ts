@@ -134,6 +134,7 @@ import {
   type WaitData,
   type WaitKind,
 } from './control/wait.ts';
+import { DRIVE_EXIT_CODES, driveLead, parseAgentTemplate } from './control/drive.ts';
 import { guideSection } from './guide/guide.ts';
 import { recordGatesRun } from './control/release-gates.ts';
 
@@ -558,6 +559,11 @@ const options = {
   file: { type: 'string' },
   proposal: { type: 'string' },
   yes: { type: 'boolean' },
+  agent: { type: 'string' },
+  'prompt-file': { type: 'string' },
+  'max-sessions': { type: 'string' },
+  'idle-sessions': { type: 'string' },
+  log: { type: 'string' },
 } as const;
 
 /** Новые флаги H1 допустимы только у своих команд; прежние команды их не принимают. */
@@ -584,7 +590,12 @@ const flagOwners = {
   detail: ['status'],
   since: ['report'],
   until: ['report', 'wait'],
-  timeout: ['wait'],
+  timeout: ['wait', 'lead-drive'],
+  agent: ['lead-drive'],
+  'prompt-file': ['lead-drive'],
+  'max-sessions': ['lead-drive'],
+  'idle-sessions': ['lead-drive'],
+  log: ['lead-drive'],
   'as-of': ['report'],
   format: ['report', 'handoff'],
   'no-titles': ['report', 'view'],
@@ -1211,6 +1222,7 @@ async function run(
     'status',
     'events',
     'wait',
+    'lead-drive',
     'guide',
     'result',
     'view',
@@ -1518,6 +1530,86 @@ async function run(
           },
         });
         return { command, data, code: WAIT_EXIT_CODES[data.kind] };
+      } finally {
+        process.off('SIGINT', stop);
+        process.off('SIGTERM', stop);
+      }
+    }
+    case 'lead-drive': {
+      // Ожидание за ведущего без модели (alpha.72, P9-9): wait + новая сессия на событии.
+      const state = need('state');
+      const policyPath = need('policy');
+      const b = loadPolicy(policyPath);
+      const count = (flag: 'max-sessions' | 'idle-sessions', max: number) => {
+        const raw = v[flag];
+        if (raw === undefined) return undefined;
+        const n = Number(raw);
+        if (!/^\d+$/.test(raw) || n < 1 || n > max)
+          throw new HarnessError('INVALID_INPUT', `--${flag}: целое число от 1 до ${max}`, [
+            { path: [`--${flag}`], message: raw },
+          ]);
+        return n;
+      };
+      const promptFile = need('prompt-file');
+      let goals: string;
+      try {
+        goals = readFileSync(promptFile, 'utf8');
+      } catch (error) {
+        throw new HarnessError(
+          'INVALID_INPUT',
+          `--prompt-file: файл недоступен: ${(error as Error).message}`,
+          [{ path: ['--prompt-file'], message: promptFile }],
+        );
+      }
+      if (!goals.trim())
+        throw new HarnessError('INVALID_INPUT', '--prompt-file: пустой prompt', [
+          { path: ['--prompt-file'], message: promptFile },
+        ]);
+      const maxSessions = count('max-sessions', 500);
+      const idleSessions = count('idle-sessions', 20);
+      const abort = new AbortController();
+      const stop = () => abort.abort(new Error('Драйвер прерван сигналом'));
+      process.once('SIGINT', stop);
+      process.once('SIGTERM', stop);
+      try {
+        const data = await driveLead({
+          stateDir: state,
+          policy: b.policy,
+          policyPath,
+          baseDir: b.baseDir,
+          agent: parseAgentTemplate(need('agent')),
+          goals,
+          harnessBin: process.env.HARNESS_BIN ?? process.argv[1] ?? 'harness',
+          ...optional('maxSessions', maxSessions),
+          ...optional('idleSessions', idleSessions),
+          ...(v.timeout === undefined
+            ? {}
+            : {
+                waitTimeoutMs: parseDurationFlag('timeout', v.timeout, {
+                  minMs: 1000,
+                  maxMs: 24 * 3_600_000,
+                }),
+              }),
+          ...optional('logDir', v.log),
+          ...optional(
+            'graceMs',
+            process.env.HARNESS_LEAD_DRIVE_GRACE_MS
+              ? Number(process.env.HARNESS_LEAD_DRIVE_GRACE_MS)
+              : undefined,
+          ),
+          signal: abort.signal,
+          onLog: (line) => process.stderr.write(`harness lead drive: ${line}\n`),
+          onTick: () => {
+            if (!existsSync(bindingFile(state))) return;
+            const h = open(state, binding(state), false);
+            try {
+              leadRenew(h.engine);
+            } finally {
+              h.close();
+            }
+          },
+        });
+        return { command, data, code: DRIVE_EXIT_CODES[data.outcome] };
       } finally {
         process.off('SIGINT', stop);
         process.off('SIGTERM', stop);
@@ -2746,6 +2838,7 @@ function leadAlias(args: string[]): string[] {
   if (a === 'lead' && (b === 'begin' || b === 'end')) return [`lead-${b}`, ...rest];
   if (a === 'lead' && b === 'note') return ['lead-note', ...lifted('--text')];
   if (a === 'lead' && b === 'outline') return ['lead-outline', ...rest];
+  if (a === 'lead' && b === 'drive') return ['lead-drive', ...rest];
   if (a === 'release' && b === 'done') return ['release-done', ...lifted('--summary')];
   if (a === 'guide' && b !== undefined && !b.startsWith('--'))
     return ['guide', '--topic', b, ...rest];
