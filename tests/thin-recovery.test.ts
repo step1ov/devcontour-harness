@@ -192,30 +192,39 @@ test('падение между update-ref и приёмкой: recovery при�
   const ctx = thin(rec(implement()), { now: () => clock.now });
   const original = thinFlow.handover;
   let moved!: () => void;
+  let crash!: (e: Error) => void;
   const published = new Promise<void>((r) => (moved = r));
   thinFlow.handover = (kit, input) => {
     const promote: ThinKit['promote'] = async (_a, _w, repo, sha, base) => {
       ctx.repo.git('update-ref', repo.targetRef, sha, base);
       moved();
-      await new Promise(() => {}); // процесс «упал» до записи приёмки
+      // процесс «упал» до записи приёмки; в конце теста зависший вызов отпускается, чтобы heartbeat
+      // старого runner не держал процесс теста
+      await new Promise<void>((_, reject) => (crash = reject));
     };
     return original({ ...kit, promote }, input);
   };
+  let first: Promise<unknown> = Promise.resolve();
   try {
-    void runAll(ctx);
+    first = runAll(ctx).catch(() => undefined);
     await published;
   } finally {
     thinFlow.handover = original;
   }
-  const [a] = ctx.attempts();
-  clock.now += ctx.policy.leaseMs * 10;
-  ctx.runner.release();
-  const restarted = new Runner({ ...ctx.runner.options, owner: 'runner-2' });
-  await restarted.recover();
-  const [after] = ctx.attempts();
-  assert.equal(after!.status, 'succeeded', after!.error);
-  assert.equal(existsSync(a!.worktree!), false, 'дерево работы убрано');
-  assert.equal(existsSync(join(dirname(a!.worktree!), '..', 'sessions', ctx.work)), false);
+  try {
+    const [a] = ctx.attempts();
+    clock.now += ctx.policy.leaseMs * 10;
+    ctx.runner.release();
+    const restarted = new Runner({ ...ctx.runner.options, owner: 'runner-2' });
+    await restarted.recover();
+    const [after] = ctx.attempts();
+    assert.equal(after!.status, 'succeeded', after!.error);
+    assert.equal(existsSync(a!.worktree!), false, 'дерево работы убрано');
+    assert.equal(existsSync(join(dirname(a!.worktree!), '..', 'sessions', ctx.work)), false);
+  } finally {
+    crash?.(new Error('тест окончен'));
+    await first;
+  }
 });
 
 test('цель дважды сдвинулась мимо замка — незасчитанный повтор следующей сдачей без writer', async () => {
