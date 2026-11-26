@@ -8,8 +8,6 @@ import {
 import { redactor } from './environment/redaction.ts';
 import { execFileSync } from 'node:child_process';
 import {
-  accessSync,
-  constants as fsConstants,
   existsSync,
   lstatSync,
   readFileSync,
@@ -137,6 +135,7 @@ import {
   type WaitKind,
 } from './control/wait.ts';
 import { DRIVE_EXIT_CODES, driveLead, parseAgentTemplate } from './control/drive.ts';
+import { detachRun, harnessInvocation } from './control/detach.ts';
 import { guideSection } from './guide/guide.ts';
 import { recordGatesRun } from './control/release-gates.ts';
 
@@ -566,6 +565,8 @@ const options = {
   'max-sessions': { type: 'string' },
   'idle-sessions': { type: 'string' },
   'session-timeout': { type: 'string' },
+  'repeat-wait': { type: 'string' },
+  detach: { type: 'boolean' },
   waiting: { type: 'string' },
   log: { type: 'string' },
 } as const;
@@ -600,8 +601,10 @@ const flagOwners = {
   'max-sessions': ['lead-drive'],
   'idle-sessions': ['lead-drive'],
   'session-timeout': ['lead-drive'],
+  'repeat-wait': ['lead-drive'],
+  detach: ['run-detach'],
   waiting: ['lead-end'],
-  log: ['lead-drive'],
+  log: ['lead-drive', 'run-detach'],
   'as-of': ['report'],
   format: ['report', 'handoff'],
   'no-titles': ['report', 'view'],
@@ -1541,6 +1544,23 @@ async function run(
         process.off('SIGTERM', stop);
       }
     }
+    case 'run-detach': {
+      // Run отдельным процессом (alpha.72): pid и журнал, без ожидания конца.
+      const state = need('state');
+      need('policy');
+      const log = need('log');
+      const args: string[] = [];
+      for (let i = 0; i < rest.length; i++) {
+        const a = rest[i]!;
+        if (a === '--log') i++;
+        else if (!a.startsWith('--log=')) args.push(a);
+      }
+      const r = detachRun({ stateDir: state, args, log });
+      process.stderr.write(
+        `harness: run запущен отдельным процессом: pid ${r.pid}, журнал ${r.log}\n`,
+      );
+      return { command, data: { pid: r.pid, log: r.log, at: r.at, args: r.args } };
+    }
     case 'lead-drive': {
       // Ожидание за ведущего без модели (alpha.72, P9-9): wait + новая сессия на событии.
       const state = need('state');
@@ -1585,7 +1605,7 @@ async function run(
           baseDir: b.baseDir,
           agent: parseAgentTemplate(need('agent')),
           goals,
-          harnessBin: harnessBinOf(),
+          harness: harnessInvocation(),
           ...optional('maxSessions', maxSessions),
           ...optional('idleSessions', idleSessions),
           ...(v.timeout === undefined
@@ -1600,6 +1620,14 @@ async function run(
             ? {}
             : {
                 sessionTimeoutMs: parseDurationFlag('session-timeout', v['session-timeout'], {
+                  minMs: 1000,
+                  maxMs: 24 * 3_600_000,
+                }),
+              }),
+          ...(v['repeat-wait'] === undefined
+            ? {}
+            : {
+                repeatWaitMs: parseDurationFlag('repeat-wait', v['repeat-wait'], {
                   minMs: 1000,
                   maxMs: 24 * 3_600_000,
                 }),
@@ -2858,6 +2886,9 @@ function leadAlias(args: string[]): string[] {
   if (a === 'lead' && b === 'note') return ['lead-note', ...lifted('--text')];
   if (a === 'lead' && b === 'outline') return ['lead-outline', ...rest];
   if (a === 'lead' && b === 'drive') return ['lead-drive', ...rest];
+  // `run --detach` (alpha.72): отдельная команда договора, прежний run не меняется.
+  if (a === 'run' && args.includes('--detach'))
+    return ['run-detach', ...args.slice(1).filter((x) => x !== '--detach')];
   if (a === 'release' && b === 'done') return ['release-done', ...lifted('--summary')];
   if (a === 'guide' && b !== undefined && !b.startsWith('--'))
     return ['guide', '--topic', b, ...rest];
@@ -3011,22 +3042,6 @@ if (envelope.command && isSharedOperation(envelope.command)) {
 }
 process.stdout.write(text ?? JSON.stringify(envelope) + '\n');
 process.exitCode = code;
-
-/**
- * CLI harness для команд сводки `lead drive`: `HARNESS_BIN`, иначе сам этот
- * файл, если он исполняемый, иначе `node <файл>`.
- */
-function harnessBinOf(): string {
-  if (process.env.HARNESS_BIN) return process.env.HARNESS_BIN;
-  const self = process.argv[1];
-  if (!self) return 'harness';
-  try {
-    accessSync(self, fsConstants.X_OK);
-    return self;
-  } catch {
-    return `${process.execPath} ${self}`;
-  }
-}
 
 /** Пауза перепроверки `stopped` после сессии (HARNESS_LEAD_DRIVE_GRACE_MS, мс, 0–600000). */
 function driveGraceMs(): number | undefined {

@@ -28,12 +28,14 @@
 // сверх `--session-timeout` — остановка с диагнозом.
 
 import { spawn } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import {
   closeSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   openSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -53,6 +55,7 @@ import type { NotPromise } from '../contracts/ports.ts';
 import { diagnoseState } from '../explain/diagnose.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import { LEAD_WAITING_OWNER } from './lead.ts';
+import { detachRun, lastDetachedRun } from './detach.ts';
 import { pendingKind, releaseReady, waitForEvents, waitStatusLine, type WaitData } from './wait.ts';
 
 /** Исходы драйвера и их коды выхода (коды `wait` 10–16 не пересекаются, кроме aborted). */
@@ -110,6 +113,8 @@ export interface DriveData {
   notices: DriveNotice[];
   /** Сколько внутренних ожиданий прошло. */
   waits: number;
+  /** Сколько раз драйвер сам перезапустил `harness run` (без сессии ведущего). */
+  restarts: number;
   cursor: number;
   status: string;
   /** Последнее значимое событие. */
@@ -130,8 +135,8 @@ export interface DriveInput {
   agent: string[];
   /** Цели оператора (короткий prompt): начало каждой сессии. */
   goals: string;
-  /** CLI harness для команд сводки (`H=…`). */
-  harnessBin: string;
+  /** Вызов CLI harness для команд сводки (функция `H`) и перезапуска run. */
+  harness: string[];
   maxSessions?: number;
   /** Сессий подряд без решения ведущего до остановки (по умолчанию 3). */
   idleSessions?: number;
@@ -141,6 +146,12 @@ export interface DriveInput {
   sessionTimeoutMs?: number;
   /** Между SIGTERM и SIGKILL снятой сессии (по умолчанию 10 с). */
   killGraceMs?: number;
+  /**
+   * То же состояние снова без решения ведущего: сколько ждать любого
+   * изменения хранилища (событие, запись) до выхода no-progress (по
+   * умолчанию 10 мин) — фоновый review-release или правка политики успевают.
+   */
+  repeatWaitMs?: number;
   /** После сессии ведущего `stopped` перепроверяется не раньше этого (по умолчанию 30 с). */
   graceMs?: number;
   pollMs?: number;
@@ -253,17 +264,30 @@ function decisionsOf(view: ExecutionView): string {
     decisions.at(-1)?.at ?? '',
     decisions.at(-1)?.action ?? '',
     log?.release?.doneAt ?? '',
-    view.graphs().length,
+    // Новые графы и редакции (digest графа и политики), работы, раунды ревью.
+    view
+      .graphs()
+      .map((g) => `${g.id}:${g.digest}:${g.policyDigest}`)
+      .join(','),
     view.works().length,
     view.locals('code-reviews').length,
   ].join('|');
 }
 
-/** Сколько раз ведущий сказал «жду владельца» и последняя причина. */
-function waitingOwnerOf(view: ExecutionView): { count: number; plain?: string } {
-  const entries = (leadLog(view)?.entries ?? []).filter((e) => e.action === LEAD_WAITING_OWNER);
-  return { count: entries.length, ...(entries.length ? { plain: entries.at(-1)!.plain } : {}) };
+/** Последнее «жду владельца» ведущего (по времени записи: журнал ограничен по длине). */
+function waitingOwnerOf(view: ExecutionView): { at?: string; plain?: string } {
+  const last = (leadLog(view)?.entries ?? []).filter((e) => e.action === LEAD_WAITING_OWNER).at(-1);
+  return last ? { at: last.at, plain: last.plain } : {};
 }
+
+/** Digest файла (политика): правка политики ведущим — его решение. */
+const fileDigest = (path: string) => {
+  try {
+    return createHash('sha256').update(readFileSync(path)).digest('hex').slice(0, 16);
+  } catch {
+    return '';
+  }
+};
 
 const ownerOnly = (r: InputRequest, policy: ExecutionPolicy) =>
   leadAnswerBasis(r, inputPolicyOf(policy)) === null;
@@ -301,7 +325,7 @@ type QuestionMode = 'lead' | 'answered' | 'owner';
 /** Сводка события для новой сессии ведущего: что случилось и какие команды есть. */
 export function eventSummary(
   w: WaitData,
-  input: Pick<DriveInput, 'stateDir' | 'policyPath' | 'harnessBin'> & {
+  input: Pick<DriveInput, 'stateDir' | 'policyPath' | 'harness'> & {
     session: number;
     maxSessions: number;
     /** Вопрос события (по `requestId` события или работы). */
@@ -331,32 +355,32 @@ export function eventSummary(
   };
   const commands: Record<string, string[]> = {
     failed: [
-      `$H explain --state ${S} --policy ${P}${work} --human`,
-      `$H diagnose --state ${S}${work} --cause … --evidence …   # разбор повторных отказов`,
-      `$H retry --state ${S}${work} --by lead --reason "…"`,
+      `H explain --state ${S} --policy ${P}${work} --human`,
+      `H diagnose --state ${S}${work} --cause … --evidence …   # разбор повторных отказов`,
+      `H retry --state ${S}${work} --by lead --reason "…"`,
     ],
     held: [
-      `$H explain --state ${S} --policy ${P}${work} --human`,
-      `$H retry --state ${S}${work} --by lead --reason "…"`,
+      `H explain --state ${S} --policy ${P}${work} --human`,
+      `H retry --state ${S}${work} --by lead --reason "…"`,
     ],
     question: [
-      `$H input-show --state ${S} --request ${req}`,
+      `H input-show --state ${S} --request ${req}`,
       mode === 'answered'
-        ? `$H input-resolve --state ${S} --request ${req}   # применить ответ ($H guide recovery)`
-        : `$H input-answer --state ${S} --request ${req} --request-version <N> --text "…" --actor lead --reason "…"`,
+        ? `H input-resolve --state ${S} --request ${req}   # применить ответ (H guide recovery)`
+        : `H input-answer --state ${S} --request ${req} --request-version <N> --text "…" --actor lead --reason "…"`,
     ],
     'owner-question': [
-      `$H input-show --state ${S} --request ${req}`,
-      `$H explain --state ${S} --policy ${P} --human   # готовые работы — запустите run, вопрос держит только свои`,
-      `$H lead end --state ${S} --waiting owner --reason "…"   # если дальше ждёте только владельца`,
+      `H input-show --state ${S} --request ${req}`,
+      `H explain --state ${S} --policy ${P} --human   # готовые работы — запустите run, вопрос держит только свои`,
+      `H lead end --state ${S} --waiting owner --reason "…"   # если дальше ждёте только владельца`,
     ],
     'release-ready': [
-      `$H review-release --state ${S} --policy ${P}`,
-      `$H release done --state ${S} --summary "…"`,
+      `H review-release --state ${S} --policy ${P}`,
+      `H release done --state ${S} --summary "…"`,
     ],
     stopped: [
-      `$H explain --state ${S} --policy ${P} --human`,
-      `set -m; nohup $H run --graph <граф> --policy ${P} --state ${S} --author <claude|codex> > <журнал> 2>&1 &`,
+      `H explain --state ${S} --policy ${P} --human`,
+      `H run --detach --log <журнал run> --graph <граф> --policy ${P} --state ${S} --author <claude|codex>`,
     ],
   };
   const text = input.request ? quoted(input.request.question.question) : undefined;
@@ -379,15 +403,18 @@ export function eventSummary(
       ? `Следующий шаг по explain: ${w.next.actor ?? '—'} ${w.next.action}: ${w.next.message}`
       : '',
     '',
-    `H=${shellWord(input.harnessBin)}`,
+    '# CLI harness этой версии — функция оболочки (bash и zsh):',
+    `H() { ${input.harness.map(shellWord).join(' ')} "$@"; }`,
+    `Начните с \`H lead begin --state ${S}\`: без открытой сессии ваши run и input-resolve не попадут в журнал и не считаются решением.`,
     'Команды для этого события:',
     ...(commands[kind] ?? []).map((c) => '  ' + c),
-    `Правила: $H guide session (lead begin, журнал), $H guide recovery (остановки), $H guide run, $H guide release.`,
+    `Правила: H guide session (lead begin, журнал), H guide recovery (остановки), H guide run, H guide release.`,
     '',
-    'HARNESS_LEAD_DRIVE=1: ждёт драйвер. Разберите это событие; `harness run` запускайте в фоне в своей группе',
-    'процессов (`set -m; nohup … &` или setsid), затем закончите ход коротким итогом. Не вызывайте `harness wait`',
-    'в цикле — драйвер разбудит вас при следующем значимом событии. Если дальше нужно только решение владельца —',
-    '`harness lead end --waiting owner --reason "…"`: драйвер передаст его и не будет будить вас снова.',
+    'HARNESS_LEAD_DRIVE=1: ждёт драйвер. Разберите это событие; `harness run` запускайте только как',
+    '`H run --detach --log <журнал> …` (отдельный процесс, переживёт ваш ход), затем закончите ход коротким итогом.',
+    'Не вызывайте `harness wait` в цикле — драйвер разбудит вас при следующем значимом событии. Если дальше нужно',
+    'только решение владельца — `H lead end --state … --waiting owner --reason "…"`: драйвер передаст его и не будет',
+    'будить вас снова.',
   ]
     .filter((l, i, all) => l !== '' || all[i - 1] !== '')
     .join('\n');
@@ -463,11 +490,8 @@ function runAgent(
       settled = true;
       clearTimeout(timers.soft);
       options.signal?.removeEventListener('abort', kill);
-      // Группа снималась: SIGKILL остаткам группы, даже если лидер уже вышел.
-      if (timers.hard) {
-        clearTimeout(timers.hard);
-        signalGroup('SIGKILL');
-      }
+      // Группа снималась: остаткам группы — та же пауза до SIGKILL, даже если
+      // лидер уже вышел (таймер `hard` доработает сам).
       done({ ...r, ...(timedOut ? { timedOut } : {}), ms: Date.now() - started });
     };
     options.signal?.addEventListener('abort', kill, { once: true });
@@ -496,6 +520,12 @@ const sleep = (ms: number, signal?: AbortSignal) =>
     signal?.addEventListener('abort', stop, { once: true });
   });
 
+interface OwnerStep {
+  workId?: string;
+  action: string;
+  message: string;
+}
+
 /** Что ждёт в состоянии сейчас. */
 interface Pending {
   /** Первое, что ждёт ведущего (как ждущее у `wait` без курсора). */
@@ -505,7 +535,7 @@ interface Pending {
   /** Вопросы, на которые владелец ответил, а ответ не применён. */
   answered: InputRequest[];
   /** Шаги только человека у отдельных работ (бюджет, доступ к провайдеру). */
-  steps: { workId?: string; message: string }[];
+  steps: OwnerStep[];
   /** Пауза оператора — выход сразу. */
   pause?: string;
   /** Run не идёт, а готовые работы есть (`explain.queue`). */
@@ -534,7 +564,11 @@ async function scanPending(input: DriveInput, cursor: number): Promise<Pending> 
         const next = { actor: d.actor, action: d.action, message: d.message.slice(0, 500) };
         const step = ownerStep(next);
         if (step) {
-          steps.push({ ...(d.workId ? { workId: d.workId } : {}), message: step });
+          steps.push({
+            ...(d.workId ? { workId: d.workId } : {}),
+            action: d.action,
+            message: step,
+          });
           continue;
         }
         // Вопрос владельца без ответа — не дело ведущего; прочие остановки — его.
@@ -581,10 +615,57 @@ function requestOf(w: WaitData, stateDir: string): InputRequest | undefined {
   });
 }
 
+/** Есть ли после `seq` событие работы (ход run: выдача, отказ, приёмка…). */
+function workEventAfter(stateDir: string, seq: number): boolean {
+  const file = stateFile(stateDir);
+  if (!existsSync(file)) return false;
+  const store = new SqliteExecutionStore(file, 'harness-drive', { readOnly: true });
+  try {
+    for (let after = seq; ;) {
+      const batch = store.events(after, 500);
+      if (!batch.length) return false;
+      if (batch.some((e) => e.workId)) return true;
+      after = batch.at(-1)!.seq;
+    }
+  } finally {
+    store.close();
+  }
+}
+
+/** Ждать любого изменения хранилища или решений до `ms`; true — изменилось. */
+async function waitChange(
+  stateDir: string,
+  decisions: () => string,
+  ms: number,
+  pollMs: number,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  const file = stateFile(stateDir);
+  const started = Date.now();
+  const base = decisions();
+  let store: SqliteExecutionStore | undefined;
+  try {
+    if (existsSync(file))
+      store = new SqliteExecutionStore(file, 'harness-drive', { readOnly: true });
+    const seq = store?.lastEventSeq();
+    const mark = store?.changeMark();
+    while (Date.now() - started < ms && !signal?.aborted) {
+      await sleep(pollMs, signal);
+      if (!store && existsSync(file)) return true;
+      if (store && (store.lastEventSeq() !== seq || store.changeMark() !== mark)) return true;
+      if (decisions() !== base) return true;
+    }
+    return false;
+  } finally {
+    store?.close();
+  }
+}
+
 export async function driveLead(input: DriveInput): Promise<DriveData> {
   const maxSessions = input.maxSessions ?? 20;
   const idleLimit = input.idleSessions ?? 3;
   const graceMs = input.graceMs ?? 30_000;
+  const pollMs = input.pollMs ?? 1000;
   const log = input.onLog ?? (() => {});
   const sessions: DriveSession[] = [];
   const notices: DriveNotice[] = [];
@@ -597,6 +678,10 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
   /** Ведущий сказал «жду владельца» (`lead end --waiting owner`) после последнего решения. */
   let ownerWait: string | undefined;
   let waits = 0;
+  let restarts = 0;
+  /** Перезапуски подряд, после которых run не сдвинул ни одной работы. */
+  let idleRestarts = 0;
+  let restartSeq: number | undefined;
   let cursor: number | undefined;
   let idle = 0;
   let lastAgentEnd: number | undefined;
@@ -608,7 +693,10 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
     ? (mkdirSync(resolve(input.logDir), { recursive: true, mode: 0o700 }), resolve(input.logDir))
     : mkdtempSync(join(tmpdir(), 'harness-drive-'));
   const status = () => readState(input.stateDir, (view) => waitStatusLine(view)) ?? '';
-  const decisions = () => readState(input.stateDir, decisionsOf) ?? 'no-state';
+  /** Решения ведущего: журнал, графы, ревью — и файл политики. */
+  const decisions = () =>
+    (readState(input.stateDir, decisionsOf) ?? 'no-state') + '|' + fileDigest(input.policyPath);
+  const lastSeq = () => readState(input.stateDir, (_view, seq) => seq) ?? 0;
   const result = (outcome: DriveOutcome, message: string): DriveData => {
     log(`${outcome}: ${message}`);
     return {
@@ -617,6 +705,7 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
       sessions: sessions.slice(-200),
       notices: notices.slice(-50),
       waits,
+      restarts,
       cursor: cursor ?? 0,
       status: status().slice(0, 500),
       ...(last ? { last } : {}),
@@ -643,8 +732,9 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
       }
     return fresh;
   };
-  const noticeStep = (s: { workId?: string; message: string }) => {
-    const key = `${s.workId ?? ''}|${s.message}`;
+  const noticeStep = (s: OwnerStep) => {
+    // Один раз на работу и действие: текст explain меняется, шаг — тот же.
+    const key = `${s.workId ?? ''}|${s.action}`;
     if (steps.has(key)) return;
     steps.add(key);
     notice({ kind: 'owner-step', ...(s.workId ? { workId: s.workId } : {}), message: s.message });
@@ -666,17 +756,38 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
       `lead drive: не прочитан журнал событий ${stateFile(input.stateDir)}`,
     );
   };
-  /** Владельцу ли этот ответ: вопрос, на который политика не даёт отвечать ведущему. */
-  const ownerAnswer = (e: RunEvent) =>
-    e.type === 'input.answered' &&
-    e.payload.actor !== 'lead' &&
-    !!readState(input.stateDir, (view) => {
-      const r = view
-        .locals('input-requests')
-        .map((x) => x.value)
-        .find((x) => x.id === e.payload.requestId);
-      return !!r && ownerOnly(r, input.policy);
-    });
+  /** Ответ человека (оператор, хост) на вопрос — ведущему применить его. */
+  const humanAnswer = (e: RunEvent) => e.type === 'input.answered' && e.payload.actor !== 'lead';
+  /**
+   * Вопрос события на момент запуска: по его requestId, иначе по работе.
+   * `skip` — вопрос закрыт, на него ответил ведущий, или вопрос владельца
+   * уже передан; иначе — вид сессии.
+   */
+  const resolveQuestion = (
+    w: WaitData,
+  ): { skip: true } | { skip: false; request: InputRequest; mode: QuestionMode } => {
+    const request = requestOf(w, input.stateDir);
+    if (!request || (request.lifecycle !== 'pending' && request.lifecycle !== 'answered')) {
+      log(`вопрос ${request?.id ?? '?'} уже закрыт — ведущего не будим`);
+      return { skip: true };
+    }
+    if (request.lifecycle === 'answered') {
+      if (request.answers.at(-1)?.actor.kind === 'lead') return { skip: true };
+      notice({
+        kind: 'owner-answered',
+        requestId: request.id,
+        workId: request.workId,
+        message: `ответ на ${request.id} (работа ${request.workId}) записан: будим ведущего применить его`,
+      });
+      return { skip: false, request, mode: 'answered' };
+    }
+    if (ownerOnly(request, input.policy)) {
+      // Новый вопрос владельца будит ведущего один раз — передать его.
+      if (!noticeOwner([request]) && !relay.some((r) => r.id === request.id)) return { skip: true };
+      return { skip: false, request, mode: 'owner' };
+    }
+    return { skip: false, request, mode: 'lead' };
+  };
   try {
     for (;;) {
       if (input.signal?.aborted) return result('aborted', 'драйвер остановлен сигналом');
@@ -722,11 +833,11 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
           baseDir: input.baseDir,
           after: cursor,
           timeoutMs: input.waitTimeoutMs ?? 60 * 60_000,
-          ...(input.pollMs !== undefined ? { pollMs: input.pollMs } : {}),
+          pollMs,
           ...(input.signal ? { signal: input.signal } : {}),
           ...(input.onTick ? { onTick: input.onTick } : {}),
-          // Ответ владельца — значимое событие для ведущего.
-          wakeOn: ownerAnswer,
+          // Ответ человека на вопрос — значимое событие для ведущего.
+          wakeOn: humanAnswer,
         });
         cursor = w.cursor;
         level = !w.event;
@@ -739,45 +850,12 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
       // Шаг только человека у этой работы: уведомление, ждём дальше.
       const step = ownerStep(w.next);
       if (step && w.kind !== 'stopped') {
-        noticeStep({ ...(w.workId ? { workId: w.workId } : {}), message: step });
+        noticeStep({
+          ...(w.workId ? { workId: w.workId } : {}),
+          action: w.next!.action,
+          message: step,
+        });
         continue;
-      }
-      // Событие на момент запуска: вопрос — по его requestId, остановка работы — по explain.
-      let request: InputRequest | undefined;
-      let mode: QuestionMode | undefined;
-      if (w.kind === 'question') {
-        request = requestOf(w, input.stateDir);
-        if (!request || (request.lifecycle !== 'pending' && request.lifecycle !== 'answered')) {
-          log(`вопрос ${request?.id ?? '?'} уже закрыт — ведущего не будим`);
-          continue;
-        }
-        if (request.lifecycle === 'answered') {
-          if (request.answers.at(-1)?.actor.kind === 'lead') continue;
-          mode = 'answered';
-          notice({
-            kind: 'owner-answered',
-            requestId: request.id,
-            workId: request.workId,
-            message: `владелец ответил на ${request.id} (работа ${request.workId}): будим ведущего применить ответ`,
-          });
-        } else if (ownerOnly(request, input.policy)) {
-          // Новый вопрос владельца будит ведущего один раз — передать его.
-          if (!noticeOwner([request]) && !relay.some((r) => r.id === request!.id)) continue;
-          mode = 'owner';
-        } else mode = 'lead';
-      } else if ((w.kind === 'failed' || w.kind === 'held') && w.workId && w.event) {
-        const fresh = await diagnoseState({
-          stateDir: input.stateDir,
-          policy: input.policy,
-          baseDir: input.baseDir,
-          workId: w.workId,
-        }).catch(() => undefined);
-        const d = fresh?.diagnoses.find((x) => x.workId === w.workId);
-        const now = d ? readState(input.stateDir, (view) => pendingKind(d, view)) : undefined;
-        if (!now) {
-          log(`${w.kind} ${w.workId}: остановка уже снята — ведущего не будим`);
-          continue;
-        }
       }
       // Только что закончившаяся сессия могла запустить run в фоне: метка
       // запуска появится не сразу — `stopped` перепроверяется после паузы.
@@ -798,8 +876,38 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
         pending.steps.forEach(noticeStep);
         if (pending.pause) return ownerExit(pending.pause);
         const waitingOwner = pending.owner.length || pending.steps.length || ownerWait;
+        const forLead = !!pending.lead || relay.length > 0 || pending.answered.length > 0;
+        if (pending.runnable && !forLead) {
+          // Готовые работы, а ведущему делать нечего: тот же run — без модели.
+          if (restartSeq !== undefined)
+            idleRestarts = workEventAfter(input.stateDir, restartSeq) ? 0 : idleRestarts + 1;
+          const run = lastDetachedRun(input.stateDir);
+          if (run && idleRestarts < 3) {
+            try {
+              const again = detachRun({
+                stateDir: input.stateDir,
+                args: run.args,
+                log: run.log,
+                cwd: run.cwd,
+                invocation: run.invocation,
+              });
+              restarts++;
+              restartSeq = lastSeq();
+              lastAgentEnd = Date.now();
+              log(`run перезапущен драйвером: pid ${again.pid}, журнал ${again.log}`);
+              continue;
+            } catch (error) {
+              log(`run не перезапущен: ${(error as Error).message} — будим ведущего`);
+            }
+          } else
+            log(
+              run
+                ? 'три перезапуска run подряд без хода работ — будим ведущего'
+                : 'нет записи run --detach — будим ведущего запустить run',
+            );
+        }
         if (pending.lead && !pending.runnable) w = { ...pending.lead, cursor: w.cursor };
-        else if (!pending.runnable && relay.length) {
+        else if (!pending.runnable && relay.length)
           w = {
             kind: 'question',
             workId: relay[0]!.workId,
@@ -807,19 +915,15 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
             cursor: w.cursor,
             waitedMs: 0,
           };
-          request = relay[0];
-          mode = 'owner';
-        } else if (!pending.runnable && pending.answered.length) {
-          request = pending.answered[0]!;
+        else if (!pending.runnable && pending.answered.length)
           w = {
             kind: 'question',
-            workId: request.workId,
+            workId: pending.answered[0]!.workId,
             status: w.status,
             cursor: w.cursor,
             waitedMs: 0,
           };
-          mode = 'answered';
-        } else if (!pending.runnable && waitingOwner)
+        else if (!pending.runnable && waitingOwner)
           return ownerExit(
             [
               'run не идёт, а дальше всё ждёт владельца',
@@ -831,6 +935,28 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
               .join('; '),
           );
       }
+      // Событие на момент запуска: вопрос — по его requestId (тот же разбор и
+      // для вопроса, выведенного из остановки), остановка работы — по explain.
+      let request: InputRequest | undefined;
+      let mode: QuestionMode | undefined;
+      if (w.kind === 'question') {
+        const q = resolveQuestion(w);
+        if (q.skip) continue;
+        ({ request, mode } = q);
+      } else if ((w.kind === 'failed' || w.kind === 'held') && w.workId && w.event) {
+        const fresh = await diagnoseState({
+          stateDir: input.stateDir,
+          policy: input.policy,
+          baseDir: input.baseDir,
+          workId: w.workId,
+        }).catch(() => undefined);
+        const d = fresh?.diagnoses.find((x) => x.workId === w.workId);
+        const now = d ? readState(input.stateDir, (view) => pendingKind(d, view)) : undefined;
+        if (!now) {
+          log(`${w.kind} ${w.workId}: остановка уже снята — ведущего не будим`);
+          continue;
+        }
+      }
       last = {
         kind: w.kind,
         ...(w.workId ? { workId: w.workId } : {}),
@@ -838,14 +964,30 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
       };
       const sessionKind: DriveSession['kind'] = mode === 'owner' ? 'owner-question' : w.kind;
       // Состояние без нового события не будит ведущего второй раз подряд без
-      // его решения (прошлая сессия кончилась штатно): ждать нечего.
+      // его решения и без новых событий: сначала ждём любого изменения
+      // (фоновый review-release, правка политики), затем — выход.
       const before = decisions();
-      const key = [sessionKind, w.workId ?? '', level ? 'level' : w.event?.seq, before].join('|');
+      const key = [
+        sessionKind,
+        w.workId ?? '',
+        level ? 'level' : w.event?.seq,
+        before,
+        lastSeq(),
+      ].join('|');
       if (level && previous && previous.key === key && !previous.failed) {
+        const repeatWaitMs = input.repeatWaitMs ?? 10 * 60_000;
+        log(
+          `ведущий уже получал это состояние (${sessionKind}) без решения — жду изменений до ${Math.round(repeatWaitMs / 1000)} с`,
+        );
+        if (await waitChange(input.stateDir, decisions, repeatWaitMs, pollMs, input.signal)) {
+          previous = undefined;
+          continue;
+        }
+        if (input.signal?.aborted) return result('aborted', 'драйвер остановлен сигналом');
         if (ownerWait) return ownerExit(ownerWait);
         return result(
           'no-progress',
-          `ведущий уже получал это состояние (${sessionKind}${w.workId ? ` ${w.workId}` : ''}) и не принял решения; ` +
+          `ведущий уже получал это состояние (${sessionKind}${w.workId ? ` ${w.workId}` : ''}), не принял решения, и за ${Math.round(repeatWaitMs / 1000)} с ничего не изменилось; ` +
             `повтор сессии не поможет. ${logHint(input.logDir, sessions.length)}`,
         );
       }
@@ -878,7 +1020,7 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
           .replaceAll('{prompt-file}', promptFile),
       );
       log(`сессия ${session}: ${sessionKind}${w.workId ? ` ${w.workId}` : ''}, курсор ${w.cursor}`);
-      const waitingBefore = readState(input.stateDir, waitingOwnerOf)?.count ?? 0;
+      const waitingBefore = readState(input.stateDir, waitingOwnerOf)?.at;
       ownerWait = undefined;
       const sessionTimeoutMs = input.sessionTimeoutMs ?? 60 * 60_000;
       const run = await runAgent(argv, prompt, {
@@ -901,15 +1043,18 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
         killGraceMs: input.killGraceMs ?? 10_000,
       });
       lastAgentEnd = Date.now();
+      // Новая сессия — новый счёт перезапусков run без хода.
+      idleRestarts = 0;
+      restartSeq = undefined;
       const waiting = readState(input.stateDir, waitingOwnerOf);
-      if (waiting && waiting.count > waitingBefore) {
+      if (waiting?.at && waiting.at !== waitingBefore) {
         ownerWait = waiting.plain ?? 'ведущий ждёт решения владельца';
         notice({ kind: 'owner-waiting', message: ownerWait });
       }
       const decided = decisions() !== before;
       const progressed = decided || ownerWait !== undefined;
       const failed = run.exitCode !== 0 || !!run.timedOut || !!run.error;
-      // Ключ — с решениями на момент пробуждения: решение за сессию его меняет.
+      // Ключ — на момент пробуждения: решение или событие за сессию его меняют.
       previous = { key, failed };
       sessions.push({
         session,
@@ -934,8 +1079,10 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
           'agent-error',
           `команда ведущего не запустилась: ${run.error} (${input.agent[0]})`,
         );
-      // Снятая по сроку сессия — неудачная, даже если что-то успела записать.
-      idle = progressed && !run.timedOut ? 0 : idle + 1;
+      // Передача вопроса владельцу — не простой (вопросов может быть много);
+      // снятая по сроку сессия — неудачная, даже если что-то успела записать.
+      if (sessionKind !== 'owner-question' || run.timedOut)
+        idle = progressed && !run.timedOut ? 0 : idle + 1;
       if (idle >= idleLimit)
         return result(
           'no-progress',

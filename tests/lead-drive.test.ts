@@ -16,6 +16,8 @@ import { fileURLToPath } from 'node:url';
 import { digestOf, type InputOutcome } from '../src/contracts/index.ts';
 import type { Engine } from '../src/engine/engine.ts';
 import { DRIVE_EXIT_CODES, driveLead, parseAgentTemplate } from '../src/control/drive.ts';
+import { harnessInvocation } from '../src/control/detach.ts';
+import { accessSync, chmodSync } from 'node:fs';
 import { leadDriveDataSchema } from '../src/contracts/cli.ts';
 import { engineOf, graphOf, policyOf, ready, sha } from './engine-fixture.ts';
 import { example } from './fixtures.ts';
@@ -105,10 +107,11 @@ function driveOf(
       ...(options.extraArgs ?? []),
     ],
     goals: GOALS,
-    harnessBin: '/opt/harness/bin/harness',
+    harness: ['/opt/harness/bin/harness'],
     pollMs: 50,
     graceMs: 0,
     waitTimeoutMs: 300,
+    repeatWaitMs: 300,
     ...extra,
   });
   return { dir, promise };
@@ -152,10 +155,11 @@ function driveLeadOf(
       mode,
     ],
     goals: GOALS,
-    harnessBin: '/opt/harness/bin/harness',
+    harness: ['/opt/harness/bin/harness'],
     pollMs: 50,
     graceMs: 0,
     waitTimeoutMs: 300,
+    repeatWaitMs: 300,
     ...extra,
   });
   return { dir, promise };
@@ -211,9 +215,10 @@ test('lead drive: отказ, который ждёт ведущего, — но
   assert.ok(rec.stdin.startsWith(GOALS), 'сначала цели оператора');
   assert.match(rec.stdin, /Событие: failed/);
   assert.ok(rec.stdin.includes(a.workId));
-  assert.ok(rec.stdin.includes('H=/opt/harness/bin/harness'));
-  assert.ok(rec.stdin.includes(`$H retry --state`), 'команды этого события');
-  assert.ok(rec.stdin.includes('$H guide recovery'));
+  assert.ok(rec.stdin.includes('H() { /opt/harness/bin/harness "$@"; }'));
+  assert.match(rec.stdin, /Начните с `H lead begin --state/);
+  assert.ok(rec.stdin.includes(`H retry --state`), 'команды этого события');
+  assert.ok(rec.stdin.includes('H guide recovery'));
   assert.match(rec.stdin, /HARNESS_LEAD_DRIVE=1: ждёт драйвер/);
   assert.ok(!/session-|history/i.test(rec.stdin), 'без истории прошлых сессий');
   assert.equal(rec.env.HARNESS_LEAD_DRIVE, '1');
@@ -245,7 +250,7 @@ test('lead drive: очередь без harness run будит ведущего;
   const rec = await sessionRecord(dir, 2);
   assert.equal(rec.argv.at(-1), `s2:c${data.sessions[1]!.cursor}`);
   assert.match(rec.stdin, /`harness run` не идёт/);
-  assert.match(rec.stdin, /set -m; nohup \$H run --graph/);
+  assert.match(rec.stdin, /H run --detach --log <журнал run> --graph/);
   assert.deepEqual(sessionFiles(dir).length, 3);
   env.store.close();
 });
@@ -391,7 +396,7 @@ test('lead drive: вопрос, на который ведущему отвеч�
   const woke = await second.promise;
   assert.equal(woke.sessions[0]?.kind, 'question');
   assert.deepEqual(woke.notices, []);
-  assert.match((await sessionRecord(second.dir, 1)).stdin, /\$H input-show/);
+  assert.match((await sessionRecord(second.dir, 1)).stdin, /H input-show/);
   lead.store.close();
 });
 
@@ -424,8 +429,8 @@ test('lead drive: весь код принят — сессия ведущего
   accept(env.engine, a.id, a.token);
   const rec = await sessionRecord(dir, 1);
   assert.equal(rec.env.HARNESS_LEAD_DRIVE_EVENT, 'release-ready');
-  assert.match(rec.stdin, /\$H review-release/);
-  assert.match(rec.stdin, /\$H release done/);
+  assert.match(rec.stdin, /H review-release/);
+  assert.match(rec.stdin, /H release done/);
   // «Ведущий» закончил выпуск, пока сессия идёт.
   env.engine.recordLead((log, now) => ({
     log: {
@@ -472,7 +477,7 @@ test('lead drive: предел --max-sessions — выход max-sessions (22); 
     baseDir: env.dir,
     agent: [join(env.dir, 'нет-такой-команды')],
     goals: GOALS,
-    harnessBin: 'harness',
+    harness: ['harness'],
     pollMs: 50,
     graceMs: 0,
     waitTimeoutMs: 300,
@@ -702,4 +707,238 @@ test('ревью LOW: пауза перепроверки stopped после с�
   const [one, two] = [await sessionRecord(dir, 1), await sessionRecord(dir, 2)];
   assert.ok(two.t - one.t >= 500, `${two.t - one.t} мс`);
   env.store.close();
+});
+
+const FAKE_RUN = fileURLToPath(new URL('./fixtures/lead-drive/fake-run.mjs', import.meta.url));
+const decide = (env: Env, action = 'lead.retry') =>
+  env.engine.recordLead((log, now) => ({
+    log: {
+      ...log,
+      entries: [
+        ...log.entries,
+        { at: new Date(now).toISOString(), kind: 'command', action, plain: 'решение ведущего' },
+      ],
+    },
+    result: undefined,
+  }));
+
+test('ревью 2 M1: вопросы владельца один за другим — сессии owner-question не считаются простоем', async () => {
+  const env = engineOf(ownerPolicy());
+  ready(env.engine, graphOf({ a: [], b: [], c: [], d: [] }));
+  const a = env.engine.claim('c1')!;
+  const b = env.engine.claim('c1')!;
+  const abort = new AbortController();
+  const { dir, promise } = driveOf(env, {}, { signal: abort.signal, idleSessions: 2 });
+  const ask = async (x: { id: string; token: string }, n: number) => {
+    env.engine.fail(x.id, x.token, 'вопрос', { kind: 'needs-input', input: questionOutcome() });
+    await sessionRecord(dir, n);
+  };
+  await new Promise((r) => setTimeout(r, 300));
+  await ask(a, 1);
+  const c = env.engine.claim('c1')!;
+  await ask(b, 2);
+  const d = env.engine.claim('c1')!;
+  assert.ok(d);
+  await ask(c, 3);
+  await new Promise((r) => setTimeout(r, 400));
+  abort.abort();
+  const data = await promise;
+  assert.equal(data.outcome, 'aborted', 'не no-progress после трёх вопросов при --idle-sessions 2');
+  assert.deepEqual(
+    data.sessions.map((s) => s.kind),
+    ['owner-question', 'owner-question', 'owner-question'],
+  );
+  env.store.close();
+});
+
+test('ревью 2 M2: вопрос, выведенный из остановки (ответ записан, не применён), — сессия «примените ответ» (input-resolve)', async () => {
+  const env = engineOf(ownerPolicy());
+  ready(env.engine, graphOf({ a: [] }));
+  const a = env.engine.claim('c1')!;
+  env.engine.fail(a.id, a.token, 'вопрос', { kind: 'needs-input', input: questionOutcome() });
+  const request = env.engine.read((v) => v.locals('input-requests'))[0]!.value;
+  const { dir, promise } = driveOf(env, { mode: 'wait-go' });
+  await sessionRecord(dir, 1); // owner-question
+  env.engine.answerInput(
+    request.id,
+    { text: 'Hello', optionId: 'hello', actor: { kind: 'operator' } },
+    request.version,
+  );
+  go(dir, 1);
+  const answered = await sessionRecord(dir, 2); // событие ответа
+  assert.match(answered.stdin, /input-resolve/);
+  go(dir, 2);
+  // Ведущий не применил ответ: очередь стоит — вопрос выведен из остановки.
+  const fromStop = await sessionRecord(dir, 3);
+  go(dir, 3);
+  assert.equal(fromStop.env.HARNESS_LEAD_DRIVE_EVENT, 'question');
+  assert.ok(
+    fromStop.stdin.includes(`H input-resolve --state`) && fromStop.stdin.includes(request.id),
+  );
+  assert.doesNotMatch(fromStop.stdin, /--actor lead/);
+  const data = await promise;
+  assert.equal(data.outcome, 'no-progress');
+  env.store.close();
+});
+
+test('ревью 2 M3: то же состояние без решения — драйвер ждёт изменений: фоновое решение ведущего будит его снова, а не 21', async () => {
+  const env = engineOf();
+  ready(env.engine, graphOf({ a: [] }));
+  const a = env.engine.claim('c1')!;
+  accept(env.engine, a.id, a.token);
+  const { dir, promise } = driveOf(env, {}, { repeatWaitMs: 5000, idleSessions: 5 });
+  await sessionRecord(dir, 1); // release-ready
+  // Фоновый review-release ведущего закончился позже его хода.
+  await new Promise((r) => setTimeout(r, 500));
+  decide(env, 'lead.review-accept');
+  const second = await sessionRecord(dir, 2);
+  assert.equal(second.env.HARNESS_LEAD_DRIVE_EVENT, 'release-ready');
+  const data = await promise;
+  assert.equal(data.sessions.length, 2);
+  assert.equal(data.outcome, 'no-progress');
+  env.store.close();
+});
+
+test('ревью 2 M3: правка только файла политики — решение ведущего (прогресс)', async () => {
+  const env = engineOf();
+  ready(env.engine, graphOf({ a: [] }));
+  const policyPath = join(env.dir, 'policy.json');
+  writeFileSync(policyPath, JSON.stringify(env.engine.policy));
+  const { dir, promise } = driveOf(env, { mode: 'wait-go' }, { policyPath, maxSessions: 1 });
+  await sessionRecord(dir, 1);
+  writeFileSync(policyPath, JSON.stringify({ ...env.engine.policy, maxAttempts: 2 }));
+  go(dir, 1);
+  const data = await promise;
+  assert.equal(data.sessions[0]!.progressed, true);
+  assert.equal(data.outcome, 'max-sessions', 'правка политики — повод для новой сессии');
+  env.store.close();
+});
+
+test('ревью 2 LOW: ответ оператора на вопрос, на который мог ответить ведущий, — сессия «примените ответ»', async () => {
+  const env = engineOf(
+    policyOf(
+      (p: Record<string, unknown>) =>
+        (p.inputPolicy = { threshold: 7, leadAnswers: { maxSeverity: 10 } }),
+    ),
+  );
+  ready(env.engine, graphOf({ a: [], b: [] }));
+  const x = env.engine.claim('c1')!;
+  env.engine.claim('c1');
+  env.engine.fail(x.id, x.token, 'вопрос', { kind: 'needs-input', input: questionOutcome() });
+  const request = env.engine.read((v) => v.locals('input-requests'))[0]!.value;
+  const abort = new AbortController();
+  const { dir, promise } = driveOf(env, { mode: 'wait-go' }, { signal: abort.signal });
+  await sessionRecord(dir, 1);
+  env.engine.answerInput(
+    request.id,
+    { text: 'Hello', optionId: 'hello', actor: { kind: 'operator' } },
+    request.version,
+  );
+  go(dir, 1);
+  const second = await sessionRecord(dir, 2);
+  assert.match(second.stdin, /input-resolve/);
+  go(dir, 2);
+  abort.abort();
+  await promise;
+  env.store.close();
+});
+
+test('ревью 2 H1: готовые работы и ведущему нечего делать — драйвер сам перезапускает run --detach; три перезапуска без хода — будит ведущего', async () => {
+  const env = engineOf();
+  ready(env.engine, graphOf({ a: [] }));
+  const runs = mkdtempSync(join(tmpdir(), 'harness-drive-runs-'));
+  writeFileSync(
+    join(env.dir, 'run-detach.json'),
+    JSON.stringify({
+      invocation: [process.execPath, FAKE_RUN, runs],
+      args: ['--state', env.dir, '--policy', 'p.json'],
+      cwd: runs,
+      log: join(runs, 'run.log'),
+      pid: 1,
+      at: new Date().toISOString(),
+    }),
+  );
+  const { promise } = driveOf(env, {}, { idleSessions: 1, graceMs: 200 });
+  const data = await promise;
+  assert.equal(data.restarts, 3);
+  assert.equal(data.sessions.length, 1);
+  assert.equal(data.sessions[0]!.kind, 'stopped');
+  const until = Date.now() + 3000;
+  while (Date.now() < until) {
+    if (
+      existsSync(join(runs, 'runs.txt')) &&
+      readFileSync(join(runs, 'runs.txt'), 'utf8').split('\n').filter(Boolean).length === 3
+    )
+      break;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  assert.deepEqual(
+    readFileSync(join(runs, 'runs.txt'), 'utf8').split('\n').filter(Boolean),
+    Array(3).fill(`run --state ${env.dir} --policy p.json`),
+  );
+  leadDriveDataSchema.parse(data);
+  env.store.close();
+});
+
+test('ревью 2 M4: вызов harness — HARNESS_BIN, исполняемый файл, иначе node с execArgv', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'harness-inv-'));
+  const plain = join(dir, 'cli.js');
+  writeFileSync(plain, '');
+  assert.deepEqual(harnessInvocation({ env: { HARNESS_BIN: '/x/harness' } }), ['/x/harness']);
+  assert.deepEqual(
+    harnessInvocation({ env: {}, script: plain, execPath: '/n/node', execArgv: [] }),
+    ['/n/node', plain],
+  );
+  chmodSync(plain, 0o755);
+  accessSync(plain);
+  assert.deepEqual(
+    harnessInvocation({ env: {}, script: plain, execPath: '/n/node', execArgv: [] }),
+    [plain],
+  );
+  assert.deepEqual(
+    harnessInvocation({
+      env: {},
+      script: plain,
+      execPath: '/n/node',
+      execArgv: ['--import', 'tsx'],
+    }),
+    ['/n/node', '--import', 'tsx', plain],
+  );
+});
+
+test('ревью 2 H1: `H run --detach --log …` из bash и zsh запускает run отдельным процессом', async () => {
+  const q = (w: string) => `'${w.replace(/'/g, `'\\''`)}'`;
+  const fn = `H() { ${[process.execPath, '--import', import.meta.resolve('tsx'), cli].map(q).join(' ')} "$@"; }`;
+  const policy = join(mkdtempSync(join(tmpdir(), 'harness-detach-p-')), 'policy.json');
+  writeFileSync(policy, JSON.stringify(example('policy')));
+  for (const shell of ['bash', 'zsh']) {
+    const which = spawnSync('/bin/sh', ['-c', `command -v ${shell}`], { encoding: 'utf8' });
+    if (which.status !== 0) continue;
+    const root = mkdtempSync(join(tmpdir(), `harness-detach-${shell}-`));
+    const state = join(root, 'state');
+    const log = join(root, 'run.log');
+    const r = spawnSync(
+      shell,
+      ['-c', `${fn}; H run --detach --log ${q(log)} --state ${q(state)} --policy ${q(policy)}`],
+      { encoding: 'utf8', timeout: 60_000 },
+    );
+    assert.equal(r.status, 0, `${shell}: ${r.stderr}`);
+    const envelope = JSON.parse(r.stdout) as {
+      command: string;
+      data: { pid: number; log: string };
+    };
+    assert.equal(envelope.command, 'run-detach');
+    assert.equal(envelope.data.log, log);
+    const until = Date.now() + 30_000;
+    while (
+      (!existsSync(log) || !readFileSync(log, 'utf8').includes('"command":"run"')) &&
+      Date.now() < until
+    )
+      await new Promise((res) => setTimeout(res, 100));
+    assert.ok(
+      readFileSync(log, 'utf8').includes('"command":"run"'),
+      `${shell}: run написал в журнал`,
+    );
+    assert.ok(existsSync(join(state, 'run-detach.json')));
+  }
 });

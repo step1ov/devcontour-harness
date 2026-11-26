@@ -9,6 +9,13 @@ $H run --graph .harness/work/<graph-id>.json --policy .harness/policy.json \
 
 The state directory lives outside the repository; `run` creates it.
 
+To keep `run` going after your shell command returns, start it detached:
+`$H run --detach --log <file> --graph … --policy … --state … --author …`.
+It starts `run` as its own process (own process group and session, stdin
+closed, stdout and stderr appended to `<file>`, mode 0600), prints the pid
+and returns at once, in bash and zsh alike — no `&`, `nohup`, `set -m` or
+`setsid` needed. It records the start in `<state>/run-detach.json`.
+
 **Waiting for progress.** While `run` works (in the background or in another
 process), do not loop `status`. Block on the next event that matters instead:
 
@@ -51,12 +58,17 @@ reset, diagnose, input answers, input-resolve/carry, review-accept,
 reapprove, run start), new graphs, review rounds (`review-release`) and
 `release done`; `lead begin` and notes do not. A stopped queue or a ready
 release you leave without a decision does not wake you again: the driver
-stops. Start `harness run` in the background in its own process group so it
-outlives your turn and is not stopped with your session: `set -m; nohup $H
-run … > <log> 2>&1 &` (or `setsid` on Linux). Then end your turn with a
+stops after waiting a while for any change (a `review-release` you started
+in the background, a policy fix). Begin every session with `$H lead begin`:
+without an open session your `run` and `input-resolve` are not written to
+your log and do not count as a decision. Start `harness run` only detached
+(`$H run --detach --log <file> …`, above) so it outlives your turn and is
+not stopped with your session. Then end your turn with a
 short summary. Do not call `$H wait` and do not loop: the driver wakes you
-on the next failure, hold, question for you, owner's answer, ready release
-or stopped queue; accepted works, failures harness retries by itself and
+on the next failure, hold, question for you, a human's answer, ready
+release or stopped queue (when works are ready and nothing is yours, it
+restarts the last `run --detach` itself, without a session; after three
+restarts in a row that move no work it wakes you); accepted works, failures harness retries by itself and
 events already resolved do not wake you. A new executor question you may
 not answer wakes you once (`HARNESS_LEAD_DRIVE_EVENT=owner-question`): do
 not answer it yourself — pass it to the owner's channel (a Relay open
@@ -72,7 +84,7 @@ the driver tells the owner and keeps waiting instead of waking you.
 $H lead drive --state <manifest.paths.state> --policy .harness/policy.json \
   --agent 'codex exec --dangerously-bypass-approvals-and-sandbox --json -C /path/to/repo -' \
   --prompt-file goals.md --log transcripts/drive [--max-sessions 20] [--idle-sessions 3] \
-  [--timeout 60m] [--session-timeout 60m]
+  [--timeout 60m] [--session-timeout 60m] [--repeat-wait 10m]
 ```
 
 `--agent` is the host's lead command as one string, run without a shell
@@ -87,7 +99,10 @@ and stderr go straight to `--log` files (`session-N.prompt.md`, `.out`,
 `.err`, mode 0600) or to /dev/null without `--log` — never to the driver's
 JSON. A session longer than `--session-timeout` is stopped with its whole
 process group (SIGTERM, then SIGKILL after 10 s) and counts as a failed
-session. Owner notices (stderr and `data.notices`): a question the lead may
+session. Unchanged state the lead already got without a decision is waited
+on for `--repeat-wait` (default 10m) before stopping. The driver restarts
+the last `run --detach` itself when works are ready and nothing is for the
+lead (`data.restarts`). Owner notices (stderr and `data.notices`): a question the lead may
 not answer (plus one `owner-question` session to pass it on), a step only a
 human takes for one work (budget, provider access) and the lead's
 `lead end --waiting owner`; the driver keeps waiting while other work can go
@@ -98,8 +113,10 @@ waits, the driver renews an open lead session, as `wait` does. Exit codes
 recorded, all code accepted), 20 owner (no run going, nothing ready, and
 everything left waits for the owner — or an operator pause, at once: decide
 it, then start the driver again), 21 no-progress (`--idle-sessions`
-sessions in a row without a lead decision or over the time limit, or the
-same stop again without a decision: check the agent command and its logs),
+sessions in a row without a lead decision or over the time limit — passing
+an owner question on does not count — or the same stop again without a
+decision and no change within `--repeat-wait`: check the agent command and
+its logs),
 22 max-sessions, 23 agent-error (the command did not start), 16 aborted
 (signal). Progress lines go to stderr.
 

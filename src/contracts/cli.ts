@@ -1926,9 +1926,33 @@ export const cliCommands = {
     ],
     refusals: ['NOT_FOUND'],
   },
+  'run-detach': {
+    description:
+      'harness run отдельным процессом (alpha.72): `harness run --detach --log <файл> …` с теми же параметрами, что run; процесс в своей группе и сессии, stdin закрыт, stdout и stderr — в файл журнала; команда сразу возвращает pid. Работает из любой оболочки (bash, zsh) без set -m, setsid и nohup. Запись запуска — <state>/run-detach.json: по ней harness lead drive перезапускает тот же run сам. Синоним: harness run --detach',
+    writes: true,
+    idempotency:
+      'Каждый вызов запускает новый процесс run; два run одного каталога состояния разводит controller (второй — CONTROLLER_BUSY в своём журнале)',
+    args: [
+      state,
+      policy,
+      {
+        name: '--log',
+        value: 'path',
+        required: true,
+        description: 'Файл журнала run (stdout и stderr, дописывается, права 0600)',
+      },
+      {
+        name: '--graph',
+        value: 'path',
+        required: false,
+        description: 'Как у run; прочие параметры run передаются ему как есть',
+      },
+    ],
+    refusals: ['INVALID_INPUT'],
+  },
   'lead-drive': {
     description:
-      'Ждать за ведущего без модели (alpha.72): то же ожидание и курсор, что harness wait; команду ведущего хоста (--agent) запускает только на значимом событии — отказ или удержание, которые harness сам не чинит, вопрос, на который может ответить ведущий, новый вопрос владельца (один раз: передать владельцу, не отвечая), ответ владельца, готовый выпуск, очередь без harness run (или ещё без каталога состояния); событие, устаревшее к запуску, ведущего не будит. Каждая сессия новая: цели оператора (--prompt-file) и короткая сводка события с командами на stdin, окружение HARNESS_LEAD_DRIVE=1, HARNESS_LEAD_DRIVE_CURSOR, HARNESS_LEAD_DRIVE_SESSION, HARNESS_LEAD_DRIVE_EVENT; своя группа процессов, stdout и stderr — в файлы --log (или /dev/null). Принятие работы, таймаут ожидания и отказ, который harness повторит сам, ведущего не будят. Прогресс — только решения ведущего (команды его журнала, итог выпуска, графы, раунды ревью), не lead begin и заметки; состояние без нового события второй раз подряд без решения ведущего не будит. Синоним: harness lead drive',
+      'Ждать за ведущего без модели (alpha.72): то же ожидание и курсор, что harness wait; команду ведущего хоста (--agent) запускает только на значимом событии — отказ или удержание, которые harness сам не чинит, вопрос, на который может ответить ведущий, новый вопрос владельца (один раз: передать владельцу, не отвечая), ответ владельца, готовый выпуск, очередь без harness run (или ещё без каталога состояния); событие, устаревшее к запуску, ведущего не будит. Каждая сессия новая: цели оператора (--prompt-file) и короткая сводка события с командами на stdin, окружение HARNESS_LEAD_DRIVE=1, HARNESS_LEAD_DRIVE_CURSOR, HARNESS_LEAD_DRIVE_SESSION, HARNESS_LEAD_DRIVE_EVENT; своя группа процессов, stdout и stderr — в файлы --log (или /dev/null). Принятие работы, таймаут ожидания и отказ, который harness повторит сам, ведущего не будят. Прогресс — только решения ведущего (команды его журнала, итог выпуска, графы, раунды ревью), не lead begin и заметки; состояние без нового события второй раз подряд без решения ведущего не будит (сначала ждёт изменений --repeat-wait). Готовые работы, а ведущему делать нечего, — перезапускает последний harness run --detach сам, без сессии (после трёх перезапусков подряд без хода работ будит ведущего). Синоним: harness lead drive',
     writes: false,
     idempotency:
       'Сам драйвер состояние только читает; пока ждёт, продлевает активную сессию ведущего (как harness wait), если она открыта; пишут запущенные им сессии ведущего. Коды выхода — исходы, не ошибки (`ok: true`, решает `outcome`): 0 release-done (release done записан, весь код принят), 20 owner (run не идёт, готовых работ нет, а остальное ждёт владельца: вопрос, на который ведущему отвечать нельзя, шаг только человека — бюджет, доступ к провайдеру — или lead end --waiting owner; пауза оператора — сразу; пока другое идёт, это только уведомления в stderr и notices), 21 no-progress (--idle-sessions сессий подряд без решений ведущего или сверх --session-timeout, либо то же состояние снова без его решения), 22 max-sessions, 23 agent-error (команда не запустилась), 16 aborted (сигнал)',
@@ -1977,6 +2001,13 @@ export const cliCommands = {
         required: false,
         description:
           'Предел одной сессии ведущего (по умолчанию 60m): дольше — SIGTERM, через 10 с SIGKILL; такая сессия считается неудачной (--idle-sessions)',
+      },
+      {
+        name: '--repeat-wait',
+        value: 'duration',
+        required: false,
+        description:
+          'То же состояние снова без решения ведущего: сколько ждать любого изменения (событие, запись, правка политики) до выхода no-progress; по умолчанию 10m',
       },
       {
         name: '--log',
@@ -2662,6 +2693,14 @@ export const waitDataSchema = z.strictObject({
   waitedMs: z.number().int().min(0),
 });
 
+/** Итог `harness run --detach` (alpha.72). */
+export const runDetachDataSchema = z.strictObject({
+  pid: z.number().int().positive(),
+  log: z.string().min(1),
+  at: isoTimeSchema,
+  args: z.array(z.string()),
+});
+
 /** Итог `harness lead drive` (alpha.72, P9-9). */
 export const leadDriveDataSchema = z.strictObject({
   outcome: z.enum([
@@ -2699,6 +2738,7 @@ export const leadDriveDataSchema = z.strictObject({
     )
     .max(50),
   waits: z.number().int().min(0),
+  restarts: z.number().int().min(0),
   cursor: z.number().int().min(0),
   status: z.string().max(500),
   last: z
@@ -3928,6 +3968,7 @@ export const cliDataSchemas = {
   events: eventsDataSchema,
   wait: waitDataSchema,
   'lead-drive': leadDriveDataSchema,
+  'run-detach': runDetachDataSchema,
   guide: guideDataSchema,
   pause: controlDataSchema,
   resume: controlDataSchema,
