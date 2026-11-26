@@ -534,6 +534,13 @@ export const cliCommands = {
         required: false,
         description: 'Сбросить счётчик попыток; требует --reason',
       },
+      {
+        name: '--start-over',
+        value: 'flag',
+        required: false,
+        description:
+          'Тонкий режим (alpha.73): сброс, после которого работа начинается заново от цели — дерево, ветка и сессия исполнителя убираются; обычный --reset их сохраняет (новая сессия со сводкой). Включает --reset',
+      },
       { name: '--reason', value: 'text', required: false, description: 'Причина сброса' },
       {
         name: '--by',

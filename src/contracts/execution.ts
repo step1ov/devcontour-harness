@@ -951,6 +951,8 @@ export const leadResetSchema = z.strictObject({
   cap: z.number().int().min(0).optional(),
   /** Отказы, которые сброс покрыл (решение человека или ведущего по ним). */
   failures: z.array(z.string().min(1)).max(20),
+  /** Тонкий режим (alpha.73, `retry --start-over`): работа заново от цели. */
+  startOver: z.literal(true).optional(),
 });
 export type LeadReset = z.infer<typeof leadResetSchema>;
 

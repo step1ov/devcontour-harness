@@ -107,6 +107,7 @@ test('guide thin (alpha.73): весь поток тонкого режима д�
     /review-release/,
     /What thin mode does NOT have/,
     /retry --reset/,
+    /retry --start-over/,
   ])
     assert.match(s.text, rule);
   assert.ok(skill.includes('`$H guide thin`'), 'тема в оглавлении skill');

@@ -237,6 +237,8 @@ const ADDITIVE_ARGS = new Set([
   // Восстановление ведущим после повторных отказов (0.1.0-alpha.66).
   'retry--by',
   'retry--diagnosis',
+  // Работа заново от цели в тонком режиме (0.1.0-alpha.73).
+  'retry--start-over',
   'init--recovery',
   'init--diagnose-after',
   'init--lead-resets',

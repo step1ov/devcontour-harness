@@ -47,15 +47,19 @@ export function intervention(
   attempt: AttemptState,
   work: WorkState,
 ): { reason: string; reset: boolean } | undefined {
-  const last = kit
-    .history(attempt)
-    .filter((a) => a.id !== attempt.id && a.writerSession)
-    .at(-1);
+  const earlier = kit.history(attempt).filter((a) => a.id !== attempt.id);
+  const last = earlier.filter((a) => a.writerSession).at(-1);
   if (!last) return undefined;
   const since = last.startedAt;
   const lead = work.leadRecovery;
+  // `retry --start-over` — один раз: сдача, начатая после него, его уже
+  // исполнила (даже если умерла до записи сессии).
+  const latest = earlier.at(-1)?.startedAt ?? since;
+  if (lead?.resets.some((r) => r.startOver && r.at > latest))
+    return { reason: 'работа заново от цели (retry --start-over)', reset: true };
+  // Обычный сброс сохраняет дерево и ветку: новая сессия со сводкой.
   if (lead?.resets.some((r) => r.at > since))
-    return { reason: 'сброс попыток: работа заново от цели', reset: true };
+    return { reason: 'сброс попыток: новая сессия над деревом работы', reset: false };
   if (lead?.diagnoses.some((d) => d.at > since || d.addenda?.some((x) => x.at > since)))
     return { reason: 'разбор ведущего после прошлой сдачи', reset: false };
   if (last.writerSession?.spec && last.writerSession.spec !== work.approvedDigest)

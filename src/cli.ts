@@ -475,6 +475,7 @@ const options = {
   after: { type: 'string' },
   limit: { type: 'string' },
   reset: { type: 'boolean' },
+  'start-over': { type: 'boolean' },
   once: { type: 'boolean' },
   all: { type: 'boolean' },
   profile: { type: 'string' },
@@ -636,6 +637,7 @@ const flagOwners = {
   kind: ['input-answer'],
   actor: ['input-answer', 'input-carry', 'review-plan', 'review-contract', 'review-accept'],
   by: ['reapprove', 'retry', 'proposal', 'pause'],
+  'start-over': ['retry'],
   proposal: ['proposal'],
   cause: ['diagnose'],
   hypothesis: ['diagnose'],
@@ -1827,11 +1829,12 @@ async function run(
               ? h.engine.cancel(need('work'), v.reason, 'operator')
               : h.engine.retry(
                   need('work'),
-                  v.reset
+                  v.reset || v['start-over']
                     ? {
                         // Сброс ведущего называет причину разбором; своя причина — по желанию.
                         reason: lead ? (v.reason ?? '') : need('reason'),
                         ...(v.diagnosis !== undefined ? { diagnosis: v.diagnosis } : {}),
+                        ...(v['start-over'] ? { startOver: true as const } : {}),
                       }
                     : undefined,
                   lead ? 'lead' : 'operator',

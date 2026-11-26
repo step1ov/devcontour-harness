@@ -58,19 +58,25 @@ loop). Under the lead driver (`HARNESS_LEAD_DRIVE=1`, `$H lead drive`, see
   handover, diagnose the failure (`guide recovery`: explain, `diagnose`,
   `retry --by lead`). After a lead diagnosis, a recovery decision or a
   changed order, the next handover is a **new session** with a summary of
-  the tree and your diagnosis. `retry --reset` starts the work over from the
-  target: the tree, the branch and the session are discarded.
+  the tree and your diagnosis. `retry --reset` (the way back after the
+  handovers or the neutral limit run out) resets the budget and keeps the
+  tree and the branch; the next handover is a new session with the summary.
+  Only `retry --start-over` (implies the reset) starts the work over from the
+  target: the tree, the branch and the session are discarded, once.
 - **`gate-environment`** (needs-lead, not counted, no queue pause, no
   holds). A handover check failed on the environment twice: a gate failed
   with an environment class, a gate timed out with no failing test, or the
-  environment setup failed. Each gets one automatic rerun. Read the gate
+  environment setup failed. Each gets one automatic rerun. On a tree from
+  earlier handovers a setup failure (a conflicted manifest, say) does not stop
+  the handover: the writer gets its output and fixes the files. Read the gate
   output in the failure, fix the environment or the gate command, then run
   `retry --by lead`.
-- **`merge-conflict`** (needs-lead, not counted). The handover does not merge
-  into the target. `retry --by lead`: before the next handover the harness
-  merges the target into the work branch. A clean merge goes on silently.
-  A conflict stays in the tree, and the writer is told which files to
-  resolve. Alternatively, change the order of the works.
+- **`merge-conflict`** (needs-lead, not counted). The first conflict at
+  verification is retried without you: the harness merges the target into
+  the work branch, and the writer resolves the conflicted files (it edits
+  them only; the harness concludes the merge). You get it only when the
+  conflict repeats: `retry --by lead` does the same again, or change the
+  order of the works.
 - **Questions** from the writer: technical ones are yours (`input-answer
 --actor lead --reason …`), product ones go to the owner, as in
   `guide recovery`. The answer reaches the same session.

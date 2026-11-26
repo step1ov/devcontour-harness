@@ -275,6 +275,11 @@ const uncounted = (kind: FailureKind, blocked: boolean, writerBlocked = false) =
 export interface RetryReset {
   reason: string;
   diagnosis?: string;
+  /**
+   * Тонкий режим (alpha.73, `retry --start-over`): работа заново от цели —
+   * дерево, ветка и сессия работы убираются. Обычный сброс их сохраняет.
+   */
+  startOver?: true;
 }
 
 /** Что дальше после разбора (`harness diagnose`). */
@@ -6334,6 +6339,7 @@ export class Engine {
         index: grant.index,
         cap: grant.cap,
         failures: pendingFailures(w, attempts).slice(-20),
+        ...(reset?.startOver ? { startOver: true as const } : {}),
       };
     } else if (doReset) {
       // Сброс человеком — его решение по отказам без разбора и по удержанию
@@ -6347,6 +6353,7 @@ export class Engine {
         spent: w.attempt,
         granted: this.policy.maxAttempts,
         failures: pendingFailures(w, attempts).slice(-20),
+        ...(reset?.startOver ? { startOver: true as const } : {}),
       };
       const fresh = freshDiagnosis(w, attempts);
       if (fresh && !fresh.resolved && (fresh.cause === 'split' || fresh.cause === 'contradiction'))
