@@ -111,8 +111,12 @@ The lead session rules (`lead begin`, roles of your commands, notes) are in
   `status` → `releaseReview.base`); pass `--base` only to override it. An independent
   reviewer checks the accepted target against the brief, acceptance criteria,
   owner answers and the deploy topology (`release.topology`: gateway/proxy
-  configs, production env files). Blocking findings are fixed by works (plan
-  them like any task), then run `review-release` again on the new target.
+  configs, production env files). The reviewer lists all blocking findings
+  of the round at once. Fix **all blocking findings of one round with one fix
+  work** (one per repository when they span several), its acceptance naming
+  every finding — never one work per finding, and never fix one finding and
+  rerun the review to see the next. Plan it like any task, then run
+  `review-release` again on the new target.
   If `review-release` prints `BRIEF_MISSING`, the release has no brief.
   There is no `.harness/work/<graph-id>.brief.md` next to a registered
   graph, and no brief document (a required task-source document, or one
@@ -122,7 +126,10 @@ The lead session rules (`lead begin`, roles of your commands, notes) are in
   Before the review, `review-release` needs a full `harness gates` run on
   the target: all gates, with no skips and no carry-over (alpha.71). If there
   is none, it ran on another target, or a gate definition changed since,
-  `review-release` runs it itself and refuses when a gate fails. The refusal
+  `review-release` runs it itself and refuses when a gate fails. Do not run
+  `harness gates` by hand before `review-release`: it runs the full set
+  itself only when the target has no valid run, and a hand run on the same
+  target only repeats ≈20+ minutes of gates (pilot 9). The refusal
   says which kind: a code failure is fixed with a work; an environment or
   tool failure (`[среда: …]`) needs the environment or the gate definition
   fixed and `harness gates` rerun; an interrupted run is simply rerun. A gate

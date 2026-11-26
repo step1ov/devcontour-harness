@@ -159,6 +159,10 @@ export const FAILURE_PATHS = [
   'a dependency (database, queue, storage, external API) is down or slow',
   'state is expired or abandoned (an upload, session, reservation or link left half-way)',
   'concurrent requests touch the same data',
+  // alpha.72 (пилот 9): таймаут клиента короче синхронной загрузки или
+  // обработки на сервере; тяжёлая работа в самом запросе и её повтор.
+  'the network is slow or the payload is large: a client, proxy or SDK timeout is shorter than the time the server needs to receive and process the request, or a server or proxy timeout or body limit cuts a slow upload',
+  'the request does heavy work inline (synchronous processing) instead of handing it to a background job: when the client times out or retries, the work runs twice, is lost half-way or leaves a duplicate (is the retried request idempotent?)',
 ] as const;
 
 // Ревью A1 M4: блокирует только находка с доказательством; неприменимые
@@ -179,6 +183,15 @@ export const FAILURE_PATHS_RELEASE_TEXT =
   FAILURE_PATHS.join('; ') +
   reviewTail;
 
+/**
+ * Полнота раунда ревью выпуска (alpha.72, пилот 9: по одной находке
+ * сбойного пути за раунд, 3 раунда ≈155 мин): все блокирующие находки —
+ * за один проход, по каждому сценарию × каждому пункту, без остановки на
+ * первой.
+ */
+export const RELEASE_REVIEW_COMPLETENESS_TEXT =
+  'Release review completeness: list ALL blocking findings of this release in this one pass. Before you answer, go through every user scenario of the release (orders and briefs) against each of its acceptance criteria, the owner answers, the deploy topology and every applicable failure path above; record each blocking finding as you establish it and keep going — do not stop at the first blocker. Every finding left for a later round costs the release another fix work and another review round. A blocker you find that was missed in an earlier round is still blocking: report it and say that it was already present.';
+
 /** Тот же чеклист исполнителю: проверить до сдачи. */
 export const FAILURE_PATHS_WRITER_TEXT =
   'Before you hand back, check the failure paths that apply to the scenarios your order changes and handle them within its scope: ' +
@@ -191,6 +204,20 @@ export const FAILURE_PATHS_WRITER_TEXT =
  */
 export const WRITER_SELF_CHECK_TEXT =
   'Self-check before you hand back: run each gate command above yourself from the worktree root (in its cwd when one is given), in the listed order, and fix what fails instead of handing back a red gate. If a gate cannot run in your environment (a service, browser or port is unavailable), the environment-block rule applies: name the gate and the exact error in the summary and still return completed=true when the work itself is done; completed=false is only for unfinished work. The harness runs the same gates again as the trusted check; your run only saves an attempt.';
+
+/**
+ * Файл окружения попытки только для чтения (alpha.72, пилот 9: тест
+ * исполнителя получил EPERM, записывая `attempt-env.json`).
+ */
+export const ATTEMPT_ENV_WRITER_TEXT =
+  'The attempt environment file (HARNESS_ATTEMPT_ENV_FILE, attempt-env.json) is read-only: read it, never write it — writing it fails with EPERM. A test that needs a modified version copies it to its own temporary file and points HARNESS_ATTEMPT_ENV_FILE at the copy for that test.';
+
+/**
+ * Тестовые секреты попытки (alpha.72, P9-1): их значения даёт harness —
+ * исполнитель не спрашивает, откуда их взять, и не придумывает постоянных.
+ */
+export const attemptSecretsNote = (names: readonly string[]) =>
+  `Test-only secrets of this attempt: ${names.join(', ')}. The harness generates a random value for each per attempt and passes it as an environment variable to the writer, lifecycle steps (including harness env-up) and gates, and in the attempt environment file. Use them instead of fixed or default passwords and do not ask how to provide them. Never print their values. A secret that is not on this list is the lead's to declare (policy attemptEnv.secrets): name it in the summary.`;
 
 export function prompt(input: {
   work: WorkState;
@@ -253,6 +280,7 @@ export function prompt(input: {
       : '',
     'Gates that prove this work: ' + JSON.stringify(input.gates),
     review ? '' : WRITER_SELF_CHECK_TEXT,
+    review ? '' : ATTEMPT_ENV_WRITER_TEXT,
     review ? FAILURE_PATHS_REVIEW_TEXT : FAILURE_PATHS_WRITER_TEXT,
     (review && input.findings
       ? 'Historical attempt errors and gate observations (diagnostic context only). Only controller-issued ids in the review findings sections below may appear in `previous`; do not derive ids from this history: '

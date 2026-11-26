@@ -3203,6 +3203,32 @@
                       "technical": {
                         "type": "boolean",
                         "const": true
+                      },
+                      "technicalAreas": {
+                        "maxItems": 4,
+                        "type": "array",
+                        "items": {
+                          "type": "string",
+                          "enum": [
+                            "internal",
+                            "contract",
+                            "api",
+                            "migration"
+                          ]
+                        }
+                      }
+                    },
+                    "required": [
+                      "technical"
+                    ],
+                    "additionalProperties": false
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "technical": {
+                        "type": "boolean",
+                        "const": false
                       }
                     },
                     "required": [
@@ -3241,7 +3267,7 @@
                   "maximum": 10
                 },
                 "affects": {
-                  "maxItems": 5,
+                  "maxItems": 6,
                   "type": "array",
                   "items": {
                     "type": "string",
@@ -3250,7 +3276,8 @@
                       "acceptance",
                       "product",
                       "api",
-                      "migration"
+                      "migration",
+                      "internal"
                     ]
                   }
                 },
@@ -5934,6 +5961,10 @@
             "base-check",
             "reconfigure"
           ]
+        },
+        "pausedBy": {
+          "type": "string",
+          "const": "lead"
         },
         "pausedAt": {
           "type": "string",

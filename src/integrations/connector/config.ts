@@ -9,6 +9,7 @@ import {
   roleIdSchema,
   sha256,
   gateScopeSchema,
+  workLabelSchema,
   writeScopeSchema,
 } from '../../contracts/index.ts';
 import type { ProviderId, TaskColumn } from './transport.ts';
@@ -76,6 +77,13 @@ export const taskMappingSchema = z.strictObject({
    * согласование; semantic digest задачи от них не зависит.
    */
   context: z.array(idSchema).min(1).max(10).optional(),
+  /**
+   * Метки поручения (alpha.72, P9-6), как `labels` задачи плана: `docs` —
+   * работа документации выпуска (`release.docs`), `security`, `payments`,
+   * `auth` — второй проход ревью. Backend меток не хранит: они — часть
+   * сопоставления, входят в поручение и в digest графа.
+   */
+  labels: z.array(workLabelSchema).min(1).max(10).optional(),
 });
 export type TaskMapping = z.infer<typeof taskMappingSchema>;
 
@@ -374,6 +382,9 @@ export const statementMappingDigest = (config: ConnectorConfig, mapping: TaskMap
       context: undefined,
       criteria: undefined,
       requiredDocuments: undefined,
+      // Метки (alpha.72) — вид работы для harness, не постановка: метка docs,
+      // добавленная после приёмки, не делает принятый результат прежним.
+      labels: undefined,
     },
     // `completion` — как доставка закрывает задачу, не постановка: его правка
     // тоже только конфигурация доставки.

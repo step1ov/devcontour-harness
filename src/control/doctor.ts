@@ -9,6 +9,7 @@ import {
   STATE_VERSION,
   inputPolicyOf,
   leadAnswersRule,
+  type LeadAnswersRule,
   NO_RETRY_GATE_CODES,
   reviewVendorConflictMessage,
   reviewVendorConflicts,
@@ -34,6 +35,7 @@ import { HARNESS_VERSION } from '../package.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import type { ToolchainReport } from '../toolchains/inspect.ts';
 import { resourceWarnings } from './resource-advice.ts';
+import { RELEASE_DOCS_UNMARKED, releaseDocsUnmarked } from './release-docs.ts';
 import { BROWSER_ADVICE, isBrowserRunner } from './browser-checks.ts';
 import { decisionSettingsView, recoveryPolicyOf } from '../projections/decisions.ts';
 import { timeBudgetWarnings } from '../verification/time-budget.ts';
@@ -199,6 +201,7 @@ export async function doctor(
         engineVersions?: { controller?: string; attempts: string[] };
       }
     | undefined;
+  let docsUnmarked = false;
   if (stateDir && existsSync(join(stateDir, 'state.sqlite'))) {
     try {
       const store = new SqliteExecutionStore(
@@ -209,6 +212,8 @@ export async function doctor(
       );
       let engineVersions;
       try {
+        // Шаг документации (alpha.72, P9-6): источник задач не пометил docs.
+        docsUnmarked = !!policy && store.read((view) => releaseDocsUnmarked(view, policy));
         engineVersions = store.read((view) => {
           const controller = view.controller()?.engineVersion;
           return {
@@ -266,6 +271,7 @@ export async function doctor(
     : undefined;
   if (leadSandbox?.inside) problems.push('lead-sandbox: ' + leadSandbox.advice);
   const warnings: string[] = [];
+  if (docsUnmarked) warnings.push(RELEASE_DOCS_UNMARKED);
   for (const p of ports)
     if (p.status === 'busy')
       problems.push(
@@ -488,11 +494,10 @@ async function portStatus(policy: ExecutionPolicy, database: string) {
 function questionRule(policy: ExecutionPolicy) {
   const input = inputPolicyOf(policy);
   const rule = leadAnswersRule(input);
+  const lead: LeadAnswersRule | undefined = input.leadAnswers;
   return {
-    leadTechnical: input.leadAnswers?.technical === true,
-    ...(input.leadAnswers?.maxSeverity !== undefined
-      ? { maxSeverity: input.leadAnswers.maxSeverity }
-      : {}),
+    leadTechnical: lead?.technical === true,
+    ...(lead?.maxSeverity !== undefined ? { maxSeverity: lead.maxSeverity } : {}),
     line: rule.ru,
     lineEn: rule.en,
   };

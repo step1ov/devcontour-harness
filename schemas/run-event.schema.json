@@ -2373,6 +2373,10 @@
                   "unknown"
                 ]
               }
+            },
+            "by": {
+              "type": "string",
+              "const": "lead"
             }
           },
           "required": [

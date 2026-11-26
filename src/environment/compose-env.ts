@@ -245,9 +245,11 @@ async function mergeEnvFile(file: string, env: Record<string, string>) {
       : [];
   const keys = [...new Set([...prior, ...Object.keys(env)])].sort().join(',');
   const tmp = `${file}.${process.pid}.tmp`;
+  // Только владельцу (ревью M1): в файле бывают тестовые секреты попытки.
   await writeFile(
     tmp,
     JSON.stringify({ ...current, ...env, [SERVICE_PORT_KEYS]: keys }, null, 2) + '\n',
+    { mode: 0o600 },
   );
   await rename(tmp, file);
 }

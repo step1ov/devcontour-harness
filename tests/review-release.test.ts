@@ -42,7 +42,10 @@ import {
 import type { Engine } from '../src/engine/engine.ts';
 import { cliAdapter } from '../src/agents/cli-adapter.ts';
 import { releaseDone } from '../src/control/lead.ts';
-import { FAILURE_PATHS_RELEASE_TEXT } from '../src/engine/prompt.ts';
+import {
+  FAILURE_PATHS_RELEASE_TEXT,
+  RELEASE_REVIEW_COMPLETENESS_TEXT,
+} from '../src/engine/prompt.ts';
 import {
   releaseBaseOf,
   briefMissingLine,
@@ -59,7 +62,7 @@ import {
 } from '../src/control/release-gates.ts';
 import { checkGates } from '../src/control/gates-check.ts';
 import { releaseReviewRequired, releaseReviewState } from '../src/control/release-review-state.ts';
-import { releaseDocsLine, releaseDocsState } from '../src/control/release-docs.ts';
+import { checkDocsWorks, releaseDocsLine, releaseDocsState } from '../src/control/release-docs.ts';
 import { engineOf, graphOf, policyOf, ready } from './engine-fixture.ts';
 import { bin } from './runner-fixture.ts';
 import { junit } from './git-fixture.ts';
@@ -262,6 +265,10 @@ test('P7-6: review-release — договор выпуска в запросе: 
   assert.match(prompt, /RELEASE CONTRACT/);
   // A2: чеклист сбойных путей в ревью выпуска.
   assert.ok(prompt.includes(FAILURE_PATHS_RELEASE_TEXT), 'чеклист сбойных путей');
+  // alpha.72: все блокирующие находки — за один проход, без остановки на первой.
+  assert.ok(prompt.includes(RELEASE_REVIEW_COMPLETENESS_TEXT), 'полнота раунда выпуска');
+  assert.match(RELEASE_REVIEW_COMPLETENESS_TEXT, /ALL blocking findings/);
+  assert.match(RELEASE_REVIEW_COMPLETENESS_TEXT, /do not stop at the first blocker/);
   // (a) постановки и критерии приёмки
   assert.match(prompt, /Add a greeting function/);
   assert.match(prompt, /greet\('Ada'\) returns 'Hello, Ada!'/);
@@ -451,6 +458,7 @@ test('P7-6: CLI review-release — договор команды и данные
       ['--role', false],
       ['--author', false],
       ['--repository', false],
+      ['--docs-work', false],
     ],
   );
   assert.equal(cliDataSchemas['review-release'], codeReviewRecordSchema);
@@ -620,6 +628,7 @@ test('alpha.70: приёмка выпуска — второй проход по
   g.scenario({
     reviewer: verdict(true),
     refuter: {
+      recordPrompt: true,
       result: {
         summary: 'пропущено',
         verdicts: [],
@@ -639,6 +648,11 @@ test('alpha.70: приёмка выпуска — второй проход по
   assert.equal(r2.approved, false);
   assert.equal(r2.passes?.missed, 1);
   assert.equal(r2.findings[0]?.message, 'prod.env без MEDIA_URL');
+  // alpha.72: второй проход ищет пропущенные находки, а не только опровергает.
+  const refutePrompt = recordedPrompt(g.scenarioPath, 'refuter', 0);
+  assert.match(refutePrompt, /EVERY blocking defect the first pass did not report/);
+  assert.match(refutePrompt, /Search, do not only refute/);
+  assert.ok(refutePrompt.includes(RELEASE_REVIEW_COMPLETENESS_TEXT));
 
   const h = fixture((p) => (p.review.passes = { release: 'off' }));
   ready(h.engine, graphOf({ w: [] }));
@@ -720,6 +734,63 @@ test('ревью 1: release.docs: required держит release done и при r
   const state = g.engine.read((v) => releaseDocsState(v, { release: { docs: 'advisory' } }));
   assert.deepEqual(state.roots, ['w2']);
   assert.equal(state.status, 'pending');
+});
+
+test('alpha.72, P9-6: источник задач без меток — работа документации названа явно --docs-work; опечатка — INVALID_INPUT', async () => {
+  const f = fixture((p) => (p.release = { review: 'advisory', docs: 'required' }));
+  // Работа d — документация после w, но метки docs у неё нет (Relay).
+  ready(f.engine, graphOf({ w: [], d: ['w'] }));
+  accept(f.engine, f.base, f.head);
+  accept(f.engine, f.base, f.head);
+  const done = (docsWorks?: string[]) =>
+    releaseDone(f.engine, {
+      summary: 'готово',
+      heads: f.heads(),
+      fullGates: { app: undefined },
+      ...(docsWorks ? { docsWorks } : {}),
+    });
+  // Без явного названия d — корень выпуска, работы документации нет.
+  notReady(() => done(), /нет работы с меткой docs после корневых работ \(d\).*--docs-work <id>/);
+  const invalid = (fn: () => unknown, pattern: RegExp) =>
+    assert.throws(fn, (e: unknown) => {
+      assert.ok(e instanceof HarnessError);
+      assert.equal(e.code, 'INVALID_INPUT');
+      assert.match(e.message, pattern);
+      return true;
+    });
+  invalid(() => done(['nope']), /--docs-work nope: такой работы в состоянии нет/);
+  // Шаг тот же: названная работа должна быть после корней.
+  notReady(() => done(['w']), /не зависит от корневых работ d/);
+  const state = f.engine.read((v) =>
+    releaseDocsState(v, { release: { docs: 'required' } }, { docsWorks: ['d'] }),
+  );
+  assert.deepEqual([state.status, state.roots, state.declared], ['done', ['w'], ['d']]);
+  assert.match(releaseDocsLine(state) ?? '', /принята \(названа ведущим: d\)/);
+  // review-release с тем же названием шаг не держит; без него — отказ.
+  await assert.rejects(f.review(), /--docs-work <id>/);
+  await assert.rejects(f.review({ docsWorks: ['nope'] }), /такой работы в состоянии нет/);
+  f.scenario({ reviewer: verdict(true) });
+  const r = await f.review({ docsWorks: ['d'] });
+  assert.equal(r.approved, true);
+  // Явное название записано в журнал ведущего (ревью LOW).
+  const logged = () =>
+    f.engine
+      .read((v) => v.local('lead', WORKSPACE_OWNER, 'log'))!
+      .entries.filter((e) => e.action === 'lead.docs-work')
+      .map((e) => e.plain);
+  assert.deepEqual(logged(), [
+    'работа документации выпуска названа явно (review-release --docs-work): d',
+  ]);
+  leadDataSchema.parse(done(['d']));
+  assert.equal(logged().length, 2);
+  assert.match(logged()[1]!, /\(release done --docs-work\): d$/);
+  // Следующий выпуск: d принята в прежнем — документацией нынешнего её не назвать.
+  ready(f.engine, graphOf({ w: [], d: ['w'], x: [] }, '2'));
+  invalid(
+    () => f.engine.read((v) => checkDocsWorks(v, ['d'], 'release done')),
+    /--docs-work d: работа принята в прежнем выпуске/,
+  );
+  f.engine.read((v) => checkDocsWorks(v, ['x'], 'release done'));
 });
 
 test('ревью 2: второй проход приёмки выпуска, изменивший своё дерево, не принимается — действует первый', async () => {

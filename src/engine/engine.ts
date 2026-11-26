@@ -71,6 +71,7 @@ import {
   inputSourceId,
   latestAnswer,
   leadAnswerBasis,
+  type LeadAnswersRule,
   impactOf,
   pinnedInputPolicy,
   targetDigest,
@@ -1380,7 +1381,11 @@ export class Engine {
    * человека: она заменяет любую паузу, и классы отказов прежней паузы с ней
    * не переживают.
    */
-  pause(reason: 'operator' | 'shutdown') {
+  pause(
+    reason: 'operator' | 'shutdown',
+    /** Кто ставит паузу `operator` (alpha.72, P9-3): `lead` — ведущий; нет — человек. */
+    by?: 'lead' | 'operator',
+  ) {
     return this.tx('scheduler.paused', (tx) => {
       const control = tx.control();
       if (control.paused && reason === 'shutdown' && control.pauseReason !== 'reconfigure')
@@ -1398,6 +1403,7 @@ export class Engine {
       // Хост сравнивает его с началом своей работы (пауза до старта снимается
       // циклом, после — нет), и сохранённое прежнее время выдало бы свежее
       // решение за давнее.
+      const lead = reason === 'operator' && by === 'lead';
       const next = {
         ...control,
         paused: true,
@@ -1405,9 +1411,11 @@ export class Engine {
         pausedAt: iso(this.now()),
         pauseOperation: undefined,
         pauseFailures: undefined,
+        pausedBy: lead ? ('lead' as const) : undefined,
       };
+      if (!lead) delete next.pausedBy;
       tx.setControl(next);
-      tx.emit({ type: 'control.paused', payload: { reason } });
+      tx.emit({ type: 'control.paused', payload: { reason, ...(lead ? { by: 'lead' } : {}) } });
       return { control: next, changed: true };
     });
   }
@@ -1443,9 +1451,11 @@ export class Engine {
         pausedAt: undefined,
         pauseOperation: undefined,
         pauseFailures: undefined,
+        pausedBy: undefined,
         waits: control.waits?.filter((w) => w.kind !== 'base-check'),
       };
       if (!next.waits?.length) delete next.waits;
+      delete next.pausedBy;
       tx.setControl(next);
       tx.emit({ type: 'control.resumed', payload: { reason } });
       return { control: next, changed: true };
@@ -3619,20 +3629,25 @@ export class Engine {
     return this.tx('input.answered', (tx) => {
       this.assertNoUpdate(tx);
       const { owner, request } = this.requestIn(tx, id);
-      // Блокирующий вопрос адресован человеку: ведущий отвечает только с явного
-      // разрешения политики — технический вопрос без минимумов
-      // (`leadAnswers.technical`, с причиной) или до порога серьёзности
-      // (`leadAnswers.maxSeverity`). Проверка — до повтора: прежний ответ
-      // ведущего не подтверждается после отзыва разрешения.
+      // Блокирующий вопрос адресован человеку: ведущий отвечает только с
+      // разрешения политики — технический вопрос без минимумов или, в
+      // облегчённом режиме, о внутреннем договоре и программном интерфейсе
+      // (`leadAnswers.technical`, с причиной; умолчание облегчённого режима)
+      // или до порога серьёзности (`leadAnswers.maxSeverity`). Проверка — до
+      // повтора: прежний ответ ведущего не подтверждается после отзыва
+      // разрешения.
       const inputPolicy = inputPolicyOf(this.policy);
       const basis =
         answer.actor.kind === 'lead' ? leadAnswerBasis(request, inputPolicy) : undefined;
       if (basis === null) {
-        const lead = inputPolicy.leadAnswers;
+        const lead: LeadAnswersRule | undefined = inputPolicy.leadAnswers;
         const impact = impactOf(request.question);
+        const areas = lead?.technicalAreas ?? [];
         const why =
           lead?.technical === true
-            ? 'политика разрешает ведущему только технические вопросы без критических областей и путей' +
+            ? (areas.length
+                ? `политика разрешает ведущему только технические вопросы без критических путей и без критических областей, кроме ${areas.join(', ')}`
+                : 'политика разрешает ведущему только технические вопросы без критических областей и путей') +
               (lead.maxSeverity !== undefined ? ` до серьёзности ${lead.maxSeverity}` : '') +
               (impact !== 'technical'
                 ? ', а этот меняет результат для пользователя'

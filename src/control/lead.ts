@@ -5,7 +5,14 @@
 // (`Engine.recordLead`); представление оператора читает её как раздел `lead`,
 // ленту и шаг «итоговый отчёт» прогноза.
 
-import { releaseDocsLine, releaseDocsOpen, releaseDocsState } from './release-docs.ts';
+import {
+  checkDocsWorks,
+  docsWorksNote,
+  RELEASE_DOCS_HINT,
+  releaseDocsLine,
+  releaseDocsOpen,
+  releaseDocsState,
+} from './release-docs.ts';
 import {
   HarnessError,
   LEAD_LIMITS,
@@ -149,19 +156,64 @@ export function leadNote(engine: Engine, options: { text: string; workId?: strin
   });
 }
 
-/** `lead end`: закончить сессию (необязательная строка — чем закончил). */
-export function leadEnd(engine: Engine, options: { text?: string } = {}): LeadData {
+/**
+ * Записать в журнал ведущего, что работа документации названа явно
+ * (`review-release --docs-work`, ревью LOW alpha.72).
+ */
+export function recordDocsWorks(engine: Engine, ids: readonly string[], command: string) {
+  const note = docsWorksNote(ids, command);
+  engine.recordLead((log, now) => ({
+    log: append(
+      log,
+      {
+        at: iso(now),
+        kind: 'command',
+        action: 'lead.docs-work',
+        plain: note.ru.slice(0, LEAD_LIMITS.note),
+        plainEn: note.en.slice(0, LEAD_LIMITS.note),
+      },
+      now,
+    ),
+    result: undefined,
+  }));
+}
+
+/** Код записи `lead end --waiting owner` (alpha.72): ведущий ждёт решения владельца. */
+export const LEAD_WAITING_OWNER = 'lead.waiting-owner';
+
+/**
+ * `lead end`: закончить сессию (необязательная строка — чем закончил).
+ * `waitingOwner` (alpha.72, `--waiting owner --reason`): ведущий остановился
+ * на решении, которое принимает только владелец; драйвер ведущего (`lead
+ * drive`) сообщает это владельцу и ждёт дальше, а не будит ведущего снова.
+ */
+export function leadEnd(
+  engine: Engine,
+  options: { text?: string; waitingOwner?: string } = {},
+): LeadData {
   const note = options.text
     ? cleanLeadText(options.text, LEAD_LIMITS.note, 'lead end --text')
     : undefined;
+  const waiting =
+    options.waitingOwner !== undefined
+      ? cleanLeadText(options.waitingOwner, LEAD_LIMITS.note - 40, 'lead end --reason')
+      : undefined;
   return engine.recordLead((log, now) => {
-    const entry: LeadEntry = {
-      at: iso(now),
-      kind: 'end',
-      action: 'lead.end',
-      plain: note ? `ведущий закончил работу: ${note}` : 'ведущий закончил работу',
-      plainEn: note ? `the lead stopped working: ${note}` : 'the lead stopped working',
-    };
+    const entry: LeadEntry = waiting
+      ? {
+          at: iso(now),
+          kind: 'end',
+          action: LEAD_WAITING_OWNER,
+          plain: `ведущий ждёт решения владельца: ${waiting}`,
+          plainEn: `the lead waits for the owner's decision: ${waiting}`,
+        }
+      : {
+          at: iso(now),
+          kind: 'end',
+          action: 'lead.end',
+          plain: note ? `ведущий закончил работу: ${note}` : 'ведущий закончил работу',
+          plainEn: note ? `the lead stopped working: ${note}` : 'the lead stopped working',
+        };
     const base = append(log, entry, now);
     const next: LeadLog = base.session
       ? { ...base, session: { ...base.session, endedAt: iso(now), until: iso(now) } }
@@ -210,6 +262,8 @@ export function releaseDone(
      * записи — тоже отказ.
      */
     fullGates: Readonly<Record<string, string | undefined>>;
+    /** Явные работы документации выпуска (`--docs-work`, alpha.72, P9-6). */
+    docsWorks?: readonly string[];
   },
 ): LeadData {
   const summary = cleanLeadText(options.summary, LEAD_LIMITS.summary, 'release done --summary');
@@ -248,12 +302,17 @@ export function releaseDone(
     );
     // Шаг документации (alpha.70, ревью 1): `required` держит сам
     // `release done`, независимо от правила ревью выпуска.
-    const docs = releaseDocsState(view, engine.policy);
+    checkDocsWorks(view, options.docsWorks, 'release done');
+    const docs = releaseDocsState(
+      view,
+      engine.policy,
+      options.docsWorks ? { docsWorks: options.docsWorks } : {},
+    );
     const docsLine = releaseDocsOpen(docs) ? releaseDocsLine(docs) : undefined;
     if (docsLine && docs.mode === 'required')
       throw new HarnessError(
         'NOT_READY',
-        `Выпуск не готов: ${docsLine}; release.docs: required — примите работу документации (метка docs, зависит от корневых работ выпуска)`,
+        `Выпуск не готов: ${docsLine}; release.docs: required — ${RELEASE_DOCS_HINT}`,
       );
     const problem = releaseReviewProblem(review);
     if (problem && review.required)
@@ -291,7 +350,21 @@ export function releaseDone(
       plain: `ведущий закончил выпуск: ${short}`.slice(0, LEAD_LIMITS.note),
       plainEn: `the lead finished the release: ${short}`.slice(0, LEAD_LIMITS.note),
     };
-    const next = append({ ...log, release }, entry, now);
+    // Явно названная работа документации (ревью LOW) — тоже запись журнала.
+    const declared = options.docsWorks?.length
+      ? ((n) => ({
+          at: iso(now),
+          kind: 'command' as const,
+          action: 'lead.docs-work',
+          plain: n.ru.slice(0, LEAD_LIMITS.note),
+          plainEn: n.en.slice(0, LEAD_LIMITS.note),
+        }))(docsWorksNote(options.docsWorks, 'release done'))
+      : undefined;
+    const next = append(
+      declared ? append({ ...log, release }, declared, now) : { ...log, release },
+      entry,
+      now,
+    );
     return {
       log: next,
       result: {
@@ -385,6 +458,14 @@ export function leadCommandEntry(
       return phase === 'start'
         ? one('ведущий запустил harness run', 'the lead started harness run')
         : one('harness run ведущего закончился', "the lead's harness run ended");
+    case 'run-detach':
+      // Решение ведущего — запуск; начало и конец самого run пишет run.
+      return phase === 'end'
+        ? one(
+            'ведущий запустил harness run отдельным процессом',
+            'the lead started harness run as a separate process',
+          )
+        : undefined;
     case 'review-plan':
       return one(
         'ведущий отправил план на независимое ревью',
@@ -497,6 +578,7 @@ export function leadCommandEntry(
 /** Команды, которые журнал ведущего записывает сам. */
 export const LEAD_LOGGED_COMMANDS = [
   'run',
+  'run-detach',
   'review-plan',
   'review-contract',
   'review-accept',

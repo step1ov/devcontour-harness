@@ -862,13 +862,19 @@ test('H1-02 (B3): политика отредактирована на writer co
 
 test('alpha.55: --lead-technical-answers — правило в новой политике, init называет его словами; сохранённая политика без правила — конфликт', async () => {
   const p = project();
-  // Без флага: человек отвечает на все вопросы, init подсказывает флаг.
+  // Без флага (alpha.72, облегчённый режим): технические вопросы по умолчанию
+  // решает ведущий, подсказки флага нет.
   const plain = await initProject(p.opts({ plan: true }));
   initDataSchema.parse(plain);
-  assert.equal(plain.questions!.leadTechnical, false);
+  assert.equal(plain.questions!.leadTechnical, true);
   assert.equal(plain.questions!.source, 'default');
-  assert.match(plain.questions!.line, /отвечает человек/);
-  assert.match(initText(plain), /questions: .*init --lead-technical-answers/);
+  assert.match(plain.questions!.line, /Технические вопросы .*внутреннем устройстве кода/);
+  assert.doesNotMatch(initText(plain), /init --lead-technical-answers/);
+  // Строгий режим — прежнее правило: человек отвечает на все вопросы, init подсказывает флаг.
+  const strict = await initProject(p.opts({ plan: true, harnessMode: 'strict' }));
+  assert.equal(strict.questions!.leadTechnical, false);
+  assert.match(strict.questions!.line, /отвечает человек/);
+  assert.match(initText(strict), /questions: .*init --lead-technical-answers/);
   // Ответ прежней версии без поля — валиден и печатается без строки questions.
   const { questions: _q, ...legacy } = plain;
   void _q;
@@ -892,10 +898,23 @@ test('alpha.55: --lead-technical-answers — правило в новой пол
   assert.doesNotMatch(initText(again), /init --lead-technical-answers/);
   assert.equal(again.conflicts, 0);
 
-  // Сохранённая политика без правила и флаг — конфликт, а не молча неработающий флаг.
+  // Сохранённая политика с явным отказом и флаг — конфликт, а не молча
+  // неработающий флаг (без правила облегчённый режим уже разрешает ведущему).
   const q = project();
   await initProject(q.opts());
   const policyPath = join(q.root, '.harness/policy.json');
+  const saved = JSON.parse(readFileSync(policyPath, 'utf8')) as Record<string, unknown>;
+  writeFileSync(
+    policyPath,
+    JSON.stringify(
+      {
+        ...saved,
+        inputPolicy: { threshold: 7, criticalPaths: [], leadAnswers: { technical: false } },
+      },
+      null,
+      2,
+    ) + '\n',
+  );
   const bytes = readFileSync(policyPath, 'utf8');
   const conflict = await initProject(q.opts({ plan: true, leadTechnicalAnswers: true }));
   assert.equal(conflict.conflicts, 1);
@@ -932,8 +951,9 @@ test('alpha.66: --recovery/--diagnose-after/--lead-resets — правило в�
     initText(applied),
     /recovery: после 1 отказа — разбор ведущего; ещё попытки даёте только вы; дальше — вы/,
   );
-  // Необычное сочетание названо предупреждением блока решений.
-  assert.ok(applied.decisions!.warning?.ru.includes('recovery.mode: lead'));
+  // alpha.72: в облегчённом режиме технические вопросы по умолчанию у ведущего —
+  // сочетание с recovery.mode: lead обычное, предупреждения нет.
+  assert.equal(applied.decisions!.warning, undefined);
   // Сохранённая политика с другим правилом и флаг — конфликт, а не молча неработающий флаг.
   const conflict = await initProject(p.opts({ plan: true, recovery: { mode: 'user' } }));
   assert.equal(conflict.conflicts, 1);

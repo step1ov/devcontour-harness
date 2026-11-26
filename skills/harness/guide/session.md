@@ -19,7 +19,11 @@ connector — is invisible unless you say it:
   decision you pass on; without `--by` it is refused (`INVALID_INPUT`).
   `input-answer` without `--actor` is always the operator's, also inside your
   session: an owner's answer you pass on stays the owner's. Your own
-  technical answer needs `--actor lead --reason "…"`.
+  technical answer needs `--actor lead --reason "…"`. To pause the queue
+  yourself (for a re-plan) run `$H pause --state <state> --by lead`: `status`
+  and `view` then show «поставил ведущий» and name you, not the human, as the
+  one who resumes — `$H resume` it yourself when the re-plan is done. Without
+  `--by lead` the pause is recorded as the operator's.
 - **Declare the whole release first** — before the first graph, record the
   release outline: stages × components with a rough size and who does them,
   not only the next graph:
@@ -39,6 +43,13 @@ connector — is invisible unless you say it:
 - At each step outside harness, one short line in plain words, the way you
   would tell a non-developer: `$H lead note "Обновляю документ DOC-2 в источнике задач"
 --state <state>` (up to 200 characters; no secrets, no paths, no logs).
+- Waiting for a running `harness run`: `$H guide run` («Waiting costs model
+  tokens»). With `HARNESS_LEAD_DRIVE=1` in your environment a driver waits
+  for you: handle the event in your input, keep `harness run` going in the
+  background (`$H run --detach --log <file> …`, see `guide run`), then end your
+  turn with a short summary — no `wait` loop, and no `lead end` until the
+  release is done or only the owner can decide next:
+  `$H lead end --state <state> --waiting owner --reason "<which decision>"`.
 - When you stop: `$H lead end --state <state>`. If approved works are ready
   and nothing runs, it still ends the session but warns
   `READY_WORKS_NOT_RUNNING` (`data.readyNotRunning`): start `$H run` first.

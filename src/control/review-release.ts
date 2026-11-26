@@ -7,7 +7,13 @@
 // раунды предмета с переходами прежних находок; запись — `code-reviews` с
 // `kind: release`. Приёмки и поручений нет: находки исправляют обычные работы.
 
-import { releaseDocsLine, releaseDocsOpen, releaseDocsState } from './release-docs.ts';
+import {
+  checkDocsWorks,
+  RELEASE_DOCS_HINT,
+  releaseDocsLine,
+  releaseDocsOpen,
+  releaseDocsState,
+} from './release-docs.ts';
 import {
   HarnessError,
   type CodeReviewRecord,
@@ -20,6 +26,7 @@ import {
   digestOf,
 } from '../contracts/index.ts';
 import { requestsOf } from '../engine/input-requests.ts';
+import { recordDocsWorks } from './lead.ts';
 import { checkGates, commitOf } from './gates-check.ts';
 import { fullGatesProblem, recordGatesRun } from './release-gates.ts';
 import {
@@ -42,6 +49,8 @@ export interface ReleaseReviewInput {
   head?: string;
   /** Отмена человеком (сигнал); пределы времени шагов review-release задаёт сам. */
   signal?: AbortSignal;
+  /** Явные работы документации выпуска (`--docs-work`, alpha.72, P9-6). */
+  docsWorks?: readonly string[];
 }
 
 /**
@@ -277,13 +286,19 @@ export async function reviewRelease(
   const head = input.head ?? repo.targetRef;
   // Шаг документации (alpha.70): до приёмки выпуска принята работа docs
   // после корневых работ; `required` — отказ без неё.
-  const docs = ctx.engine.read((v) => releaseDocsState(v, ctx.policy));
+  const docs = ctx.engine.read((v) => {
+    checkDocsWorks(v, input.docsWorks, 'review-release');
+    return releaseDocsState(v, ctx.policy, input.docsWorks ? { docsWorks: input.docsWorks } : {});
+  });
   const docsLine = releaseDocsLine(docs);
   if (docs.mode === 'required' && releaseDocsOpen(docs) && docsLine)
     throw new HarnessError(
       'NOT_READY',
-      `review-release: ${docsLine}; release.docs: required — сначала примите работу документации (метка docs, зависит от корневых работ)`,
+      `review-release: ${docsLine}; release.docs: required — сначала ${RELEASE_DOCS_HINT}`,
     );
+  // Явно названная работа документации закрыла шаг — запись журнала ведущего.
+  if (input.docsWorks?.length && docs.declared?.length)
+    recordDocsWorks(ctx.engine, docs.declared, 'review-release');
   // Полный прогон gates на цели выпуска (alpha.71, ревью B): нет годного —
   // review-release исполняет его сам; не прошёл — отказ до ревью.
   const path = ctx.repoPath(repo.path);

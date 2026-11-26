@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
+  ATTEMPT_ENV_WRITER_TEXT,
   FAILURE_PATHS_RELEASE_TEXT,
   FAILURE_PATHS_REVIEW_TEXT,
   FAILURE_PATHS_WRITER_TEXT,
@@ -63,12 +64,17 @@ test('writer: подсказка называет команды и cwd gates о
   const reviewer = readFileSync(`${ctx.scenarioPath}.reviewer.0.prompt`, 'utf8');
   assert.ok(reviewer.includes(FAILURE_PATHS_REVIEW_TEXT), 'чеклист reviewer попытки');
   assert.ok(!reviewer.includes(FAILURE_PATHS_WRITER_TEXT));
+  // alpha.72: файл окружения попытки — только для чтения; reviewer подсказки не получает.
+  assert.ok(head.includes(ATTEMPT_ENV_WRITER_TEXT), 'attempt-env.json только для чтения');
+  assert.match(ATTEMPT_ENV_WRITER_TEXT, /attempt-env\.json\) is read-only/);
+  assert.match(ATTEMPT_ENV_WRITER_TEXT, /copies it to its own temporary file/);
+  assert.ok(!reviewer.includes(ATTEMPT_ENV_WRITER_TEXT));
   ctx.store.close();
 });
 
 /** Тексты чеклиста — договор (alpha.71 A2/A3), записаны независимо от реализации. */
 const PATHS =
-  'the response is lost or times out (the client retries or gives up); the same request is retried or submitted twice; the client is offline or the network drops mid-request; a dependency (database, queue, storage, external API) is down or slow; state is expired or abandoned (an upload, session, reservation or link left half-way); concurrent requests touch the same data';
+  'the response is lost or times out (the client retries or gives up); the same request is retried or submitted twice; the client is offline or the network drops mid-request; a dependency (database, queue, storage, external API) is down or slow; state is expired or abandoned (an upload, session, reservation or link left half-way); concurrent requests touch the same data; the network is slow or the payload is large: a client, proxy or SDK timeout is shorter than the time the server needs to receive and process the request, or a server or proxy timeout or body limit cuts a slow upload; the request does heavy work inline (synchronous processing) instead of handing it to a background job: when the client times out or retries, the work runs twice, is lost half-way or leaves a duplicate (is the retried request idempotent?)';
 
 /** Ревью A1 M4: доказательство, применимость, без брифа у попытки, область исполнителя. */
 const TAIL =

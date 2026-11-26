@@ -119,7 +119,7 @@ function classify(event: RunEvent, view: ExecutionView): WaitKind | 'failure' | 
 }
 
 /** Весь выпуск принят: работы есть и все приняты или отменены. */
-const releaseReady = (view: ExecutionView) => {
+export const releaseReady = (view: ExecutionView) => {
   const works = view.works();
   return (
     works.length > 0 &&
@@ -128,7 +128,7 @@ const releaseReady = (view: ExecutionView) => {
   );
 };
 
-export async function waitFor(input: {
+export interface WaitInput {
   stateDir: string;
   policy: ExecutionPolicy;
   baseDir: string;
@@ -143,7 +143,19 @@ export async function waitFor(input: {
   onTick?: () => void;
   tickMs?: number;
   now?: () => number;
-}): Promise<WaitData> {
+}
+
+/** `harness wait`: публичная операция (корень пакета, каталог). */
+export const waitFor = (input: WaitInput): Promise<WaitData> => waitForEvents(input);
+
+/**
+ * Ожидание с внутренним крючком `lead drive` (alpha.72): `wakeOn` — событие,
+ * которое тоже кончает ожидание исходом `question` с этим событием (ответ
+ * владельца на вопрос). Не экспортируется корнем пакета: договор wait прежний.
+ */
+export async function waitForEvents(
+  input: WaitInput & { wakeOn?: (event: RunEvent) => boolean },
+): Promise<WaitData> {
   const now = input.now ?? Date.now;
   const started = now();
   const file = join(resolve(input.stateDir), 'state.sqlite');
@@ -214,9 +226,13 @@ export async function waitFor(input: {
       if (input.signal?.aborted) return finish('aborted');
       const events = store.events(cursor, 500);
       for (const e of events) {
-        const kind = store.read((view) => classify(e, view));
         const event = { seq: e.seq, type: e.type, at: e.at };
         const work = e.workId ? { workId: e.workId } : {};
+        if (input.wakeOn?.(e)) {
+          cursor = e.seq;
+          return finish('question', { event, ...work });
+        }
+        const kind = store.read((view) => classify(e, view));
         if (kind === 'failure') {
           // Отказ и ремонт harness — разные транзакции (ревью D/E LOW-2): отказ
           // проверяется опросом позже; назначенный повтор (работа уже не

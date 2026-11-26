@@ -222,6 +222,7 @@ import {
 import {
   attemptEnvFile,
   allocateAttemptPorts,
+  attemptSecrets,
   attemptVariables,
   type AttemptPorts,
 } from '../environment/attempt-ports.ts';
@@ -244,7 +245,7 @@ import {
   type Engine,
 } from './engine.ts';
 import { environmentBlockOf, writerScratch } from './writer-block.ts';
-import { prompt } from './prompt.ts';
+import { attemptSecretsNote, prompt } from './prompt.ts';
 import {
   FEEDBACK_CASE_LIMIT,
   FEEDBACK_TOTAL_LIMIT,
@@ -446,6 +447,8 @@ export class Runner {
   private phaseDeadlines = new Map<string, number>();
   /** Порты попытки облегчённого режима (alpha.69, `attemptEnv.ports`). */
   private attemptPorts = new Map<string, Map<string, Record<string, number>>>();
+  /** Тестовые секреты попытки облегчённого режима (alpha.72, `attemptEnv.secrets`). */
+  private attemptSecrets = new Map<string, Map<string, Record<string, string>>>();
   /**
    * Текст провала gates попытки-источника для writer продолжения (по ID
    * попытки): собирается при наложении черновика, расходуется запросом.
@@ -906,6 +909,7 @@ export class Runner {
                 attempt.id,
                 attemptEnvFile(repo.id, repo.id === attempt.repositoryId),
               ),
+              this.attemptSecrets.get(attempt.id)?.get(repo.id),
             )
           : {}),
       },
@@ -1820,13 +1824,21 @@ export class Runner {
       // Окружение попытки файлом (alpha.69, P6-11): имя проекта compose,
       // порты и шлюз — для lifecycle, gates и инструментов, которые читают
       // файл, а не переменные. У каждого репозитория попытки (её и
-      // проверяемых потребителей) — свой файл. Секретов в нём нет.
+      // проверяемых потребителей) — свой файл. Секретов политики в нём нет;
+      // тестовые секреты попытки (alpha.72, `attemptEnv.secrets`) — свои
+      // случайные значения этой попытки, файл всегда только для владельца (0600).
       if (harnessModeOf(this.policy) === 'light') {
         await mkdir(artifacts, { recursive: true });
+        const secretsByRepo = new Map<string, Record<string, string>>();
         for (const repositoryId of new Set([
           repo.id,
           ...(claimed.consumers ?? []).map((c) => c.repositoryId),
         ])) {
+          const secrets = attemptSecrets(this.policy.attemptEnv, [
+            this.policy.environment,
+            this.repo(repositoryId).environment,
+          ]);
+          if (Object.keys(secrets).length) secretsByRepo.set(repositoryId, secrets);
           const file = join(artifacts, attemptEnvFile(repositoryId, repositoryId === repo.id));
           await writeFile(
             file,
@@ -1837,12 +1849,15 @@ export class Runner {
                 this.repo(repositoryId).gateway,
                 repositoryId,
                 file,
+                secrets,
               ),
               null,
               2,
             ) + '\n',
+            { mode: 0o600 },
           );
         }
+        if (secretsByRepo.size) this.attemptSecrets.set(attempt.id, secretsByRepo);
       }
       // Ресурсы поручения, gates его репозитория и выбранных проверок
       // потребителей — одним резервированием на всю попытку.
@@ -2093,6 +2108,9 @@ export class Runner {
                         ...(dependencies ? [writerDependenciesNote(dependencies)] : []),
                         ...this.freshStartNotes(work),
                         ...(repo.generators?.length ? [generatorNote(repo.generators)!] : []),
+                        ...((names) => (names.length ? [attemptSecretsNote(names)] : []))(
+                          Object.keys(this.attemptSecrets.get(attempt.id)?.get(repo.id) ?? {}),
+                        ),
                         ALREADY_SATISFIED_WRITER_NOTE,
                         WRITER_TRIAGE_TEXT,
                         WRITER_RESEARCH_TEXT,
@@ -2667,6 +2685,7 @@ export class Runner {
       this.selfChecks.delete(attempt.id);
       this.portWarnings.delete(attempt.id);
       this.attemptPorts.delete(attempt.id);
+      this.attemptSecrets.delete(attempt.id);
       for (const lease of leases)
         try {
           lease.release();

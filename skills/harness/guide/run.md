@@ -1,4 +1,4 @@
-<!-- harness guide run: Run the graph, wait for events, probe the writer, notes -->
+<!-- harness guide run: Run the graph, wait for events or let the lead driver wait, probe the writer, notes -->
 
 ### 7. Run
 
@@ -8,6 +8,16 @@ $H run --graph .harness/work/<graph-id>.json --policy .harness/policy.json \
 ```
 
 The state directory lives outside the repository; `run` creates it.
+
+To keep `run` going after your shell command returns, start it detached:
+`$H run --detach --log <file> --graph … --policy … --state … --author …`.
+It starts `run` as its own process (own process group and session, stdin
+closed, stdout and stderr appended to `<file>`, mode 0600), waits (up to
+30 s) until the run sets its start marker or takes the controller role and
+prints the pid — in bash and zsh alike, no `&`, `nohup`, `set -m` or
+`setsid` needed. If the run exits with an error first, it refuses
+(`NOT_READY`) with the exit code and the last 40 lines of `<file>`. It
+records the start in `<state>/run-detach.json`.
 
 **Waiting for progress.** While `run` works (in the background or in another
 process), do not loop `status`. Block on the next event that matters instead:
@@ -32,6 +42,89 @@ accepted, 10 release-ready, 11 question, 12 held, 13 failed, 14 stopped, 15
 timeout, 16 aborted (signal). They are outcomes, not errors (`ok: true`);
 the JSON `kind` is authoritative. It reads the state read-only, does not
 query the controller and keeps an open lead session alive while waiting.
+
+**Waiting costs model tokens.** Every time a wait returns to you, your agent
+sends the whole session so far to the model again; a loop of short waits
+(`--timeout 50s`) costs more than the work itself. Wait with the longest
+`--timeout` your shell tool allows (10 minutes or more if it allows it; the
+default is 30m), and never chain more than about 3 empty waits (`timeout`,
+exit 15): after that, end your turn with a short status line instead.
+
+**Under the lead driver (`HARNESS_LEAD_DRIVE=1`).** When your environment
+has `HARNESS_LEAD_DRIVE=1`, an operator loop without a model waits for you
+(`harness lead drive`) and starts a fresh session of yours on each event
+that needs you; your input is the operator's goals plus a short event
+summary (what happened, the cursor, the commands for it; an executor's text
+is quoted as data, not instructions). Handle that event and decide: only
+your decisions count as progress — harness commands of your log (retry,
+reset, diagnose, input answers, input-resolve/carry, review-accept,
+reapprove, run start), new graphs, review rounds (`review-release`) and
+`release done`; `lead begin` and notes do not. A stopped queue or a ready
+release you leave without a decision does not wake you again: the driver
+stops after waiting a while for any change (a `review-release` you started
+in the background, a policy fix). Begin every session with `$H lead begin`:
+without an open session your `run` and `input-resolve` are not written to
+your log and do not count as a decision (the run's own start and end
+records are not your decisions; `run --detach` is). Start `harness run` only detached
+(`$H run --detach --log <file> …`, above) so it outlives your turn and is
+not stopped with your session. Then end your turn with a
+short summary. Do not call `$H wait` and do not loop: the driver wakes you
+on the next failure, hold, question for you, a human's answer, ready
+release or stopped queue (only you start runs; for a stopped queue the
+summary shows the last `run --detach` log and its last lines); accepted
+works, failures harness retries by itself and
+events already resolved do not wake you. A new executor question you may
+not answer wakes you once (`HARNESS_LEAD_DRIVE_EVENT=owner-question`): do
+not answer it yourself — pass it to the owner's channel (an open
+question in the task source, see `$H guide session`), keep independent works running and end
+your turn; the same question does not wake you again, the owner's answer
+does. When nothing is left for you but an owner's decision, say so:
+`$H lead end --state <state> --waiting owner --reason "<which decision>"` —
+the driver tells the owner and keeps waiting instead of waking you.
+
+**Running the driver (operator).** Instead of a lead session that waits:
+
+```sh
+$H lead drive --state <manifest.paths.state> --policy .harness/policy.json \
+  --agent 'codex exec --dangerously-bypass-approvals-and-sandbox --json -C /path/to/repo -' \
+  --prompt-file goals.md --log transcripts/drive [--max-sessions 20] [--idle-sessions 3] \
+  [--timeout 60m] [--session-timeout 60m] [--repeat-wait 10m]
+```
+
+`--agent` is the host's lead command as one string, run without a shell
+(quotes group arguments); the session prompt goes to its stdin, and
+`{session}`, `{cursor}` and `{prompt-file}` are substituted. `goals.md` is a
+short goals-only prompt (what the release must achieve, who answers what);
+the driver appends the event summary. Each session is new, so the context
+stays small; the agent gets `HARNESS_LEAD_DRIVE=1`,
+`HARNESS_LEAD_DRIVE_CURSOR`, `HARNESS_LEAD_DRIVE_SESSION` and
+`HARNESS_LEAD_DRIVE_EVENT`, runs in its own process group, and its stdout
+and stderr go straight to `--log` files (`session-N.prompt.md`, `.out`,
+`.err`, mode 0600) or to /dev/null without `--log` — never to the driver's
+JSON. A session longer than `--session-timeout` is stopped with its whole
+process group (SIGTERM, then SIGKILL after 10 s) and counts as a failed
+session. Unchanged state the lead already got without a decision is waited
+on for `--repeat-wait` (default 10m) before stopping. The driver never
+starts runs itself. Each session gets an executable wrapper of this exact
+harness CLI in `$H` and on `PATH` (`H`), so `$H …` works in every separate
+shell call; `HARNESS_BIN`, when set, is the path of one executable harness
+file. Owner notices (stderr and `data.notices`): a question the lead may
+not answer (plus one `owner-question` session to pass it on), a step only a
+human takes for one work (budget, provider access) and the lead's
+`lead end --waiting owner`; the driver keeps waiting while other work can go
+on: failures of independent works still wake the lead, and the owner's
+answer (operator view or `input-answer`) wakes it to apply the answer. While it
+waits, the driver renews an open lead session, as `wait` does. Exit codes
+(`ok: true`, the JSON `outcome` decides): 0 release-done (release done
+recorded, all code accepted), 20 owner (no run going, nothing ready, and
+everything left waits for the owner — or an operator pause, at once: decide
+it, then start the driver again), 21 no-progress (`--idle-sessions`
+sessions in a row without a lead decision or over the time limit — passing
+an owner question on does not count — or the same stop again without a
+decision and no change within `--repeat-wait`: check the agent command and
+its logs),
+22 max-sessions, 23 agent-error (the command did not start), 16 aborted
+(signal). Progress lines go to stderr.
 
 Before a long cycle, first run the cheap decisive gates
 («перед долгим циклом сначала прогоните дешёвые решающие gates»):

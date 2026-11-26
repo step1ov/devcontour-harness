@@ -33,7 +33,20 @@ export const DEFAULT_RECOVERY = { diagnoseAfter: 2, leadResets: 2 } as const;
 export interface RecoveryPolicyFields {
   recovery?: { mode: 'lead' | 'user'; diagnoseAfter: number; leadResets: number } | undefined;
   inputPolicy?: { leadAnswers?: { technical?: boolean } | undefined } | undefined;
+  /** Режим harness: в облегчённом (нет поля) технические вопросы по умолчанию у ведущего. */
+  harnessMode?: 'light' | 'strict' | undefined;
 }
+
+/**
+ * Решает ли ведущий технические вопросы исполнителя: явное
+ * `inputPolicy.leadAnswers.technical`; без правила ответов — да в облегчённом
+ * режиме (alpha.72, `inputPolicyOf`), нет в строгом. Правило ответов без
+ * `technical` (только `maxSeverity`) — нет.
+ */
+export const leadTechnicalOf = (policy: RecoveryPolicyFields): boolean => {
+  const lead = policy.inputPolicy?.leadAnswers;
+  return lead === undefined ? policy.harnessMode !== 'strict' : lead.technical === true;
+};
 
 /**
  * Действующее правило: явное поле `recovery` всегда главнее; без него —
@@ -164,7 +177,8 @@ export function decisionSettings(
       : r.source === 'derived'
         ? 'derived'
         : 'default';
-  const technical = policy.inputPolicy?.leadAnswers?.technical;
+  const explicit = policy.inputPolicy?.leadAnswers?.technical;
+  const technical = leadTechnicalOf(policy);
   const items: DecisionSetting[] = [
     {
       key: 'maxAttempts',
@@ -192,8 +206,8 @@ export function decisionSettings(
     },
     {
       key: 'inputPolicy.leadAnswers.technical',
-      value: technical === true,
-      source: technical === undefined ? 'default' : 'policy',
+      value: technical,
+      source: explicit === undefined ? 'default' : 'policy',
       explain: decisionSettingExplain['inputPolicy.leadAnswers.technical'],
     },
   ];
@@ -206,7 +220,7 @@ export function decisionSettings(
  */
 export function decisionWarning(policy: RecoveryPolicyFields): Bilingual | undefined {
   const r = recoveryPolicyOf(policy);
-  if (r.mode === 'lead' && policy.inputPolicy?.leadAnswers?.technical !== true)
+  if (r.mode === 'lead' && !leadTechnicalOf(policy))
     return {
       ru: 'recovery.mode: lead, а технические вопросы исполнителя решает человек (inputPolicy.leadAnswers.technical не true): отказы разбирает ведущий, а вопросы — вы. Допустимо; обычно оба решения технические и оба у ведущего (init --lead-technical-answers).',
       en: 'recovery.mode is lead while the writer technical questions go to a human (inputPolicy.leadAnswers.technical is not true): the lead handles failures, you handle questions. Allowed; usually both are technical and both go to the lead (init --lead-technical-answers).',

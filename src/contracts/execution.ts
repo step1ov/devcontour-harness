@@ -1127,9 +1127,19 @@ export const pauseReasons = [
 ] as const;
 export type PauseReason = (typeof pauseReasons)[number];
 
+/** Пауза `operator`, которую поставил ведущий (`pausedBy: lead`). */
+export const pausedByLead = (control: { pauseReason?: PauseReason; pausedBy?: 'lead' }) =>
+  control.pauseReason === 'operator' && control.pausedBy === 'lead';
+
 export const controlStateSchema = z.strictObject({
   paused: z.boolean(),
   pauseReason: z.enum(pauseReasons).optional(),
+  /**
+   * Кто поставил паузу `operator` (alpha.72, P9-3): `lead` — ведущий
+   * (перепланирование), снимает он же; нет поля — человек. Для других
+   * причин паузы поле не читается.
+   */
+  pausedBy: z.literal('lead').optional(),
   pausedAt: isoTimeSchema.optional(),
   pauseOperation: z.string().optional(),
   pauseFailures: z.array(failureKindSchema).optional(),

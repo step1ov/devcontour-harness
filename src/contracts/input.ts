@@ -8,7 +8,13 @@ import {
 } from './primitives.ts';
 import { sourceRefSchema } from './work.ts';
 import { digestOf } from './digest.ts';
-import { inputImpacts, leadAnswerBasis, leadAnswerBases } from './input-state.ts';
+import {
+  inputImpacts,
+  leadAnswerBasis,
+  leadAnswerBases,
+  leadTechnicalAreas,
+  type LeadAnswersRule,
+} from './input-state.ts';
 
 export {
   impactOf,
@@ -18,6 +24,10 @@ export {
   leadAnswerBases,
   leadAnswersRule,
   type LeadAnswerBasis,
+  type LeadAnswersRule,
+  leadTechnicalAreas,
+  type LeadTechnicalArea,
+  LIGHT_LEAD_TECHNICAL_AREAS,
 } from './input-state.ts';
 
 /**
@@ -42,6 +52,14 @@ export {
 export const criticalAreas = ['contract', 'acceptance', 'product', 'api', 'migration'] as const;
 export const criticalAreaSchema = z.enum(criticalAreas);
 export type CriticalArea = (typeof criticalAreas)[number];
+/**
+ * Области `affects` (alpha.72): критические и `internal` — развилка внутри
+ * кода, которая не меняет ни утверждённого договора, ни публичного API, ни
+ * модели данных, ни безопасности. `internal` сама минимума не ставит.
+ */
+export const inputAreas = [...criticalAreas, 'internal'] as const;
+export const inputAreaSchema = z.enum(inputAreas);
+export type InputArea = (typeof inputAreas)[number];
 
 /** Пределы вопроса и ответа — как у вопросов подготовки DevContour. */
 export const INPUT_LIMITS = {
@@ -98,7 +116,7 @@ export const inputQuestionSchema = z
     recommended: z.string().max(40).nullable(),
     severity: severitySchema,
     rationale: z.string().max(INPUT_LIMITS.rationale),
-    affects: z.array(criticalAreaSchema).max(criticalAreas.length),
+    affects: z.array(inputAreaSchema).max(inputAreas.length),
     /**
      * Влияние выбора (`inputImpacts`); нет поля или `null` — `user-visible`.
      * Controller хранит только `technical` и `user-visible`, `null` снимает.
@@ -140,7 +158,7 @@ export const assumptionSchema = z.strictObject({
   chosen: z.string().min(1).max(300),
   rationale: z.string().max(INPUT_LIMITS.rationale),
   severity: severitySchema,
-  affects: z.array(criticalAreaSchema).max(criticalAreas.length),
+  affects: z.array(inputAreaSchema).max(inputAreas.length),
 });
 export type Assumption = z.infer<typeof assumptionSchema>;
 
@@ -195,7 +213,28 @@ export const inputPolicySchema = z.strictObject({
        * путь) — только человеку при любом `maxSeverity`; `maxSeverity` тогда
        * дополнительно ограничивает серьёзность технических вопросов.
        */
-      z.strictObject({ maxSeverity: severitySchema.optional(), technical: z.literal(true) }),
+      z.strictObject({
+        maxSeverity: severitySchema.optional(),
+        technical: z.literal(true),
+        /**
+         * Области (alpha.72), в которых технический вопрос остаётся у
+         * ведущего и с минимумом `declared`: `internal` (развилка внутри
+         * кода), а также `contract`, `api`, `migration`, если владелец
+         * назвал их явно. Нет поля — в облегчённом режиме `internal`
+         * (`LIGHT_LEAD_TECHNICAL_AREAS`), в строгом — ни одной (прежнее
+         * правило: только без минимумов); `[]` — прежнее правило и в
+         * облегчённом режиме.
+         */
+        technicalAreas: z
+          .array(z.enum(leadTechnicalAreas))
+          .max(leadTechnicalAreas.length)
+          .optional(),
+      }),
+      /**
+       * Явный отказ (alpha.72): блокирующие вопросы — только человеку и в
+       * облегчённом режиме, где без поля технические решает ведущий.
+       */
+      z.strictObject({ technical: z.literal(false) }),
     ])
     .optional(),
 });
@@ -232,7 +271,7 @@ export const leadMayAnswer = (
       /** Нет `question` или `floors` (вызов alpha.54) — технический путь закрыт. */
       question?: Pick<InputQuestion, 'impact'>;
     },
-  policy: Pick<InputPolicy, 'leadAnswers'>,
+  policy: { leadAnswers?: LeadAnswersRule | undefined },
 ) => leadAnswerBasis(r, policy) !== null;
 
 /** Кто ответил или закрыл запрос: оператор, ведущий агент или хост от их имени. */

@@ -10,6 +10,7 @@ import {
   type WorkGraph,
 } from '../../contracts/index.ts';
 import type { Harness } from '../../control/harness.ts';
+import { RELEASE_DOCS_UNMARKED } from '../../control/release-docs.ts';
 import type { RunnerHooks } from '../../engine/runner.ts';
 import { redactor, type Redactor } from '../../environment/redaction.ts';
 import { withinPaths } from '../../validate.ts';
@@ -324,6 +325,14 @@ export class Connector {
     const bindings = criteriaBindingIssues(config, policy, known);
     problems.push(...bindings.filter((i) => i.level === 'error').map(bindingIssueText));
     const bindingWarnings = bindings.filter((i) => i.level === 'warning').map(bindingIssueText);
+    // Шаг документации (alpha.72, P9-6): `release.docs: required`, а ни одна
+    // задача сопоставления не помечена docs — выпуск остановится на шаге.
+    if (
+      policy?.release?.docs === 'required' &&
+      config.tasks.length &&
+      !config.tasks.some((t) => t.labels?.includes('docs'))
+    )
+      bindingWarnings.push(RELEASE_DOCS_UNMARKED);
     const unprotected = policy && baseDir && this.baselineIssue(policy, baseDir);
     if (unprotected) problems.push(unprotected);
     let identity;

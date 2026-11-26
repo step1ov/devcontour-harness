@@ -209,11 +209,18 @@ your move now, not after the answer. Stop the session only when nothing is
 ready.
 
 **Technical question decided by you (`INPUT_REQUIRED`, `actor: lead`,
-`answer-input`).** Only when the human opted in with
-`inputPolicy.leadAnswers.technical: true` (`init --lead-technical-answers`;
-`doctor` and `init --plan` print the rule in `questions.line`) and the writer
-marked the question `impact: technical` with no floor (critical area or
-critical path). `explain` and `status` then name you (`leadMay: technical`).
+`answer-input`).** In light mode (the default) this is on unless the policy
+says `inputPolicy.leadAnswers.technical: false`; in strict mode only when the
+human opted in with `inputPolicy.leadAnswers.technical: true`
+(`init --lead-technical-answers`). `doctor` and `init --plan` print the rule
+in `questions.line`. It applies when the writer marked the question
+`impact: technical` and it has no critical-path floor; a question with the
+declared floor (severity 10 or a named area) is yours only when it names
+areas and every one is in `technicalAreas` (light default: `internal`, a fork
+inside the code that changes no approved contract, public API, data model or
+security). Questions about `contract` or `api` go to the owner unless the
+owner listed them; a severity-10 question with no area goes to the owner. `explain` and
+`status` then name you (`leadMay: technical`).
 Read the options, choose, and record the choice with the reason:
 `$H input-answer --state <state> --request <id> --text "<your decision>"
 [--option <id>] --actor lead --reason "<why this option>" --request-version <n>`
