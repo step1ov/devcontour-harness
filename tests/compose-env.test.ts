@@ -20,6 +20,7 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  statSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -119,6 +120,8 @@ test('env-up: остатки сняты, стек с --wait, порты в фа�
   const written = JSON.parse(readFileSync(file, 'utf8')) as Record<string, string>;
   assert.equal(written.HX_DB_5432, '21543');
   assert.equal(written.HARNESS_ATTEMPT_ID, 'r1', 'прежние переменные попытки сохранены');
+  // Файл с тестовыми секретами попытки — только владельцу (alpha.72, ревью M1).
+  assert.equal(statSync(file).mode & 0o777, 0o600);
   assert.deepEqual(servicePortsFromFile(readFileSync(file, 'utf8')), { HX_DB_5432: '21543' });
   assert.deepEqual(
     (

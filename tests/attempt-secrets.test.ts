@@ -134,6 +134,9 @@ fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,
       .DB_PASSWORD!;
     assert.match(value, /^[0-9a-f]{48}$/);
     // Receipt окружения хранит секрет для очистки в новом процессе.
+    // Receipts — только владельцу (ревью M2).
+    assert.ok(files('environment.json').length > 0, 'receipt есть');
+    for (const r of files('environment.json')) assert.equal(statSync(r).mode & 0o777, 0o600, r);
     for (const r of files('environment.json'))
       assert.equal(
         (JSON.parse(readFileSync(r, 'utf8')) as { attemptEnv?: Record<string, string> }).attemptEnv

@@ -493,7 +493,7 @@ export const cliCommands = {
         value: 'text',
         required: false,
         description:
-          'Кто ставит паузу (alpha.72): lead — ведущий (перепланирование; status, explain и представление называют его тем, кто её снимет); operator — человек; без флага — lead в открытой сессии ведущего, иначе operator',
+          'Кто ставит паузу (alpha.72): lead — ведущий (перепланирование; status, explain и представление называют его тем, кто её снимет); operator — человек; без флага — operator (ведущий называет себя явно: --by lead)',
       },
     ],
     refusals: ['NOT_FOUND', 'INVALID_INPUT'],

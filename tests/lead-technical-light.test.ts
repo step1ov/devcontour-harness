@@ -18,7 +18,7 @@ import {
   type InputOutcome,
   type InputQuestion,
 } from '../src/contracts/index.ts';
-import { evaluateInput } from '../src/engine/input-policy.ts';
+import { evaluateInput, inputPolicyText } from '../src/engine/input-policy.ts';
 import { decisionSettings } from '../src/projections/decisions.ts';
 import { statusOf } from '../src/control/status.ts';
 import { stopInputsOf } from '../src/explain/state.ts';
@@ -86,13 +86,13 @@ const strict = (inputPolicy?: Record<string, unknown>) =>
 test('alpha.72: облегчённый режим — умолчание ответов ведущего; явное правило и строгий режим главнее', () => {
   assert.deepEqual(inputPolicyOf(light()).leadAnswers, {
     technical: true,
-    technicalAreas: ['contract', 'api'],
+    technicalAreas: ['internal'],
   });
   assert.equal(leadAnswersSourceOf(light()), 'light-default');
   // Явное `technical: true` без областей получает области облегчённого режима.
   assert.deepEqual(
     inputPolicyOf(light({ leadAnswers: { technical: true, maxSeverity: 9 } })).leadAnswers,
-    { technical: true, maxSeverity: 9, technicalAreas: ['contract', 'api'] },
+    { technical: true, maxSeverity: 9, technicalAreas: ['internal'] },
   );
   assert.deepEqual(
     inputPolicyOf(light({ leadAnswers: { technical: true, technicalAreas: [] } })).leadAnswers,
@@ -109,7 +109,7 @@ test('alpha.72: облегчённый режим — умолчание отв�
     technical: true,
   });
   // Правило словами называет области.
-  assert.match(leadAnswersRule(inputPolicyOf(light())).ru, /внутреннем договоре/);
+  assert.match(leadAnswersRule(inputPolicyOf(light())).ru, /внутреннем устройстве кода/);
   assert.match(leadAnswersRule(inputPolicyOf(strict())).ru, /отвечает человек/);
   // Настройки решений: значение действующее, источник — умолчание.
   const item = (p: ReturnType<typeof light>) =>
@@ -120,18 +120,31 @@ test('alpha.72: облегчённый режим — умолчание отв�
   assert.deepEqual([off.value, off.source], [false, 'policy']);
 });
 
-test('alpha.72: вопросы пилота 9 — у ведущего в облегчённом режиме, у человека в строгом', () => {
-  // Секреты до env-up: severity 10, contract → минимум declared.
+test('alpha.72: вопросы пилота 9 — договор и API у владельца, внутренняя развилка у ведущего', () => {
+  // Секреты до env-up в пилоте: severity 10, contract → минимум declared, владелец (ревью H1).
   assert.deepEqual(rated(secretsQuestion()).floors, ['declared']);
-  assert.equal(basis(secretsQuestion(), light()), 'technical');
-  // Сериализация File[] в SDK: contract и api.
-  const sdk = secretsQuestion({ affects: ['contract', 'api'] });
-  assert.equal(basis(sdk, light()), 'technical');
-  // Самооценка 10 без области — тоже.
-  assert.equal(basis(secretsQuestion({ affects: [] }), light()), 'technical');
+  assert.equal(basis(secretsQuestion(), light()), null);
+  // Сериализация File[] в SDK: contract и api — тоже владелец.
+  assert.equal(basis(secretsQuestion({ affects: ['contract', 'api'] }), light()), null);
+  // Та же развилка, названная внутренней, — ведущему.
+  const internal = secretsQuestion({ affects: ['internal'] });
+  assert.deepEqual(rated(internal).floors, ['declared']);
+  assert.equal(basis(internal, light()), 'technical');
+  // `internal` сама минимума не ставит: severity 8 — без минимумов.
+  assert.deepEqual(rated(secretsQuestion({ severity: 8, affects: ['internal'] })).floors, []);
+  // internal вместе с критической областью — владелец.
+  assert.equal(basis(secretsQuestion({ affects: ['internal', 'contract'] }), light()), null);
+  // Самооценка 10 без области — владелец (ревью M3).
+  assert.equal(basis(secretsQuestion({ affects: [] }), light()), null);
+  // Владелец назвал договор и API явно — ведущему.
+  const listed = light({
+    leadAnswers: { technical: true, technicalAreas: ['internal', 'contract', 'api'] },
+  });
+  assert.equal(basis(secretsQuestion(), listed), 'technical');
+  assert.equal(basis(secretsQuestion({ affects: ['contract', 'api'] }), listed), 'technical');
   // Строгий режим — прежнее правило, даже с явным согласием.
-  assert.equal(basis(secretsQuestion(), strict()), null);
-  assert.equal(basis(secretsQuestion(), strict({ leadAnswers: { technical: true } })), null);
+  assert.equal(basis(internal, strict()), null);
+  assert.equal(basis(internal, strict({ leadAnswers: { technical: true } })), null);
   assert.equal(
     basis(
       secretsQuestion({ severity: 8, affects: [] }),
@@ -140,9 +153,9 @@ test('alpha.72: вопросы пилота 9 — у ведущего в обл�
     'technical',
   );
   // Явный отказ и прежнее правило без областей в облегчённом режиме.
-  assert.equal(basis(secretsQuestion(), light({ leadAnswers: { technical: false } })), null);
+  assert.equal(basis(internal, light({ leadAnswers: { technical: false } })), null);
   assert.equal(
-    basis(secretsQuestion(), light({ leadAnswers: { technical: true, technicalAreas: [] } })),
+    basis(internal, light({ leadAnswers: { technical: true, technicalAreas: [] } })),
     null,
   );
   // Миграция — только если её назвали в областях.
@@ -155,6 +168,10 @@ test('alpha.72: вопросы пилота 9 — у ведущего в обл�
     ),
     'technical',
   );
+  // Запрос writer объясняет область internal рядом с критическими.
+  const text = inputPolicyText({ threshold: 7, criticalPaths: [] });
+  assert.match(text, /name it `internal` in `affects`/);
+  assert.match(text, /changes no approved contract, public API, data model or security/);
 });
 
 test('alpha.72: продукт, приёмка, видимое пользователю и критический путь — человеку и в облегчённом режиме', () => {
@@ -167,10 +184,16 @@ test('alpha.72: продукт, приёмка, видимое пользова�
   // Попытка изменила критический путь политики: минимум critical-path.
   const hit = rated(secretsQuestion({ affects: [] }), ['db/schema.sql'], ['db']);
   assert.deepEqual(hit.floors.sort(), ['critical-path', 'declared']);
-  assert.equal(basis(secretsQuestion({ affects: [] }), light(), ['db/schema.sql'], ['db']), null);
+  assert.equal(
+    basis(secretsQuestion({ affects: ['internal'] }), light(), ['db/schema.sql'], ['db']),
+    null,
+  );
   // Серьёзность выше явного maxSeverity — человеку.
   assert.equal(
-    basis(secretsQuestion(), light({ leadAnswers: { technical: true, maxSeverity: 9 } })),
+    basis(
+      secretsQuestion({ affects: ['internal'] }),
+      light({ leadAnswers: { technical: true, maxSeverity: 9 } }),
+    ),
     null,
   );
 });
@@ -206,7 +229,7 @@ const refusal = (fn: () => unknown) => {
 };
 
 test('alpha.72: input-answer --actor lead — принят в облегчённом режиме с причиной; status и explain называют ведущего', () => {
-  const env = stopped(secretsQuestion(), light());
+  const env = stopped(secretsQuestion({ affects: ['internal'] }), light());
   const source = {
     engine: env.engine,
     policy: env.engine.policy,
@@ -239,7 +262,7 @@ test('alpha.72: input-answer --actor lead — принят в облегчённ
   env.store.close();
 
   // Строгий режим — прежний отказ с объяснением.
-  const old = stopped(secretsQuestion(), strict());
+  const old = stopped(secretsQuestion({ affects: ['internal'] }), strict());
   const e = refusal(() =>
     old.engine.answerInput(old.request.id, { text: 'x', actor: { kind: 'lead' }, reason: 'r' }, 1),
   );
@@ -255,7 +278,20 @@ test('alpha.72: input-answer --actor lead — принят в облегчённ
     ),
   );
   assert.equal(p.code, 'OPERATOR_ANSWER_REQUIRED');
-  assert.match(p.message, /кроме contract, api/);
+  assert.match(p.message, /кроме internal/);
+  // Вопрос пилота о договоре — тоже владельцу.
+  const contract = stopped(secretsQuestion(), light());
+  assert.equal(
+    refusal(() =>
+      contract.engine.answerInput(
+        contract.request.id,
+        { text: 'x', actor: { kind: 'lead' }, reason: 'r' },
+        1,
+      ),
+    ).code,
+    'OPERATOR_ANSWER_REQUIRED',
+  );
+  contract.store.close();
   product.store.close();
 });
 

@@ -24,17 +24,18 @@ const blockingQuestion = (r: Pick<InputRequest, 'kind' | 'blocking'>) =>
 /**
  * Области, в которых технический вопрос (`impact: technical`) ведущий может
  * решить и при минимуме `declared` (`leadAnswers.technicalAreas`, alpha.72):
- * внутренний договор между частями кода, программный интерфейс и миграция
- * данных. Вопрос о продукте и приёмке — всегда человеку.
+ * `internal` — развилка внутри кода без изменения утверждённого договора,
+ * публичного API, модели данных и безопасности; `contract`, `api`,
+ * `migration` — только если владелец назвал их явно. Вопрос о продукте и
+ * приёмке — всегда человеку.
  */
-export const leadTechnicalAreas = ['contract', 'api', 'migration'] as const;
+export const leadTechnicalAreas = ['internal', 'contract', 'api', 'migration'] as const;
 export type LeadTechnicalArea = (typeof leadTechnicalAreas)[number];
 /**
- * Умолчание облегчённого режима (P9-1): технический вопрос о внутреннем
- * договоре или программном интерфейсе решает ведущий — варианты не меняют
- * того, что видит и получает пользователь.
+ * Умолчание облегчённого режима (P9-1, ревью H1): внутренние технические
+ * вопросы решает ведущий; договор и публичный API остаются у владельца.
  */
-export const LIGHT_LEAD_TECHNICAL_AREAS: readonly LeadTechnicalArea[] = ['contract', 'api'];
+export const LIGHT_LEAD_TECHNICAL_AREAS: readonly LeadTechnicalArea[] = ['internal'];
 
 /** Разрешение ответов ведущего в объёме, который читает правило (без zod). */
 export interface LeadAnswersRule {
@@ -51,12 +52,12 @@ export interface LeadAnswersRule {
  * правило alpha.54: действующая серьёзность не выше `maxSeverity`; `null` —
  * только человек.
  *
- * С `technicalAreas` (alpha.72; умолчание облегчённого режима — договор и
- * программный интерфейс) технический вопрос с минимумом `declared` тоже у
- * ведущего, если каждая названная область — из этого списка (самооценка 10
- * без области — тоже): исполнитель честно ставит 10 вопросу о внутреннем
- * договоре, но выбор остаётся техническим. Минимум `critical-path` (попытка
- * изменила критический путь политики) — всегда человеку.
+ * С `technicalAreas` (alpha.72; умолчание облегчённого режима — `internal`)
+ * технический вопрос с минимумом `declared` тоже у ведущего, если он
+ * называет области и каждая — из этого списка: исполнитель честно ставит 10
+ * внутренней развилке, но выбор остаётся техническим. Самооценка 10 без
+ * названной области (ревью M3) и минимум `critical-path` (попытка изменила
+ * критический путь политики) — всегда человеку.
  */
 export function leadAnswerBasis(
   r: Pick<InputRequest, 'kind' | 'blocking' | 'effectiveSeverity'> &
@@ -88,7 +89,7 @@ function technicalFloorsAllowed(
   areas: readonly LeadTechnicalArea[] | undefined,
 ) {
   if (!floors.length) return true;
-  if (!areas?.length || affects === undefined) return false;
+  if (!areas?.length || !affects?.length) return false;
   return (
     floors.every((f) => f === 'declared') &&
     affects.every((a) => (areas as readonly string[]).includes(a))
@@ -96,11 +97,13 @@ function technicalFloorsAllowed(
 }
 
 const areaRu: Record<LeadTechnicalArea, string> = {
+  internal: 'внутреннем устройстве кода',
   contract: 'внутреннем договоре частей кода',
   api: 'программном интерфейсе',
   migration: 'миграции данных',
 };
 const areaEn: Record<LeadTechnicalArea, string> = {
+  internal: 'the internals of the code',
   contract: 'the internal contract between parts of the code',
   api: 'the programming interface',
   migration: 'data migration',

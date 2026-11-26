@@ -1276,14 +1276,18 @@ JSON Schema — `anyOf`). С `technical: true` вопрос, меняющий р
 пользователя, и вопрос с минимумом (`declared`, `critical-path`) остаются
 человеку при любом `maxSeverity`; `maxSeverity` тогда лишь дополнительно
 ограничивает серьёзность технических вопросов. Без `technical` — правило
-`maxSeverity` alpha.54. С alpha.72 `technical: true` принимает
-`technicalAreas` (`contract`, `api`, `migration`): технический вопрос с
-минимумом `declared` тоже у ведущего, если каждая названная область — из
-списка (самооценка 10 без области — тоже); минимум `critical-path`, области
+`maxSeverity` alpha.54. С alpha.72 область `affects` может быть и
+`internal` — развилка внутри кода, которая не меняет ни утверждённого
+договора, ни публичного API, ни модели данных, ни безопасности; сама она
+минимума не ставит. `technical: true` принимает `technicalAreas`
+(`internal`, `contract`, `api`, `migration`): технический вопрос с минимумом
+`declared` тоже у ведущего, если он называет области и каждая — из списка;
+самооценка 10 без названной области, минимум `critical-path`, области
 `product` и `acceptance` — всегда человеку. В облегчённом режиме без поля
-`leadAnswers` действует `{technical: true, technicalAreas: [contract, api]}`
-(`inputPolicyOf`), и `technical: true` без `technicalAreas` получает те же
-области; `{technical: false}` — явный отказ (блокирующие вопросы — человеку),
+`leadAnswers` действует `{technical: true, technicalAreas: [internal]}`
+(`inputPolicyOf`), и `technical: true` без `technicalAreas` получает ту же
+область; `contract` и `api` остаются у владельца, пока он не назовёт их
+явно; `{technical: false}` — явный отказ (блокирующие вопросы — человеку),
 `technicalAreas: []` — прежнее правило без минимумов. Строгий режим не
 меняется: без поля ответы ведущего не разрешены. Согласие действует по текущей политике
 процесса и в попытку и основание вопроса не закрепляется. `doctor`

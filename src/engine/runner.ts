@@ -1826,7 +1826,7 @@ export class Runner {
       // файл, а не переменные. У каждого репозитория попытки (её и
       // проверяемых потребителей) — свой файл. Секретов политики в нём нет;
       // тестовые секреты попытки (alpha.72, `attemptEnv.secrets`) — свои
-      // случайные значения этой попытки, файл тогда только для владельца.
+      // случайные значения этой попытки, файл всегда только для владельца (0600).
       if (harnessModeOf(this.policy) === 'light') {
         await mkdir(artifacts, { recursive: true });
         const secretsByRepo = new Map<string, Record<string, string>>();
@@ -1854,7 +1854,7 @@ export class Runner {
               null,
               2,
             ) + '\n',
-            Object.keys(secrets).length ? { mode: 0o600 } : undefined,
+            { mode: 0o600 },
           );
         }
         if (secretsByRepo.size) this.attemptSecrets.set(attempt.id, secretsByRepo);

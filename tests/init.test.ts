@@ -868,7 +868,7 @@ test('alpha.55: --lead-technical-answers — правило в новой пол
   initDataSchema.parse(plain);
   assert.equal(plain.questions!.leadTechnical, true);
   assert.equal(plain.questions!.source, 'default');
-  assert.match(plain.questions!.line, /Технические вопросы .*внутреннем договоре/);
+  assert.match(plain.questions!.line, /Технические вопросы .*внутреннем устройстве кода/);
   assert.doesNotMatch(initText(plain), /init --lead-technical-answers/);
   // Строгий режим — прежнее правило: человек отвечает на все вопросы, init подсказывает флаг.
   const strict = await initProject(p.opts({ plan: true, harnessMode: 'strict' }));

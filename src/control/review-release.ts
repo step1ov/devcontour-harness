@@ -26,6 +26,7 @@ import {
   digestOf,
 } from '../contracts/index.ts';
 import { requestsOf } from '../engine/input-requests.ts';
+import { recordDocsWorks } from './lead.ts';
 import { checkGates, commitOf } from './gates-check.ts';
 import { fullGatesProblem, recordGatesRun } from './release-gates.ts';
 import {
@@ -295,6 +296,9 @@ export async function reviewRelease(
       'NOT_READY',
       `review-release: ${docsLine}; release.docs: required — сначала ${RELEASE_DOCS_HINT}`,
     );
+  // Явно названная работа документации закрыла шаг — запись журнала ведущего.
+  if (input.docsWorks?.length && docs.declared?.length)
+    recordDocsWorks(ctx.engine, docs.declared, 'review-release');
   // Полный прогон gates на цели выпуска (alpha.71, ревью B): нет годного —
   // review-release исполняет его сам; не прошёл — отказ до ревью.
   const path = ctx.repoPath(repo.path);

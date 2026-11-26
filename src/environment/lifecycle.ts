@@ -1,4 +1,4 @@
-import { mkdir, writeFile, readFile, realpath } from 'node:fs/promises';
+import { chmod, mkdir, writeFile, readFile, realpath } from 'node:fs/promises';
 import {
   COMPOSE_READINESS_FILE,
   SERVICE_PORT_KEYS,
@@ -68,6 +68,16 @@ export class CleanupFailure extends Error {
 }
 
 /** Жив ли процесс (сигнал 0 не доставляется, только проверяется). */
+/**
+ * Записать файл только для владельца (0600, ревью M1/M2 alpha.72): receipt
+ * окружения и файл окружения попытки несут тестовые секреты попытки.
+ * `mode` действует только при создании — у прежнего файла права правятся.
+ */
+export async function writePrivate(path: string, data: string) {
+  await writeFile(path, data, { mode: 0o600 });
+  await chmod(path, 0o600);
+}
+
 export function processAlive(pid: number) {
   try {
     process.kill(pid, 0);
@@ -476,7 +486,7 @@ async function clearServicePorts(env: NodeJS.ProcessEnv) {
     const kept = Object.fromEntries(
       Object.entries(data).filter(([k]) => !keys.includes(k) && k !== SERVICE_PORT_KEYS),
     );
-    await writeFile(file, JSON.stringify(kept, null, 2) + '\n');
+    await writePrivate(file, JSON.stringify(kept, null, 2) + '\n');
   } catch {
     /* файл не JSON — его пишет не harness: не трогаем */
   }
@@ -569,7 +579,7 @@ interface ReceiptFile {
   path: string;
   data: Record<string, unknown>;
 }
-const saveReceipt = (r: ReceiptFile) => writeFile(r.path, JSON.stringify(r.data, null, 2));
+const saveReceipt = (r: ReceiptFile) => writePrivate(r.path, JSON.stringify(r.data, null, 2));
 
 /**
  * Teardown: в дереве фазы или — у работы инфраструктуры (`trusted`) — в
@@ -716,7 +726,7 @@ async function phaseEnvironment<T>(
       : undefined,
   };
   const receiptFile: ReceiptFile = { path: receiptPath, data: receipt };
-  await writeFile(receiptPath, JSON.stringify(receipt, null, 2));
+  await writePrivate(receiptPath, JSON.stringify(receipt, null, 2));
   // Упавшие шаги фазы — в receipt (0.1.0-alpha.68): какой шаг, код или
   // сигнал, предел и хвост вывода с маской; teardown — отдельно.
   const failedSteps: StepOutcome[] = [];
@@ -775,7 +785,7 @@ async function phaseEnvironment<T>(
   const cleanupFailures = failedSteps.filter((s) => s.stage === 'teardown');
   if (stepFailure) receiptFile.data.failure = stepReceipt(stepFailure);
   if (cleanupFailures.length) receiptFile.data.cleanupFailure = cleanupFailures.map(stepReceipt);
-  await writeFile(receiptPath, JSON.stringify(receiptFile.data, null, 2));
+  await writePrivate(receiptPath, JSON.stringify(receiptFile.data, null, 2));
   if (failure) throw failure;
   return result as T;
 }
@@ -883,7 +893,7 @@ export async function cleanupEnvironment(
         delete next.trustedLeftovers;
         delete next.trustedLeftover;
       }
-      await writeFile(receiptPath, JSON.stringify(next, null, 2));
+      await writePrivate(receiptPath, JSON.stringify(next, null, 2));
     }
     return { status: 'already-cleaned' as const };
   }
@@ -933,6 +943,6 @@ export async function cleanupEnvironment(
   const dir = join(receiptPath, '..');
   const file: ReceiptFile = { path: receiptPath, data: receipt };
   await teardownIn(receipt.trusted, lifecycle, cwd, dir, execution, file);
-  await writeFile(receiptPath, JSON.stringify({ ...file.data, status: 'cleaned' }, null, 2));
+  await writePrivate(receiptPath, JSON.stringify({ ...file.data, status: 'cleaned' }, null, 2));
   return { status: 'cleaned' as const };
 }

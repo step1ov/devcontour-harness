@@ -7,6 +7,7 @@
 
 import {
   checkDocsWorks,
+  docsWorksNote,
   RELEASE_DOCS_HINT,
   releaseDocsLine,
   releaseDocsOpen,
@@ -153,6 +154,28 @@ export function leadNote(engine: Engine, options: { text: string; workId?: strin
       },
     };
   });
+}
+
+/**
+ * Записать в журнал ведущего, что работа документации названа явно
+ * (`review-release --docs-work`, ревью LOW alpha.72).
+ */
+export function recordDocsWorks(engine: Engine, ids: readonly string[], command: string) {
+  const note = docsWorksNote(ids, command);
+  engine.recordLead((log, now) => ({
+    log: append(
+      log,
+      {
+        at: iso(now),
+        kind: 'command',
+        action: 'lead.docs-work',
+        plain: note.ru.slice(0, LEAD_LIMITS.note),
+        plainEn: note.en.slice(0, LEAD_LIMITS.note),
+      },
+      now,
+    ),
+    result: undefined,
+  }));
 }
 
 /** Код записи `lead end --waiting owner` (alpha.72): ведущий ждёт решения владельца. */
@@ -327,7 +350,21 @@ export function releaseDone(
       plain: `ведущий закончил выпуск: ${short}`.slice(0, LEAD_LIMITS.note),
       plainEn: `the lead finished the release: ${short}`.slice(0, LEAD_LIMITS.note),
     };
-    const next = append({ ...log, release }, entry, now);
+    // Явно названная работа документации (ревью LOW) — тоже запись журнала.
+    const declared = options.docsWorks?.length
+      ? ((n) => ({
+          at: iso(now),
+          kind: 'command' as const,
+          action: 'lead.docs-work',
+          plain: n.ru.slice(0, LEAD_LIMITS.note),
+          plainEn: n.en.slice(0, LEAD_LIMITS.note),
+        }))(docsWorksNote(options.docsWorks, 'release done'))
+      : undefined;
+    const next = append(
+      declared ? append({ ...log, release }, declared, now) : { ...log, release },
+      entry,
+      now,
+    );
     return {
       log: next,
       result: {

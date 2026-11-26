@@ -4,12 +4,7 @@ import {
   REVIEW_ITEMS_LIMIT,
   findingStatuses,
 } from '../contracts/review.ts';
-import {
-  INPUT_LIMITS,
-  INPUT_SEVERITY_MAX,
-  criticalAreas,
-  inputImpacts,
-} from '../contracts/input.ts';
+import { INPUT_LIMITS, INPUT_SEVERITY_MAX, inputAreas, inputImpacts } from '../contracts/input.ts';
 import { PROPOSAL_LIMITS } from '../contracts/proposals.ts';
 
 /**
@@ -35,8 +30,8 @@ const discovery = {
 
 const areas = {
   type: 'array',
-  maxItems: criticalAreas.length,
-  items: { type: 'string', enum: [...criticalAreas] },
+  maxItems: inputAreas.length,
+  items: { type: 'string', enum: [...inputAreas] },
 };
 const severity = { type: 'integer', minimum: 1, maximum: INPUT_SEVERITY_MAX };
 

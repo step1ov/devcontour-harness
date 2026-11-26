@@ -19,11 +19,11 @@ connector — is invisible unless you say it:
   decision you pass on; without `--by` it is refused (`INVALID_INPUT`).
   `input-answer` without `--actor` is always the operator's, also inside your
   session: an owner's answer you pass on stays the owner's. Your own
-  technical answer needs `--actor lead --reason "…"`. `pause` inside your
-  session is yours (`--by lead`, the default there): `status` and `view` show
-  «поставил ведущий» and name you, not the human, as the one who resumes —
-  `$H resume` it yourself when the re-plan is done; a human's pause you pass
-  on is `--by operator`.
+  technical answer needs `--actor lead --reason "…"`. To pause the queue
+  yourself (for a re-plan) run `$H pause --state <state> --by lead`: `status`
+  and `view` then show «поставил ведущий» and name you, not the human, as the
+  one who resumes — `$H resume` it yourself when the re-plan is done. Without
+  `--by lead` the pause is recorded as the operator's.
 - **Declare the whole release first** — before the first graph, record the
   release outline: stages × components with a rough size and who does them,
   not only the next graph:

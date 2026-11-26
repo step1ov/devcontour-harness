@@ -54,16 +54,13 @@ const labelled = (w: WorkState) => w.order.labels?.includes(DOCS_LABEL) === true
  * документации. Работа документации стоит «после корней», когда она
  * (транзитивно) зависит от каждого корня; `done` — такая работа принята.
  */
-export function releaseDocsState(
+/**
+ * Работы текущего выпуска (ревью 1): неотменённые, без принятых до последнего
+ * `release done` — их связи корнями нового выпуска не считаются.
+ */
+function currentReleaseWorks(
   view: Pick<ExecutionView, 'works'> & Partial<Pick<ExecutionView, 'attempts' | 'local'>>,
-  policy: Pick<ExecutionPolicy, 'release'>,
-  options: ReleaseDocsOptions = {},
-): ReleaseDocsState {
-  const mode = releaseDocsMode(policy);
-  const named = new Set(options.docsWorks ?? []);
-  const isDocs = (w: WorkState) => labelled(w) || named.has(w.id);
-  // Текущий выпуск (ревью 1): после последнего `release done` — без работ,
-  // принятых до него; их связи корнями нового выпуска не считаются.
+): WorkState[] {
   const doneAt = view.local?.('lead', WORKSPACE_OWNER, 'log')?.release?.doneAt;
   const acceptedAt = new Map<string, string>();
   if (doneAt && view.attempts)
@@ -74,7 +71,18 @@ export function releaseDocsState(
       }
   const earlier = (w: WorkState) =>
     !!doneAt && w.status === 'done' && (acceptedAt.get(w.id) ?? '') <= doneAt;
-  const works = view.works().filter((w) => w.status !== 'cancelled' && !earlier(w));
+  return view.works().filter((w) => w.status !== 'cancelled' && !earlier(w));
+}
+
+export function releaseDocsState(
+  view: Pick<ExecutionView, 'works'> & Partial<Pick<ExecutionView, 'attempts' | 'local'>>,
+  policy: Pick<ExecutionPolicy, 'release'>,
+  options: ReleaseDocsOptions = {},
+): ReleaseDocsState {
+  const mode = releaseDocsMode(policy);
+  const named = new Set(options.docsWorks ?? []);
+  const isDocs = (w: WorkState) => labelled(w) || named.has(w.id);
+  const works = currentReleaseWorks(view);
   const product = works.filter((w) => !isDocs(w));
   const docs = works.filter(isDocs);
   const dependedOn = new Set(product.flatMap((w) => w.order.dependsOn));
@@ -122,22 +130,41 @@ export function releaseDocsState(
  * оставлять шаг открытым или закрывать его чужой работой.
  */
 export function checkDocsWorks(
-  view: Pick<ExecutionView, 'works'>,
+  view: Pick<ExecutionView, 'works'> & Partial<Pick<ExecutionView, 'attempts' | 'local'>>,
   ids: readonly string[] | undefined,
   command: string,
 ) {
   if (!ids?.length) return;
   const works = new Map(view.works().map((w) => [w.id, w]));
+  const current = new Set(currentReleaseWorks(view).map((w) => w.id));
   for (const id of ids) {
     const w = works.get(id);
-    if (!w || w.status === 'cancelled')
+    // Работа прежнего выпуска (принята до последнего release done) шаг
+    // нынешнего не закрывает (ревью LOW).
+    const why = !w
+      ? (['not-found', 'такой работы в состоянии нет'] as const)
+      : w.status === 'cancelled'
+        ? (['cancelled', 'работа отменена'] as const)
+        : !current.has(id)
+          ? ([
+              'earlier-release',
+              'работа принята в прежнем выпуске (до последнего release done) — она не документация нынешнего',
+            ] as const)
+          : undefined;
+    if (why)
       throw new HarnessError(
         'INVALID_INPUT',
-        `${command} --docs-work ${id}: ${w ? 'работа отменена' : 'такой работы в состоянии нет'} — назовите ID принятой работы документации (harness status)`,
-        [{ path: ['--docs-work'], message: w ? 'cancelled' : 'not-found' }],
+        `${command} --docs-work ${id}: ${why[1]} — назовите ID работы документации текущего выпуска (harness status)`,
+        [{ path: ['--docs-work'], message: why[0] }],
       );
   }
 }
+
+/** Строка журнала ведущего о явно названных работах документации (ревью LOW). */
+export const docsWorksNote = (ids: readonly string[], command: string) => ({
+  ru: `работа документации выпуска названа явно (${command} --docs-work): ${ids.join(', ')}`,
+  en: `release docs work named explicitly (${command} --docs-work): ${ids.join(', ')}`,
+});
 
 /** Как закрыть открытый шаг: метка docs или явная работа (`--docs-work`). */
 export const RELEASE_DOCS_HINT =

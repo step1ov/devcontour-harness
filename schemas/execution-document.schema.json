@@ -3205,11 +3205,12 @@
                         "const": true
                       },
                       "technicalAreas": {
-                        "maxItems": 3,
+                        "maxItems": 4,
                         "type": "array",
                         "items": {
                           "type": "string",
                           "enum": [
+                            "internal",
                             "contract",
                             "api",
                             "migration"
@@ -3266,7 +3267,7 @@
                   "maximum": 10
                 },
                 "affects": {
-                  "maxItems": 5,
+                  "maxItems": 6,
                   "type": "array",
                   "items": {
                     "type": "string",
@@ -3275,7 +3276,8 @@
                       "acceptance",
                       "product",
                       "api",
-                      "migration"
+                      "migration",
+                      "internal"
                     ]
                   }
                 },

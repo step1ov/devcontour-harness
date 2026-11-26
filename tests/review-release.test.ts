@@ -62,7 +62,7 @@ import {
 } from '../src/control/release-gates.ts';
 import { checkGates } from '../src/control/gates-check.ts';
 import { releaseReviewRequired, releaseReviewState } from '../src/control/release-review-state.ts';
-import { releaseDocsLine, releaseDocsState } from '../src/control/release-docs.ts';
+import { checkDocsWorks, releaseDocsLine, releaseDocsState } from '../src/control/release-docs.ts';
 import { engineOf, graphOf, policyOf, ready } from './engine-fixture.ts';
 import { bin } from './runner-fixture.ts';
 import { junit } from './git-fixture.ts';
@@ -772,7 +772,25 @@ test('alpha.72, P9-6: источник задач без меток — рабо
   f.scenario({ reviewer: verdict(true) });
   const r = await f.review({ docsWorks: ['d'] });
   assert.equal(r.approved, true);
+  // Явное название записано в журнал ведущего (ревью LOW).
+  const logged = () =>
+    f.engine
+      .read((v) => v.local('lead', WORKSPACE_OWNER, 'log'))!
+      .entries.filter((e) => e.action === 'lead.docs-work')
+      .map((e) => e.plain);
+  assert.deepEqual(logged(), [
+    'работа документации выпуска названа явно (review-release --docs-work): d',
+  ]);
   leadDataSchema.parse(done(['d']));
+  assert.equal(logged().length, 2);
+  assert.match(logged()[1]!, /\(release done --docs-work\): d$/);
+  // Следующий выпуск: d принята в прежнем — документацией нынешнего её не назвать.
+  ready(f.engine, graphOf({ w: [], d: ['w'], x: [] }, '2'));
+  invalid(
+    () => f.engine.read((v) => checkDocsWorks(v, ['d'], 'release done')),
+    /--docs-work d: работа принята в прежнем выпуске/,
+  );
+  f.engine.read((v) => checkDocsWorks(v, ['x'], 'release done'));
 });
 
 test('ревью 2: второй проход приёмки выпуска, изменивший своё дерево, не принимается — действует первый', async () => {

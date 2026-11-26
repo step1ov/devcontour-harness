@@ -111,7 +111,7 @@ test('alpha.72: пауза ведущего — status, explain и строка 
   env.store.close();
 });
 
-test('alpha.72: CLI pause — --by lead, в открытой сессии ведущего по умолчанию ведущий; --by operator — человек', () => {
+test('alpha.72: CLI pause — --by lead, без флага — человек и в открытой сессии ведущего', () => {
   const env = engineOf();
   ready(env.engine, graphOf({ a: [] }));
   writeFileSync(
@@ -135,12 +135,13 @@ test('alpha.72: CLI pause — --by lead, в открытой сессии вед
   assert.equal(harness('pause', '--state', env.dir, '--by', 'lead').status, 0);
   assert.equal(queue().by, 'lead');
   assert.equal(queue().actor, 'lead');
-  // Открытая сессия ведущего: пауза без --by — его; --by operator — человека.
+  // Открытая сессия ведущего (ревью M4): пауза без --by — человека;
+  // ведущий называет себя явно.
   assert.equal(harness('resume', '--state', env.dir).status, 0);
   assert.equal(harness('lead', 'begin', '--state', env.dir, '--ttl', '30m').status, 0);
   assert.equal(harness('pause', '--state', env.dir).status, 0);
-  assert.equal(queue().by, 'lead');
-  assert.equal(harness('pause', '--state', env.dir, '--by', 'operator').status, 0);
   assert.equal(queue().by, undefined);
   assert.equal(queue().actor, 'user');
+  assert.equal(harness('pause', '--state', env.dir, '--by', 'lead').status, 0);
+  assert.equal(queue().by, 'lead');
 });

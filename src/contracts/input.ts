@@ -52,6 +52,14 @@ export {
 export const criticalAreas = ['contract', 'acceptance', 'product', 'api', 'migration'] as const;
 export const criticalAreaSchema = z.enum(criticalAreas);
 export type CriticalArea = (typeof criticalAreas)[number];
+/**
+ * Области `affects` (alpha.72): критические и `internal` — развилка внутри
+ * кода, которая не меняет ни утверждённого договора, ни публичного API, ни
+ * модели данных, ни безопасности. `internal` сама минимума не ставит.
+ */
+export const inputAreas = [...criticalAreas, 'internal'] as const;
+export const inputAreaSchema = z.enum(inputAreas);
+export type InputArea = (typeof inputAreas)[number];
 
 /** Пределы вопроса и ответа — как у вопросов подготовки DevContour. */
 export const INPUT_LIMITS = {
@@ -108,7 +116,7 @@ export const inputQuestionSchema = z
     recommended: z.string().max(40).nullable(),
     severity: severitySchema,
     rationale: z.string().max(INPUT_LIMITS.rationale),
-    affects: z.array(criticalAreaSchema).max(criticalAreas.length),
+    affects: z.array(inputAreaSchema).max(inputAreas.length),
     /**
      * Влияние выбора (`inputImpacts`); нет поля или `null` — `user-visible`.
      * Controller хранит только `technical` и `user-visible`, `null` снимает.
@@ -150,7 +158,7 @@ export const assumptionSchema = z.strictObject({
   chosen: z.string().min(1).max(300),
   rationale: z.string().max(INPUT_LIMITS.rationale),
   severity: severitySchema,
-  affects: z.array(criticalAreaSchema).max(criticalAreas.length),
+  affects: z.array(inputAreaSchema).max(inputAreas.length),
 });
 export type Assumption = z.infer<typeof assumptionSchema>;
 
@@ -210,11 +218,12 @@ export const inputPolicySchema = z.strictObject({
         technical: z.literal(true),
         /**
          * Области (alpha.72), в которых технический вопрос остаётся у
-         * ведущего и с минимумом `declared`: внутренний договор, программный
-         * интерфейс, миграция данных. Нет поля — в облегчённом режиме
-         * договор и программный интерфейс (`LIGHT_LEAD_TECHNICAL_AREAS`), в
-         * строгом — ни одной (прежнее правило: только без минимумов); `[]` —
-         * прежнее правило и в облегчённом режиме.
+         * ведущего и с минимумом `declared`: `internal` (развилка внутри
+         * кода), а также `contract`, `api`, `migration`, если владелец
+         * назвал их явно. Нет поля — в облегчённом режиме `internal`
+         * (`LIGHT_LEAD_TECHNICAL_AREAS`), в строгом — ни одной (прежнее
+         * правило: только без минимумов); `[]` — прежнее правило и в
+         * облегчённом режиме.
          */
         technicalAreas: z
           .array(z.enum(leadTechnicalAreas))

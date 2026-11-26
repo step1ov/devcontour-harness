@@ -2926,11 +2926,12 @@
                   "const": true
                 },
                 "technicalAreas": {
-                  "maxItems": 3,
+                  "maxItems": 4,
                   "type": "array",
                   "items": {
                     "type": "string",
                     "enum": [
+                      "internal",
                       "contract",
                       "api",
                       "migration"

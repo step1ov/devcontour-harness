@@ -1770,13 +1770,13 @@ async function run(
       const h = open(need('state'), b, true);
       try {
         if (command === 'pause') {
-          // Кто ставит паузу (alpha.72, P9-3): явный --by; без него в открытой
-          // сессии ведущего — ведущий (его перепланирование), иначе человек.
+          // Кто ставит паузу (alpha.72, P9-3): явный --by; без него — человек
+          // (ревью M4): пауза человека в сессии ведущего не становится чужой.
           if (v.by !== undefined && v.by !== 'lead' && v.by !== 'operator')
             throw new HarnessError('INVALID_INPUT', '--by: lead или operator', [
               { path: ['--by'], message: v.by },
             ]);
-          const by = v.by ?? (leadSessionOpen(h.engine) ? 'lead' : 'operator');
+          const by = v.by ?? 'operator';
           return { command, data: h.engine.pause('operator', by) };
         }
         if (command === 'resume') return { command, data: h.engine.resume() };

@@ -7,6 +7,7 @@ import {
   inputImpacts,
   INPUT_SEVERITY_MAX,
   criticalAreas,
+  inputAreas,
   implementationResultSchema,
   type Assumption,
   type ImplementationResult,
@@ -71,8 +72,10 @@ function rate(item: { severity: number; affects: readonly string[] }, hits: stri
   const floors: InputFloor[] = [];
   // Потолок самооценки — по шкале изменение требований, договора или
   // безопасности: это объявленная критичность и без названной области (так
-  // и у нераспознанной области ответа вне схемы).
-  if (item.affects.length || item.severity >= INPUT_SEVERITY_MAX) floors.push('declared');
+  // и у нераспознанной области ответа вне схемы). `internal` (alpha.72) —
+  // не критическая область: минимума сама не ставит.
+  if (item.affects.some((a) => a !== 'internal') || item.severity >= INPUT_SEVERITY_MAX)
+    floors.push('declared');
   if (hits.length) floors.push('critical-path');
   return {
     effectiveSeverity: floors.length ? INPUT_SEVERITY_MAX : item.severity,
@@ -195,7 +198,7 @@ export function inputPolicyText(policy: InputPolicy) {
     : '';
   const scale =
     'Rate each fork you meet with a severity from 1 to 10: 1 — cosmetic, reversible, local to this change; 4 — a behaviour choice inside the write scope; 7 — behaviour or an interface other work or users rely on; 10 — changes requirements, acceptance criteria, a contract, the data model or security, or affects every task.';
-  const critical = `A fork that would change an approved contract, acceptance criteria, a product decision, a public API or a data migration is critical: name the area in \`affects\` (${areas}); the controller then treats it as severity 10 whatever number you give.${paths}`;
+  const critical = `A fork that would change an approved contract, acceptance criteria, a product decision, a public API or a data migration is critical: name the area in \`affects\` (${areas}); the controller then treats it as severity 10 whatever number you give. A fork inside the code that changes no approved contract, public API, data model or security (test setup, a helper, how a value is passed between your own modules) is not critical: name it \`internal\` in \`affects\` instead, never together with a critical area by mistake.${paths}`;
   if (autonomous(policy))
     return [
       `Decision policy: autonomous (input threshold ${policy.threshold}). You never stop to ask. Decide every fork yourself, keep working, and record each decision in \`assumptions\` (question, chosen, rationale, severity, affects); return \`inputRequest\`: null.`,
@@ -261,7 +264,8 @@ export function normalizeImplementation(
   };
   // Область — без регистра и с распространёнными синонимами. Названная, но
   // не распознанная область не снимает минимум: серьёзность — потолок.
-  const areaAliases: Record<string, (typeof criticalAreas)[number]> = {
+  const areaAliases: Record<string, (typeof inputAreas)[number]> = {
+    internal: 'internal',
     contract: 'contract',
     contracts: 'contract',
     acceptance: 'acceptance',
@@ -284,7 +288,7 @@ export function normalizeImplementation(
     const list = Array.isArray(value) ? value : scalar ? [value] : [];
     const known = list
       .map((a) => areaAliases[text(a).trim().toLowerCase()])
-      .filter((a): a is (typeof criticalAreas)[number] => a !== undefined);
+      .filter((a): a is (typeof inputAreas)[number] => a !== undefined);
     const unknown = list.length - known.length;
     if (unknown)
       issues.push(
