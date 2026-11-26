@@ -87,8 +87,9 @@ export function guideIndex(root = skillsRoot): string {
     'to this file.',
     'Every session, new or resumed, starts with `$H guide session` (lead begin,',
     'who your commands speak for, notes; resuming). Route: setup → plan →',
-    'review → run (block on `$H wait`, not a `status` loop) → recovery when it',
-    'stops → release.',
+    'review → run (block on `$H wait` with a long timeout, not a `status` loop;',
+    'with `HARNESS_LEAD_DRIVE=1` end your turn instead — the driver wakes you) →',
+    'recovery when it stops → release.',
     '',
     ...rows,
   ].join('\n');

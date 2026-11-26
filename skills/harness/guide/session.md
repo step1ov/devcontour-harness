@@ -39,6 +39,11 @@ connector — is invisible unless you say it:
 - At each step outside harness, one short line in plain words, the way you
   would tell a non-developer: `$H lead note "Обновляю документ DOC-2 в источнике задач"
 --state <state>` (up to 200 characters; no secrets, no paths, no logs).
+- Waiting for a running `harness run`: `$H guide run` («Waiting costs model
+  tokens»). With `HARNESS_LEAD_DRIVE=1` in your environment a driver waits
+  for you: handle the event in your input, keep `harness run` going in the
+  background, then end your turn with a short summary — no `wait` loop, and
+  no `lead end` until the release is done or you stop for the owner.
 - When you stop: `$H lead end --state <state>`. If approved works are ready
   and nothing runs, it still ends the session but warns
   `READY_WORKS_NOT_RUNNING` (`data.readyNotRunning`): start `$H run` first.

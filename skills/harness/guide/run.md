@@ -1,4 +1,4 @@
-<!-- harness guide run: Run the graph, wait for events, probe the writer, notes -->
+<!-- harness guide run: Run the graph, wait for events or let the lead driver wait, probe the writer, notes -->
 
 ### 7. Run
 
@@ -32,6 +32,50 @@ accepted, 10 release-ready, 11 question, 12 held, 13 failed, 14 stopped, 15
 timeout, 16 aborted (signal). They are outcomes, not errors (`ok: true`);
 the JSON `kind` is authoritative. It reads the state read-only, does not
 query the controller and keeps an open lead session alive while waiting.
+
+**Waiting costs model tokens.** Every time a wait returns to you, your agent
+sends the whole session so far to the model again; a loop of short waits
+(`--timeout 50s`) costs more than the work itself. Wait with the longest
+`--timeout` your shell tool allows (10 minutes or more if it allows it; the
+default is 30m), and never chain more than about 3 empty waits (`timeout`,
+exit 15): after that, end your turn with a short status line instead.
+
+**Under the lead driver (`HARNESS_LEAD_DRIVE=1`).** When your environment
+has `HARNESS_LEAD_DRIVE=1`, an operator loop without a model waits for you
+(`harness lead drive`) and starts a fresh session of yours on each event
+that needs you; your input is the operator's goals plus a short event
+summary (what happened, the cursor, the commands for it). Handle that event,
+start `harness run` in the background if work is ready and nothing runs
+(`nohup $H run … > <log> 2>&1 &` — the run must outlive your turn), then end
+your turn with a short summary. Do not call `$H wait` and do not loop: the
+driver wakes you on the next failure, hold, question for you, ready release
+or stopped queue; accepted works and failures harness retries by itself do
+not wake you. A decision only the owner can make: name it in plain words in
+your summary; the driver itself stops for an owner question it can see.
+
+**Running the driver (operator).** Instead of a lead session that waits:
+
+```sh
+$H lead drive --state <manifest.paths.state> --policy .harness/policy.json \
+  --agent 'codex exec --dangerously-bypass-approvals-and-sandbox --json -C /path/to/repo -' \
+  --prompt-file goals.md --log transcripts/drive [--max-sessions 20] [--idle-sessions 3] [--timeout 60m]
+```
+
+`--agent` is the host's lead command as one string, run without a shell
+(quotes group arguments); the session prompt goes to its stdin, and
+`{session}`, `{cursor}` and `{prompt-file}` are substituted. `goals.md` is a
+short goals-only prompt (what the release must achieve, who answers what);
+the driver appends the event summary. Each session is new, so the context
+stays small; the agent gets `HARNESS_LEAD_DRIVE=1`,
+`HARNESS_LEAD_DRIVE_CURSOR`, `HARNESS_LEAD_DRIVE_SESSION` and
+`HARNESS_LEAD_DRIVE_EVENT`. `--log` keeps `session-N.prompt.md`, `.out` and
+`.err`. Exit codes (`ok: true`, the JSON `outcome` decides): 0 release-done
+(release done recorded, all code accepted), 20 owner (a question the lead
+may not answer, budget, provider access, an operator pause: answer it, then
+start the driver again), 21 no-progress (`--idle-sessions` sessions in a row
+changed nothing: check the agent command and its logs), 22 max-sessions, 23
+agent-error (the command did not start), 16 aborted (signal). Progress lines
+go to stderr.
 
 Before a long cycle, first run the cheap decisive gates
 («перед долгим циклом сначала прогоните дешёвые решающие gates»):
