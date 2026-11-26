@@ -510,6 +510,12 @@ test('H3-01: прежние команды и схемы их данных не 
       delete rest.ui;
       v = rest;
     }
+    // Советы plan-check тонкого режима (0.1.0-alpha.73).
+    if (k === 'properties' && v && typeof v === 'object' && 'checkPlan' in v && 'advice' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.advice;
+      v = rest;
+    }
     // Режим harness в doctor (0.1.0-alpha.69).
     if (k === 'properties' && v && typeof v === 'object' && 'leadSandbox' in v && 'mode' in v) {
       const rest = { ...(v as Record<string, unknown>) };
