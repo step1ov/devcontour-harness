@@ -1824,12 +1824,14 @@ export class Runner {
    * Интеграция репозитория по одной (`mergeTails`): слияние, проверки, ревью
    * и CAS одной работы не перемежаются с другой.
    */
-  private async serialized<T>(repositoryId: string, fn: () => Promise<T>): Promise<T> {
+  private async serialized<T>(attempt: AttemptState, fn: () => Promise<T>): Promise<T> {
+    const repositoryId = attempt.repositoryId;
     const previous = this.mergeTails.get(repositoryId) ?? Promise.resolve();
     let unlock!: () => void;
     this.mergeTails.set(repositoryId, new Promise<void>((r) => (unlock = r)));
     try {
-      await previous;
+      // Ожидание замка — своя стадия замеров, как у облегчённого режима.
+      await this.timed(attempt, 'integration-wait', () => previous);
       return await fn();
     } finally {
       unlock();
@@ -1887,7 +1889,7 @@ export class Runner {
       generate: this.generate.bind(this),
       verifyGenerated: this.verifyGenerated.bind(this),
       implemented: (event) => this.options.hooks?.implemented?.(event),
-      serialize: (repositoryId, fn) => this.serialized(repositoryId, fn),
+      serialize: (attempt, fn) => this.serialized(attempt, fn),
       discard: (repositoryId, workId) => this.thinDiscard(repositoryId, workId),
       proposalNotes,
       secretNames: (attempt) =>
@@ -3023,6 +3025,15 @@ export class Runner {
 
   private async sweepWorktrees(dryRun: boolean) {
     const worktrees: WorktreeCleanupEntry[] = [];
+    // Тонкий режим: принятая или отменённая работа, чьё дерево уже убрано, —
+    // её ветка и сессии тоже.
+    if (!dryRun && harnessModeOf(this.policy) === 'thin')
+      for (const w of this.engine.read((v) => v.works()))
+        if (
+          (w.status === 'done' || w.status === 'cancelled') &&
+          !existsSync(this.checkout(w.order.repositoryId, 'worktrees', `work-${w.id}`))
+        )
+          await this.thinDiscard(w.order.repositoryId, w.id).catch(() => undefined);
     const attempts = this.engine.read((v) =>
       v.attempts().map((attempt) => {
         const work = v.work(attempt.workId);

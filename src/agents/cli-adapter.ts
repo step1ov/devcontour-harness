@@ -622,6 +622,12 @@ export function cliAdapter(
         // обратно ничего не переносится (решение владельца 2026-11-24).
         if (transientHome)
           await rm(transientHome, { recursive: true, force: true }).catch(() => undefined);
+        // Постоянный каталог работы: сессия остаётся, копия входа — нет
+        // (решение владельца 2026-11-24); следующий вызов кладёт свежую.
+        else if (runtimeHome)
+          await rm(join(runtimeHome, runtime === 'codex' ? 'auth.json' : '.credentials.json'), {
+            force: true,
+          }).catch(() => undefined);
       }
       try {
         const usage = telemetry.usage(result.code === 0 && !result.timedOut && !signal.aborted);

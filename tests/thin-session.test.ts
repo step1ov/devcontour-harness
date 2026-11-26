@@ -89,7 +89,8 @@ test('codex: новая сессия в постоянном каталоге, �
     existsSync(join(s.home, 'fixture-sessions', first.sessionId!)),
     'сессия в каталоге работы',
   );
-  assert.ok(existsSync(join(s.home, 'auth.json')), 'каталог работы не удалён после вызова');
+  assert.ok(existsSync(s.home), 'каталог работы не удалён после вызова');
+  assert.equal(existsSync(join(s.home, 'auth.json')), false, 'копии входа после вызова нет');
   const fresh = s.args(0);
   assert.deepEqual(fresh.slice(0, 2), ['exec', '--json']);
   assert.ok(fresh.includes('--sandbox'));
@@ -109,7 +110,7 @@ test('codex: новая сессия в постоянном каталоге, �
   // Копия входа заменяется при каждом вызове: повтор в том же каталоге не падает.
   const third = await s.call('codex', { kind: 'continue', id: first.sessionId! });
   assert.equal(third.status, 'ok', JSON.stringify(third.diagnostics));
-  assert.equal(readFileSync(join(s.home, 'auth.json'), 'utf8'), '{"fixture":1}');
+  assert.equal(existsSync(join(s.home, 'auth.json')), false);
 });
 
 test('claude: сессия writer с каталогом работы сохраняется и продолжается --resume; без каталога — прежние флаги', async () => {

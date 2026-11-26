@@ -25,6 +25,7 @@ import {
   type RuntimeRequest,
 } from '../contracts/index.ts';
 import { gateFeedback } from '../engine/gate-feedback.ts';
+import { countedFailure } from '../projections/lead-recovery.ts';
 import { evaluateInput, normalizeImplementation } from '../engine/input-policy.ts';
 import { attemptSecretsNote, prompt } from '../engine/prompt.ts';
 import { git } from '../environment/process.ts';
@@ -36,6 +37,7 @@ import type { ThinHandover, ThinKit } from './kit.ts';
 import {
   handoverSummary,
   mergeText,
+  setupText,
   resumePrompt,
   THIN_WRITER_TEXT,
   type ThinDelta,
@@ -45,6 +47,8 @@ import { intervention, lostSession, planSession, sessionHome } from './session.t
 import { commitWork, ensureWorkTree, integrationTree, mergeBase, mergeTarget } from './tree.ts';
 
 const text = (error: unknown) => (error instanceof Error ? error.message : String(error));
+/** Метка первого конфликта слияния при проверке: незасчитанный повтор (M4). */
+export const MERGE_REQUEUE = 'MERGE_CONFLICT_REQUEUE';
 type Gates = ThinHandover['repo']['gates'];
 
 /** Вызов writer сдачи: новая сессия или продолжение; потерянная — одна новая со сводкой. */
@@ -56,6 +60,8 @@ async function writer(
   gates: Gates,
   /** Слияние текущей цели в дерево работы перед этой сдачей; конфликт — файлы. */
   merged?: { conflicts: string[] },
+  /** Подготовка окружения в дереве прошлых сдач упала (H-B): исполнитель чинит файлы. */
+  setupError?: string,
 ) {
   const { work, repo, base, artifacts, signal, context } = h;
   const execution = kit.environment(attempt, 'candidate', tree);
@@ -75,9 +81,13 @@ async function writer(
   await kit.prepareSelfCheck(attempt, repo, join(artifacts, 'self-check'));
   const history = kit.history(attempt);
   const previous = history.filter((a) => a.id !== attempt.id).at(-1);
-  // Провал gates — последней засчитанной сдачи с провалом gate: незасчитанная
-  // остановка (сбой среды, конфликт) его не заменяет.
-  const failedGates = history.filter((a) => a.id !== attempt.id && a.failureKind === 'gate').at(-1);
+  // Провал gates — только прошлого засчитанного отказа и только если это
+  // провал gate; не через сброс попыток.
+  const resetAt = work.leadRecovery?.resets.at(-1)?.at;
+  const counted = history
+    .filter((a) => a.id !== attempt.id && countedFailure(a) && (!resetAt || a.startedAt > resetAt))
+    .at(-1);
+  const failedGates = counted?.failureKind === 'gate' ? counted : undefined;
   const findings = (await kit.reviewProtocol(attempt.reviewer))
     ? kit.engine.read((v) =>
         codeReviewHistory(
@@ -101,6 +111,7 @@ async function writer(
     ...(findings ? { findings } : {}),
     ...(context ? { context } : {}),
     ...(merged ? { merged } : {}),
+    ...(setupError ? { setupError } : {}),
   };
   const full = prompt({
     work,
@@ -123,6 +134,7 @@ async function writer(
       ...kit.proposalNotes(work),
       THIN_WRITER_TEXT,
       ...(merged ? [mergeText(merged)] : []),
+      ...(setupError ? [setupText(setupError)] : []),
     ],
     ...(findings ? { findings } : {}),
     ...(feedback ? { feedback } : {}),
@@ -276,7 +288,22 @@ async function verify(
   const target = await git(repoPath, 'rev-parse', repo.targetRef);
   const cwd = kit.checkout(repo.id, 'worktrees', attempt.id) + '-integration';
   if (!worktrees.includes(cwd)) worktrees.push(cwd);
-  const sha = await integrationTree(repoPath, cwd, target, candidate);
+  const sha = await integrationTree(repoPath, cwd, target, candidate).catch((error: unknown) => {
+    // Первый конфликт слияния — незасчитанный повтор без ведущего: следующая
+    // сдача сольёт цель в ветку работы, исполнитель разрешит конфликт.
+    // Повторный — ведущему (`merge-conflict`).
+    const prior = kit
+      .history(attempt)
+      .filter((a) => a.id !== attempt.id)
+      .at(-1);
+    if (
+      error instanceof TaskFailure &&
+      error.diagnosis === 'merge-conflict' &&
+      !prior?.error?.startsWith(MERGE_REQUEUE)
+    )
+      throw new TaskFailure('stale-base', `${MERGE_REQUEUE}: ${error.message}`);
+    throw error;
+  });
   kit.engine.phase(attempt.id, attempt.token, 'integrating', { integrationSha: sha });
   const at: AttemptState = { ...attempt, integrationSha: sha };
   h.rearm();
@@ -352,6 +379,8 @@ export const thinFlow = {
     // Writer всегда в одном и том же дереве работы (настоящий путь): по нему
     // CLI находит сессию прошлой сдачи.
     const tree = realpathSync(dir);
+    // Незакоммиченные правки прошлой сдачи — в ветку до слияния цели.
+    if (!created) await commitWork(tree, `${work.id}: work in progress`);
     const head = await git(tree, 'rev-parse', 'HEAD');
     // Прошлая сдача упала только сдвигом цели после проверки, а дерево то же:
     // проверка заново без writer (незасчитанный повтор).
@@ -360,7 +389,11 @@ export const thinFlow = {
       .filter((a) => a.id !== h.attempt.id)
       .at(-1);
     const recheckOnly =
-      previous?.failureKind === 'stale-base' && previous.candidateSha === head ? head : undefined;
+      previous?.failureKind === 'stale-base' &&
+      !previous.error?.startsWith(MERGE_REQUEUE) &&
+      previous.candidateSha === head
+        ? head
+        : undefined;
     // Цель сдвинулась с прошлой сдачи: она сливается в ветку работы; конфликт
     // остаётся в дереве, его разрешает исполнитель (не ход ведущего).
     const merged = created || recheckOnly ? undefined : await mergeTarget(tree, base);
@@ -382,9 +415,18 @@ export const thinFlow = {
           execution,
           signal,
           base,
+          // Дерево прошлых сдач или конфликт слияния цели: подготовка, упавшая
+          // на файлах исполнителя, не останавливает сдачу (H-B).
+          tolerateSetup: !created,
         },
-        async () =>
-          candidateOf(kit, h, attempt, tree, await writer(kit, h, attempt, tree, gates, merged)),
+        async (setupError) =>
+          candidateOf(
+            kit,
+            h,
+            attempt,
+            tree,
+            await writer(kit, h, attempt, tree, gates, merged, setupError),
+          ),
       ));
     // База попытки — общая с целью база кандидата.
     const from = await mergeBase(tree, base, candidate);
@@ -394,7 +436,9 @@ export const thinFlow = {
     });
     attempt = { ...attempt, candidateSha: candidate, baseSha: from };
     // Слияние, проверки, ревью и CAS — под замком интеграции репозитория.
-    const sha = await kit.serialize(repo.id, async () => {
+    const sha = await kit.serialize(attempt, async () => {
+      // Срок фазы — от взятия замка: ожидание чужой интеграции его не тратит.
+      h.rearm();
       for (let round = 0; ; round++)
         try {
           return await verify(kit, h, attempt, gates);

@@ -127,10 +127,45 @@ export function thinEnvironment<T>(
     execution: Execution;
     signal: AbortSignal;
     base: string;
+    /**
+     * Дерево прошлых сдач (alpha.73, H-B): подготовка, упавшая на файлах
+     * исполнителя (конфликт в манифесте), не останавливает сдачу — действие
+     * получает текст отказа и чинит файлы. Без поля — повтор и ведущему.
+     */
+    tolerateSetup?: boolean;
   },
-  action: () => Promise<T>,
+  action: (setupError?: string) => Promise<T>,
 ): Promise<T> {
   const { attempt, repo, cwd, dir, stage, execution, signal } = input;
+  if (input.tolerateSetup) {
+    let started = false;
+    return withEnvironment(
+      repo.lifecycle ?? kit.policy.lifecycle,
+      cwd,
+      join(dir, 'environment'),
+      execution,
+      signal,
+      async () => {
+        let setupError: string | undefined;
+        try {
+          await kit.dependencyStore(attempt, repo, cwd, execution, signal, dir);
+          await kit.prepareSteps(attempt, `${stage}-prepare`, repo.prepare, () =>
+            runSteps(repo.prepare, cwd, join(dir, 'prepare'), execution, signal, input.base),
+          );
+        } catch (error) {
+          if (signal.aborted) throw error;
+          setupError = text(error);
+        }
+        started = true;
+        return action(setupError);
+      },
+      (name, run) => kit.timed(attempt, `${stage}-environment:${name}`, run),
+    ).catch((error: unknown) => {
+      // Lifecycle упал до действия: исполнитель работает без окружения и с причиной.
+      if (started || signal.aborted) throw error;
+      return action(text(error));
+    });
+  }
   return onceMore(
     `окружение ${stage}`,
     signal,
@@ -154,7 +189,7 @@ export function thinEnvironment<T>(
               throw new EnvironmentSetupFailure(error);
             }
             started = true;
-            return action();
+            return action(undefined);
           },
           (name, run) => kit.timed(attempt, `${stage}-environment:${name}`, run),
         );

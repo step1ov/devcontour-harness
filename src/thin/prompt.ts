@@ -42,12 +42,23 @@ export interface ThinDelta {
   context?: ContextSnapshot;
   /** Цель слита в дерево работы перед сдачей; `conflicts` — файлы с конфликтом. */
   merged?: { conflicts: string[] };
+  /** Подготовка окружения в дереве упала до вызова (хвост отказа). */
+  setupError?: string;
 }
+
+/** Подготовка окружения упала на файлах дерева работы: исполнитель их чинит. */
+export function setupText(tail: string): string {
+  return `The environment setup in this worktree (dependency store, prepare steps or lifecycle) failed before your turn, most likely because of files in this tree (for example a conflicted manifest): ${tail.slice(-2000)}. Fix those files first, then rerun your gates.`;
+}
+
+/** Окружение попытки — новое на каждой сдаче (M1). */
+export const ENV_CHANGED_TEXT =
+  'This handover runs in a new attempt environment: ports, the compose project name, test secrets and HARNESS_ATTEMPT_ENV_FILE may have changed. Read them again from the environment; never reuse values from earlier turns.';
 
 /** Что сказать исполнителю о слиянии цели в его дерево. */
 export function mergeText(m: { conflicts: string[] }): string {
   return m.conflicts.length
-    ? `The target branch moved; the harness merged it into this worktree and the merge has conflicts in: ${m.conflicts.join(', ')}. Resolve them (keep both intents), make sure no conflict markers remain, rerun your gates, then hand back.`
+    ? `The target branch moved; the harness merged it into this worktree and the merge has conflicts in: ${m.conflicts.join(', ')}. Resolve them by editing these files only (keep both intents) and make sure no conflict markers remain; do not run git add, commit or merge — the harness concludes the merge when you hand back. Rerun your gates, then hand back.`
     : 'The target branch moved; the harness merged it into this worktree cleanly. Rerun your gates on the merged tree.';
 }
 
@@ -59,6 +70,7 @@ const deltaParts = (d: ThinDelta) => [
   findingsText(d.findings, false),
   d.answer ? answersText(d.context, d.answer) : '',
   d.merged ? mergeText(d.merged) : '',
+  d.setupError ? setupText(d.setupError) : '',
 ];
 
 /** Запрос продолжения той же сессии. */
@@ -68,6 +80,7 @@ export function resumePrompt(d: ThinDelta): string {
       ? 'Your previous handover did not complete. Everything you did before is still in this worktree.'
       : 'The harness checked your handover and it did not pass. Everything you did before is still in this worktree.',
     ...deltaParts(d),
+    ENV_CHANGED_TEXT,
     'Fix every point above, rerun your gates in this worktree until they pass, then hand back with the same JSON response format (completed=true).',
   ]
     .filter(Boolean)

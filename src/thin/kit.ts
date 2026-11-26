@@ -47,7 +47,7 @@ export interface ThinKit {
   generate: Runner['generate'];
   verifyGenerated: Runner['verifyGenerated'];
   /** Интеграция репозитория по одной (`mergeTails`, как в облегчённом режиме). */
-  serialize: <T>(repositoryId: string, fn: () => Promise<T>) => Promise<T>;
+  serialize: <T>(attempt: AttemptState, fn: () => Promise<T>) => Promise<T>;
   /** Убрать дерево, ветку и сессии работы. */
   discard: (repositoryId: string, workId: string) => Promise<void>;
   /** Заметки о предложениях исполнителей (отклонённое разделение). */

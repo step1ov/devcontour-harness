@@ -51,7 +51,7 @@ function thin(options: Options & { maxAttempts?: number }) {
 /** Сдвинуть цель коммитом с файлом `path` (содержимое `text`) из дерева исполнителя. */
 const moveTarget = (path: string, text: string) =>
   `T=$(git rev-parse refs/heads/harness/accepted); export GIT_INDEX_FILE="$PWD/../.idx-$$"; git read-tree $T; ` +
-  `B=$(printf '${text}' | git hash-object -w --stdin); git update-index --add --cacheinfo 100644,$B,${path}; ` +
+  `B=$(printf "${text}" | git hash-object -w --stdin); git update-index --add --cacheinfo 100644,$B,${path}; ` +
   `TREE=$(git write-tree); C=$(git -c user.name=x -c user.email=x@x commit-tree $TREE -p $T -m moved); ` +
   `git update-ref refs/heads/harness/accepted $C $T; rm -f "$GIT_INDEX_FILE"`;
 
@@ -81,6 +81,10 @@ test('thin: одна сдача — слияние, gates и ревью на и�
     'сессии работы убраны',
   );
   assert.match(ctx.prompt(0), /Thin mode: this is the one writer session/);
+  assert.ok(
+    a!.timings?.some((t) => t.stage === 'integration-wait'),
+    'ожидание замка интеграции — своя стадия',
+  );
 });
 
 const wrong = "exports.greet = (name) => 'Hi ' + name;\n";
@@ -209,14 +213,15 @@ test('цель сдвинулась после сдачи — слита в ве
       reviewer: approve(),
     },
   });
+  // Первый конфликт при проверке — незасчитанный повтор без ведущего:
+  // следующая сдача сливает цель в ветку работы, исполнитель разрешает.
   await clash.run();
-  const [a] = clash.attempts();
-  assert.equal(a!.leadCause, 'merge-conflict', a!.error);
-  clash.h().engine.retry(clash.work, undefined, 'lead');
-  await clash.run();
-  const [, b] = clash.attempts();
+  const [a, b] = clash.attempts();
+  assert.equal(a!.failureKind, 'stale-base', a!.error);
+  assert.match(a!.error ?? '', /^MERGE_CONFLICT_REQUEUE/);
   assert.equal(b!.status, 'succeeded', b!.error);
   assert.match(clash.prompt(1), /merge has conflicts in: src\/greet\.js/);
+  assert.match(clash.prompt(1), /do not run git add, commit or merge/);
 });
 
 test('три отказа — работа исчерпана, маршрут ведущего', async () => {
@@ -334,16 +339,18 @@ test('цель сдвинулась между сдачами — слияние
 
   const clash = thin({
     scenario: {
-      writer: { ...rec(implement()), shell: moveTarget('src/greet.js', 'other') },
+      // Цель меняет тот же файл на каждой сдаче: конфликт повторяется.
+      writer: { ...rec(implement()), shell: moveTarget('src/greet.js', 'other-$$') },
       reviewer: approve(),
     },
   });
   await clash.run();
-  const [a] = clash.attempts();
+  const [requeued, a] = clash.attempts();
+  assert.match(requeued!.error ?? '', /^MERGE_CONFLICT_REQUEUE/, 'первый — повтор без ведущего');
   assert.equal(a!.failureKind, 'needs-lead', a!.error);
   assert.equal(a!.leadCause, 'merge-conflict');
   assert.match(a!.error ?? '', /конфликт в src\/greet\.js/);
-  assert.equal(clash.h().engine.read((v) => v.work(clash.work)!).attempt, 0);
+  assert.equal(clash.h().engine.read((v) => v.work(clash.work)!).attempt, 0, 'не засчитано');
 });
 
 test('гонка CAS: цель сдвинулась после ревью — проверка заново без writer, принята', async () => {

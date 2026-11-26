@@ -18,7 +18,7 @@ import type { RuntimeName } from '../src/contracts/index.ts';
 import { Runner } from '../src/engine/runner.ts';
 import { thinFlow } from '../src/thin/flow.ts';
 import type { ThinKit } from '../src/thin/kit.ts';
-import { approve, bin, implement, runAll, setup } from './runner-fixture.ts';
+import { approve, bin, greet as greetOk, implement, runAll, setup } from './runner-fixture.ts';
 
 const wrong = "exports.greet = (name) => 'Hi ' + name;\n";
 const rec = <T extends object>(step: T) => ({ ...step, recordPrompt: true });
@@ -30,6 +30,8 @@ function thin(
     runtime?: RuntimeName;
     now?: () => number;
     gates?: string[];
+    writeScope?: string[];
+    files?: Record<string, string>;
   } = {},
 ) {
   const ctx = setup({
@@ -42,9 +44,11 @@ function thin(
       options.policy?.(p);
     },
     ...(options.now ? { now: options.now } : {}),
-    ...(options.gates
-      ? { graph: (g: Record<string, any>) => (g.orders[0].gates = options.gates) }
-      : {}),
+    ...(options.files ? { files: options.files } : {}),
+    graph: (g: Record<string, any>) => {
+      if (options.gates) g.orders[0].gates = options.gates;
+      if (options.writeScope) g.orders[0].writeScope = options.writeScope;
+    },
     runner: {
       adapters: {
         claude: cliAdapter('claude', { executable: bin('fake-claude'), sessionContinue: true }),
@@ -82,23 +86,35 @@ test('разбор ведущего после отказа — новая се�
   assert.match(ctx.prompt(1), /нужна другая строка приветствия/, 'разбор в заметках');
 });
 
-test('сброс ведущим — дерево, ветка и сессия работы заново от цели', async () => {
-  const ctx = thin([
-    rec(implement({ 'src/greet.js': wrong, 'src/extra.js': '//x\n' })),
-    rec(implement()),
-  ]);
-  await runAll(ctx);
-  const [first] = ctx.attempts();
-  assert.equal(first!.failureKind, 'gate');
-  ctx.engine.retry(ctx.work, { reason: 'начать заново' });
-  await ctx.again();
-  const [, second] = ctx.attempts();
-  assert.equal(second!.status, 'succeeded', second!.error);
-  assert.equal(second!.writerSession?.mode, 'fresh');
-  assert.match(second!.writerSession?.reason ?? '', /сброс/);
-  // Правки прошлой сдачи не дошли до цели: дерево начато заново.
-  assert.throws(() => ctx.repo.git('show', `${second!.integrationSha}:src/extra.js`));
-});
+for (const startOver of [false, true])
+  test(`${startOver ? 'retry --start-over — дерево, ветка и сессия заново от цели' : 'сброс попыток — новая сессия со сводкой, дерево и ветка сохранены'}`, async () => {
+    const ctx = thin([
+      rec(implement({ 'src/greet.js': wrong, 'src/extra.js': '//x\n' })),
+      rec(implement()),
+    ]);
+    await runAll(ctx);
+    const [first] = ctx.attempts();
+    assert.equal(first!.failureKind, 'gate');
+    ctx.engine.retry(ctx.work, {
+      reason: 'начать заново',
+      ...(startOver ? { startOver: true as const } : {}),
+    });
+    await ctx.again();
+    const [, second] = ctx.attempts();
+    assert.equal(second!.status, 'succeeded', second!.error);
+    assert.equal(second!.writerSession?.mode, 'fresh');
+    assert.notEqual(second!.writerSession?.id, first!.writerSession?.id);
+    const extra = () => ctx.repo.git('show', `${second!.integrationSha}:src/extra.js`);
+    if (startOver) {
+      assert.match(second!.writerSession?.reason ?? '', /start-over/);
+      // Правки прошлой сдачи не дошли до цели: дерево начато заново.
+      assert.throws(extra);
+    } else {
+      assert.match(second!.writerSession?.reason ?? '', /сброс попыток/);
+      assert.match(ctx.prompt(1), /Handover summary/);
+      assert.equal(extra(), '//x', 'правки прошлой сдачи в дереве сохранены');
+    }
+  });
 
 test('уборка деревьев между сдачами не трогает дерево работы и его коммиты', async () => {
   const ctx = thin([rec(implement({ 'src/greet.js': wrong })), rec(implement())], {
@@ -240,4 +256,88 @@ test('цель дважды сдвинулась мимо замка — нез�
     1,
     'writer не вызывался второй раз',
   );
+});
+
+test('конфликт в package.json на дереве прошлых сдач: подготовка падает, исполнитель получает её вывод и чинит', async () => {
+  const pkg = (name: string) => JSON.stringify({ name }) + '\n';
+  const move = (text: string) =>
+    `T=$(git rev-parse refs/heads/harness/accepted); export GIT_INDEX_FILE="$PWD/../.idx-$$"; git read-tree $T; ` +
+    `B=$(printf '${text}' | git hash-object -w --stdin); git update-index --add --cacheinfo 100644,$B,package.json; ` +
+    `TREE=$(git write-tree); C=$(git -c user.name=x -c user.email=x@x commit-tree $TREE -p $T -m moved); ` +
+    `git update-ref refs/heads/harness/accepted $C $T; rm -f "$GIT_INDEX_FILE"`;
+  const ctx = thin(
+    [
+      // Сдача 1: своя правка package.json и провал gate; цель тем временем меняет тот же файл.
+      {
+        ...rec(implement({ 'src/greet.js': wrong, 'package.json': pkg('mine') })),
+        shell: move('{"name":"theirs"}\\n'),
+      },
+      // Сдача 2: в дереве конфликт слияния цели — подготовка (JSON) падает до вызова.
+      rec(implement({ 'src/greet.js': greetOk, 'package.json': pkg('merged') })),
+    ],
+    {
+      writeScope: ['src', 'package.json'],
+      files: { 'package.json': pkg('base') },
+      policy: (p) => {
+        p.repositories[0].prepare = [
+          {
+            id: 'manifest',
+            command: [
+              process.execPath,
+              '-e',
+              "JSON.parse(require('fs').readFileSync('package.json', 'utf8'))",
+            ],
+          },
+        ];
+      },
+    },
+  );
+  await runAll(ctx);
+  ctx.engine.retry(ctx.work, undefined, 'lead');
+  await ctx.again();
+  const all = ctx.attempts();
+  const last = all.at(-1)!;
+  assert.equal(last.status, 'succeeded', last.error);
+  const p = ctx.prompt(1);
+  assert.match(p, /merge has conflicts in: package\.json/);
+  assert.match(p, /environment setup in this worktree .* failed before your turn/);
+  assert.match(p, /ports, the compose project name, test secrets and HARNESS_ATTEMPT_ENV_FILE/);
+  assert.equal(ctx.repo.git('show', `${last.integrationSha}:package.json`), pkg('merged').trim());
+});
+
+test('retry --start-over исполняется один раз; отменённая работа без дерева — ветка и сессии убраны', async () => {
+  const ctx = thin([
+    rec(implement({ 'src/greet.js': wrong })),
+    // Сдача после --start-over оборвалась: правка осталась в дереве.
+    { draftFiles: { 'src/extra2.js': '//y\n' }, exit: 1 },
+    rec(implement()),
+  ]);
+  await runAll(ctx);
+  ctx.engine.retry(ctx.work, { reason: 'заново', startOver: true });
+  await ctx.again();
+  const [, dead] = ctx.attempts();
+  assert.notEqual(dead!.status, 'succeeded');
+  ctx.engine.retry(ctx.work, undefined, 'lead');
+  await ctx.again();
+  const last = ctx.attempts().at(-1)!;
+  assert.equal(last.status, 'succeeded', last.error);
+  assert.equal(
+    ctx.repo.git('show', `${last.integrationSha}:src/extra2.js`),
+    '//y',
+    'второго «заново» нет',
+  );
+
+  // Отменённая работа, дерево которой уже убрано: уборка снимает ветку и сессии.
+  const other = thin([rec(implement({ 'src/greet.js': wrong }))], {
+    policy: (p) => (p.maxAttempts = 1),
+  });
+  await runAll(other);
+  const [a] = other.attempts();
+  other.repo.git('worktree', 'remove', '--force', a!.worktree!);
+  other.engine.cancel(other.work, 'не нужна', 'operator');
+  await other.runner.cleanupWorktrees();
+  assert.throws(() =>
+    other.repo.git('rev-parse', '--verify', `refs/heads/harness/work-${other.work}`),
+  );
+  assert.equal(existsSync(join(dirname(a!.worktree!), '..', 'sessions', other.work)), false);
 });
