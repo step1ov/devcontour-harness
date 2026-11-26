@@ -90,3 +90,28 @@ test('guide: разделы входят в пакет (npm pack) рядом с 
   for (const t of guideTopics.filter((x) => x !== 'relay'))
     assert.ok(paths.has(`skills/harness/guide/${t}.md`), t);
 });
+
+test('guide thin (alpha.73): весь поток тонкого режима для ведущего, не длиннее 8000 знаков', () => {
+  const s = guideSection('thin');
+  assert.ok(s.text.length <= 8000, `${s.text.length} знаков`);
+  for (const rule of [
+    /init --repository <repo> --harness-mode thin/,
+    /3–5 works/,
+    /run --detach --log/,
+    /lead drive/,
+    /\$H wait --state/,
+    /gate-environment/,
+    /merge-conflict/,
+    /maxAttempts/,
+    /Release ready/,
+    /review-release/,
+    /What thin mode does NOT have/,
+    /retry --reset/,
+    /retry --start-over/,
+  ])
+    assert.match(s.text, rule);
+  assert.ok(skill.includes('`$H guide thin`'), 'тема в оглавлении skill');
+  const cli = harness('guide', 'thin');
+  assert.equal(cli.status, 0, cli.stderr);
+  assert.match(cli.stdout, /### Thin mode in one page/);
+});

@@ -271,6 +271,24 @@ export const environmentCauseCatalog: Record<EnvironmentCause, Omit<FailureCatal
       'или reject с основанием и retry --by lead',
     ],
   },
+  'gate-environment': {
+    meaning:
+      'Тонкий режим: проверка сдачи упала до кода (нет инструмента, таймаут без упавшего теста) и после автоповтора; не засчитана.',
+    actor: 'lead',
+    fixes: [
+      'разобрать вывод проверки в причине отказа',
+      'починить окружение или команду gate',
+      'retry --by lead',
+    ],
+  },
+  'merge-conflict': {
+    meaning: 'Тонкий режим: дерево работы не сливается с текущей целью; не засчитана.',
+    actor: 'lead',
+    fixes: [
+      'retry --by lead: исполнитель сольёт цель в дерево работы и разрешит конфликт',
+      'или переставить порядок работ',
+    ],
+  },
   toolchain: {
     meaning: 'Закреплённый toolchain не разрешился или его версия не та.',
     actor: 'lead',

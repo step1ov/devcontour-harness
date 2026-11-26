@@ -2175,6 +2175,10 @@
                         "type": "string",
                         "minLength": 1
                       }
+                    },
+                    "startOver": {
+                      "type": "boolean",
+                      "const": true
                     }
                   },
                   "required": [
@@ -2604,6 +2608,53 @@
           "writerSummary": {
             "type": "string",
             "maxLength": 500
+          },
+          "leadCause": {
+            "type": "string",
+            "enum": [
+              "gate-environment",
+              "merge-conflict"
+            ]
+          },
+          "writerSession": {
+            "type": "object",
+            "properties": {
+              "runtime": {
+                "type": "string",
+                "enum": [
+                  "codex",
+                  "claude",
+                  "fixture"
+                ]
+              },
+              "id": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "mode": {
+                "type": "string",
+                "enum": [
+                  "fresh",
+                  "resumed",
+                  "fallback"
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "maxLength": 500
+              },
+              "spec": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            },
+            "required": [
+              "runtime",
+              "id",
+              "mode"
+            ],
+            "additionalProperties": false
           },
           "failureKind": {
             "type": "string",

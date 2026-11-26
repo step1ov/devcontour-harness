@@ -46,6 +46,7 @@ recovery when it stops → release.
 - `$H guide recovery` — When it stops: explain, diagnose, retries, holds and questions. Sections: 8. When it stops.
 - `$H guide release` — Report the result, release review and release done. Sections: 9. Report the result; Lead log: release review and release done.
 - `$H guide relay` — Task source: graph files or a connected task tracker (connector.json). Sections: 10. Task source.
+- `$H guide thin` — Thin mode: one writer session per work, handover checked on a clean checkout, the whole flow for the lead. Sections: Thin mode in one page; Set up; Plan: 3–5 works; Run and wait; What wakes you; Release; What thin mode does NOT have; Reading the state.
 
 <!-- guide-index:end -->
 

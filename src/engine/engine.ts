@@ -5,6 +5,8 @@ import {
   contextDigestMatches,
   STAGE_NAME_LIMIT,
   noRetryEnvironmentCauses,
+  thinLeadCauses,
+  type ThinLeadCause,
   NO_RETRY_GATE_CODES,
   type NoRetryEnvironmentCause,
   codeReviewDecisionSchema,
@@ -86,6 +88,8 @@ import {
   type WorkGraph,
   type WorkOrder,
   type WorkState,
+  hostEnvironment,
+  acceptancePhases,
   harnessModeOf,
   strictSandbox,
   PROPOSAL_LIMITS,
@@ -271,6 +275,11 @@ const uncounted = (kind: FailureKind, blocked: boolean, writerBlocked = false) =
 export interface RetryReset {
   reason: string;
   diagnosis?: string;
+  /**
+   * Тонкий режим (alpha.73, `retry --start-over`): работа заново от цели —
+   * дерево, ветка и сессия работы убираются. Обычный сброс их сохраняет.
+   */
+  startOver?: true;
 }
 
 /** Что дальше после разбора (`harness diagnose`). */
@@ -337,8 +346,13 @@ const causeOf = (
   if (blocked && kind !== 'provider-auth' && kind !== 'environment') return 'preflight';
   if (kind === 'provider-auth')
     return cause === 'provider-limit' ? 'provider-limit' : 'provider-auth';
-  if (kind === 'needs-lead' && (cause === 'writer-environment' || cause === 'writer-split'))
-    return cause;
+  if (
+    kind === 'needs-lead' &&
+    (cause === 'writer-environment' ||
+      cause === 'writer-split' ||
+      (thinLeadCauses as readonly string[]).includes(cause ?? ''))
+  )
+    return cause!;
   if (kind !== 'environment') return 'none';
   return cause && cause !== 'none' && cause !== 'provider-auth' && cause !== 'provider-limit'
     ? cause
@@ -2578,6 +2592,29 @@ export class Engine {
   }
 
   /**
+   * Сессия writer тонкого режима (alpha.73): какую сессию CLI вела эта
+   * сдача — новую, продолженную или новую после неудачного продолжения.
+   */
+  recordWriterSession(
+    id: string,
+    token: string,
+    session: NonNullable<AttemptState['writerSession']>,
+  ) {
+    this.withAttempt(id, token, 'run.writer-session', (a, _w, tx) =>
+      tx.putAttempt({
+        ...a,
+        writerSession: {
+          runtime: session.runtime,
+          id: session.id.slice(0, 200),
+          mode: session.mode,
+          ...(session.reason ? { reason: session.reason.slice(0, 500) } : {}),
+          ...(session.spec ? { spec: session.spec } : {}),
+        },
+      }),
+    );
+  }
+
+  /**
    * Решение по предложению исполнителя (alpha.70): принять в план или
    * отклонить — ведущий (`by: lead`) или оператор. Принятие граф не меняет:
    * принятое ведущий вносит в план обычным ревью плана (разделение —
@@ -2861,7 +2898,14 @@ export class Engine {
       if (evidence.recheck) {
         const of = evidence.recheck.of;
         const first = a.evidence.find((e) => e.id === of);
-        const prior = a.evidence.filter((e) => e.recheck && e.phase === evidence.phase);
+        // Тонкий режим (alpha.73): один повтор на gate и SHA слияния, а не на фазу.
+        const thin = harnessModeOf(this.policy) === 'thin';
+        const prior = a.evidence.filter(
+          (e) =>
+            e.recheck &&
+            e.phase === evidence.phase &&
+            (!thin || (e.gate === evidence.gate && e.sha === evidence.sha)),
+        );
         const extra =
           prior.length === 1 &&
           prior[0]!.recheck!.of === of &&
@@ -2984,7 +3028,7 @@ export class Engine {
       const shaOf = (phase: EvidenceRecord['phase']) =>
         phase === 'candidate' ? a.candidateSha! : sha;
       const ran = Object.fromEntries(
-        (['candidate', 'integration'] as const).map((phase) => [
+        acceptancePhases(this.policy).map((phase) => [
           phase,
           (a.requiredGates ?? []).filter(
             (gate) => decisive(['test'], phase, shaOf(phase), gate) !== undefined,
@@ -2992,7 +3036,7 @@ export class Engine {
         ]),
       ) as Record<EvidenceRecord['phase'], string[]>;
       for (const gate of a.requiredGates ?? [])
-        for (const phase of ['candidate', 'integration'] as const) {
+        for (const phase of acceptancePhases(this.policy)) {
           // Исход исполнения решает всегда; неприменимость — только без него.
           const record =
             decisive(['test'], phase, shaOf(phase), gate) ??
@@ -3033,7 +3077,7 @@ export class Engine {
                 (record?.kind === 'not-applicable' ? ': ' + problem : ''),
             );
         }
-      for (const phase of ['candidate', 'integration'] as const)
+      for (const phase of acceptancePhases(this.policy))
         if (
           !last('review', phase, phase === 'candidate' ? a.candidateSha : sha, 'independent-review')
         )
@@ -3062,7 +3106,7 @@ export class Engine {
       // Попытка без изменений (кандидат — база) принимается только с
       // подтверждением reviewer обеих фаз, что приёмка уже выполнена.
       if (a.candidateSha === a.baseSha)
-        for (const phase of ['candidate', 'integration'] as const) {
+        for (const phase of acceptancePhases(this.policy)) {
           const decisive = a.evidence.findLast(
             (e) =>
               e.kind === 'review' &&
@@ -3151,6 +3195,7 @@ export class Engine {
         effective: a.checks?.effective,
         corpus: a.checks?.corpus ? pinnedCorpus(tx, a.checks.corpus) : undefined,
         evidence: a.evidence,
+        phases: acceptancePhases(this.policy),
       });
       if (proof) throw new HarnessError('GATE_FAILED', proof);
       const contract = this.contractBlocker(w, tx);
@@ -3252,6 +3297,18 @@ export class Engine {
       kind === 'needs-lead' && options.cause === 'writer-split' ? options.proposal : undefined;
     const writerBlocked =
       kind === 'needs-lead' && (options.cause === 'writer-environment' || !!writerSplit);
+    // Тонкий режим (alpha.73): сбой среды проверки сдачи и конфликт слияния —
+    // ход ведущего, попытка не засчитана, без паузы и удержаний.
+    const leadCause =
+      kind === 'needs-lead' && (thinLeadCauses as readonly string[]).includes(options.cause ?? '')
+        ? (options.cause as ThinLeadCause)
+        : undefined;
+    // Цель сдвинулась мимо замка интеграции (тонкий режим): повтор проверки
+    // без writer, не дефект сдачи.
+    const uncountedStop =
+      writerBlocked ||
+      !!leadCause ||
+      (kind === 'stale-base' && harnessModeOf(this.policy) === 'thin');
     // Отказ окружения, который повтор не снимет (gate зовёт ps в песочнице):
     // без автоматического повтора и без паузы выдачи — ход ведущего.
     const noRetry =
@@ -3289,6 +3346,7 @@ export class Engine {
         ...(blocked ? { blocked: true } : {}),
         ...(writerBlocked && !writerSplit ? { writerBlocked: true as const } : {}),
         ...(writerSplit ? { writerSplit } : {}),
+        ...(leadCause ? { leadCause } : {}),
         ...(options.writerSummary?.trim()
           ? { writerSummary: options.writerSummary.trim().slice(0, 500) }
           : {}),
@@ -3351,13 +3409,13 @@ export class Engine {
             }),
         activeRunId: undefined,
         attempt:
-          (interrupted || uncounted(kind, blocked, writerBlocked) || givesBack) && w.attempt > 0
+          (interrupted || uncounted(kind, blocked, uncountedStop) || givesBack) && w.attempt > 0
             ? w.attempt - 1
             : w.attempt,
         // Отказ до работы (blocked), штатная остановка и вопрос предел
         // незасчитанных отказов не тратят; вопрос сверх своего предела
         // засчитан как попытка.
-        ...(uncounted(kind, blocked, writerBlocked) && !blocked && !interrupted
+        ...(uncounted(kind, blocked, uncountedStop) && !blocked && !interrupted
           ? { neutralFailures: (w.neutralFailures ?? 0) + 1 }
           : {}),
       });
@@ -3378,7 +3436,7 @@ export class Engine {
         payload: {
           failureKind: kind,
           cause: interrupted ? 'shutdown' : causeOf(kind, options.cause, blocked),
-          counted: !interrupted && !uncounted(kind, blocked, writerBlocked) && !givesBack,
+          counted: !interrupted && !uncounted(kind, blocked, uncountedStop) && !givesBack,
         },
       });
       if (options.input && !interrupted)
@@ -6281,6 +6339,7 @@ export class Engine {
         index: grant.index,
         cap: grant.cap,
         failures: pendingFailures(w, attempts).slice(-20),
+        ...(reset?.startOver ? { startOver: true as const } : {}),
       };
     } else if (doReset) {
       // Сброс человеком — его решение по отказам без разбора и по удержанию
@@ -6294,6 +6353,7 @@ export class Engine {
         spent: w.attempt,
         granted: this.policy.maxAttempts,
         failures: pendingFailures(w, attempts).slice(-20),
+        ...(reset?.startOver ? { startOver: true as const } : {}),
       };
       const fresh = freshDiagnosis(w, attempts);
       if (fresh && !fresh.resolved && (fresh.cause === 'split' || fresh.cause === 'contradiction'))
@@ -6802,7 +6862,7 @@ export function budgetLimitsOf(policy: ExecutionPolicy): Record<string, number |
   const out: Record<string, number | null> = {
     maxAttempts: policy.maxAttempts,
     // Облегчённый режим (0.1.0-alpha.69): раундов ревью не считают — без предела.
-    reviewRounds: harnessModeOf(policy) === 'light' ? null : policy.maxAttempts * 2,
+    reviewRounds: hostEnvironment(policy) ? null : policy.maxAttempts * 2,
     repairBudget: policy.repairBudget,
     leadResets: recoveryPolicyOf(policy).leadResets,
   };

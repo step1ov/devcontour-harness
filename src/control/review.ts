@@ -16,7 +16,7 @@ import {
   LIGHT_REVIEW_LOOP_ROUNDS,
   unchangedUnapprovedStreak,
   unapprovedSinceApproved,
-  harnessModeOf,
+  hostEnvironment,
   planOrderChanges,
   digestOf,
   findingId,
@@ -256,7 +256,7 @@ export async function technicalReview(
   // Облегчённый режим (0.1.0-alpha.69): счёта раундов нет — ревью плана не
   // отказывает по пределу раундов; бюджет — время и стоимость выпуска
   // (`budgets.group`/`total`), исчерпание — `BUDGET_EXHAUSTED`, решает владелец.
-  const maxRounds = harnessModeOf(policy) === 'light' ? undefined : input.maxRounds;
+  const maxRounds = hostEnvironment(policy) ? undefined : input.maxRounds;
   const budget = roundBudget(rounds, maxRounds ?? null, {
     since: input.roundEpoch,
     history: prior?.rounds ?? 0,
@@ -267,7 +267,7 @@ export async function technicalReview(
     !!last &&
     !plan.real &&
     (maxRounds === undefined || freeRoundsSinceApproved(rounds) < maxRounds);
-  if (harnessModeOf(policy) === 'light' && last) {
+  if (hostEnvironment(policy) && last) {
     const unapproved = unapprovedSinceApproved(rounds);
     if (unapproved >= 2 * LIGHT_REVIEW_LOOP_ROUNDS)
       throw new HarnessError(
@@ -951,7 +951,7 @@ export function planRoundEpoch(
  */
 export const reviewRoundCap = (
   policy: Pick<ExecutionPolicy, 'maxAttempts' | 'harnessMode'>,
-): number | null => (harnessModeOf(policy) === 'light' ? null : strictReviewRoundCap(policy));
+): number | null => (hostEnvironment(policy) ? null : strictReviewRoundCap(policy));
 
 /** Предел раундов строгого режима — порог настроек панели и снимков политики. */
 export const strictReviewRoundCap = (policy: Pick<ExecutionPolicy, 'maxAttempts'>) =>

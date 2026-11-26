@@ -296,7 +296,7 @@ export async function writerRuntimeHome(
   env: Record<string, string>,
   home = homedir(),
 ): Promise<{ env: Record<string, string>; missing?: string; refused?: string }> {
-  const { mkdir, writeFile, lstat } = await import('node:fs/promises');
+  const { mkdir, writeFile, lstat, rm } = await import('node:fs/promises');
   await mkdir(dir, { recursive: true, mode: 0o700 });
   const real =
     runtime === 'codex'
@@ -315,7 +315,12 @@ export async function writerRuntimeHome(
       env: {},
       refused: `файл входа ${real} — не обычный файл JSON (ссылка, каталог или повреждён): копия исполнителю не делается; восстановите вход (${runtime === 'codex' ? 'codex login' : 'claude login'})`,
     };
-  if (source) await writeFile(copy, source.text, { mode: 0o600, flag: 'wx' });
+  // Постоянный каталог работы (тонкий режим) уже держит прежнюю копию:
+  // она заменяется свежей, а не дописывается; ссылка на её месте снимается.
+  if (source) {
+    await rm(copy, { force: true });
+    await writeFile(copy, source.text, { mode: 0o600, flag: 'wx' });
+  }
   if (runtime === 'codex')
     return {
       env: { CODEX_HOME: dir },
@@ -324,7 +329,12 @@ export async function writerRuntimeHome(
         : { missing: `нет ${real}: выполните codex login` }),
     };
   // Без файла настроек claude спрашивает начальную настройку: отвечено.
-  await writeFile(join(dir, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true }));
+  // Постоянный каталог работы — настройки прежнего вызова не затираются.
+  await writeFile(join(dir, '.claude.json'), JSON.stringify({ hasCompletedOnboarding: true }), {
+    flag: 'wx',
+  }).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== 'EEXIST') throw error;
+  });
   return {
     env: { CLAUDE_CONFIG_DIR: dir },
     ...(source || env.CLAUDE_CODE_OAUTH_TOKEN || env.ANTHROPIC_API_KEY

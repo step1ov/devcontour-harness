@@ -19,6 +19,8 @@ export interface RecoveryPolicy {
   enabled: boolean;
   diagnoseAfter: number;
   leadResets: number;
+  /** Тонкий режим (alpha.73): разбор только по исчерпании сдач, без правила «тот же дефект дважды». */
+  thin?: true;
   /**
    * Откуда правило: `policy` — поле `recovery`; `derived` — выведено из
    * `inputPolicy.leadAnswers.technical: true`; `default` — поля нет, ведущий
@@ -34,7 +36,9 @@ export interface RecoveryPolicyFields {
   recovery?: { mode: 'lead' | 'user'; diagnoseAfter: number; leadResets: number } | undefined;
   inputPolicy?: { leadAnswers?: { technical?: boolean } | undefined } | undefined;
   /** Режим harness: в облегчённом (нет поля) технические вопросы по умолчанию у ведущего. */
-  harnessMode?: 'light' | 'strict' | undefined;
+  harnessMode?: 'light' | 'strict' | 'thin' | undefined;
+  /** Засчитанных попыток на задачу: в тонком режиме разбор ведущего — по их исчерпании. */
+  maxAttempts?: number | undefined;
 }
 
 /**
@@ -61,6 +65,7 @@ export function recoveryPolicyOf(policy: RecoveryPolicyFields): RecoveryPolicy {
       enabled: policy.recovery.mode === 'lead',
       diagnoseAfter: policy.recovery.diagnoseAfter,
       leadResets: policy.recovery.leadResets,
+      ...(policy.harnessMode === 'thin' ? { thin: true as const } : {}),
       source: 'policy',
     };
   const lead = policy.inputPolicy?.leadAnswers?.technical === true;
@@ -68,6 +73,11 @@ export function recoveryPolicyOf(policy: RecoveryPolicyFields): RecoveryPolicy {
     mode: lead ? 'lead' : 'user',
     enabled: lead,
     ...DEFAULT_RECOVERY,
+    // Тонкий режим (alpha.73): отказы возвращаются в ту же сессию
+    // исполнителя, ведущий разбирает только исчерпание сдач.
+    ...(policy.harnessMode === 'thin'
+      ? { diagnoseAfter: policy.maxAttempts ?? 3, thin: true as const }
+      : {}),
     source: lead ? 'derived' : 'default',
   };
 }

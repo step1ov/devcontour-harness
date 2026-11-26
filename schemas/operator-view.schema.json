@@ -536,7 +536,8 @@
               "type": "string",
               "enum": [
                 "light",
-                "strict"
+                "strict",
+                "thin"
               ]
             },
             "default": {

@@ -10,14 +10,17 @@ import type {
   WorkState,
 } from '../contracts/execution.ts';
 import type { RecoveryPolicy } from './decisions.ts';
-import { MAX_NEUTRAL_FAILURES } from '../contracts/repair-policy.ts';
+import { MAX_NEUTRAL_FAILURES, uncountedStop } from '../contracts/repair-policy.ts';
 
 type AttemptFacts = Pick<
   AttemptState,
   'id' | 'workId' | 'status' | 'failureKind' | 'blocked' | 'writerBlocked' | 'interrupted'
 > &
   Partial<
-    Pick<AttemptState, 'writerSplit' | 'failureFingerprint' | 'evidence' | 'environmentCause'>
+    Pick<
+      AttemptState,
+      'writerSplit' | 'leadCause' | 'failureFingerprint' | 'evidence' | 'environmentCause'
+    >
   >;
 type WorkFacts = Pick<
   WorkState,
@@ -35,8 +38,7 @@ type WorkFacts = Pick<
 export const countedFailure = (a: AttemptFacts) =>
   a.status === 'failed' &&
   !a.blocked &&
-  !a.writerBlocked &&
-  !a.writerSplit &&
+  !uncountedStop(a) &&
   !a.interrupted &&
   a.failureKind !== undefined &&
   a.failureKind !== 'environment' &&
@@ -267,7 +269,7 @@ export function leadHold(
   if (
     (defects.length >= policy.diagnoseAfter ||
       hangTwice ||
-      (repeated && pending.includes(repeated.runs[1]))) &&
+      (!policy.thin && repeated && pending.includes(repeated.runs[1]))) &&
     work.attempt < maxAttempts
   )
     return { kind: 'diagnosis-required', failures: pending };

@@ -212,7 +212,7 @@ test('view: второй проход и предложения у работы,
       ),
     );
   const view = viewIn('ru');
-  assert.equal(view.viewRevision, 10);
+  assert.equal(view.viewRevision, 11);
   const w = view.works.find((x) => x.id === 'w1')!;
   assert.deepEqual(w.attemptReviews?.[0]?.secondPass, {
     mode: 'on-reject',

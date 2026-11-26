@@ -110,10 +110,10 @@ export const viewSettingsSchema = z.strictObject({
    * у doctor и status (docs/principles.md «Кто принимает решения»).
    */
   decisions: decisionSettingsSchema.optional(),
-  /** Ревизия 9: режим harness (alpha.69) и действует ли граница записи. */
+  /** Ревизия 9: режим harness (alpha.69) и действует ли граница записи; ревизия 11 — `thin`. */
   harnessMode: z
     .strictObject({
-      mode: z.enum(['light', 'strict']),
+      mode: z.enum(['light', 'strict', 'thin']),
       default: z.boolean(),
       writeGuard: z.boolean(),
     })
@@ -1351,6 +1351,11 @@ export const workDetailViewSchema = z.strictObject({
         model: z.string().min(1).max(T.model).optional(),
         startedAt: isoTimeSchema,
         finishedAt: isoTimeSchema.optional(),
+        /**
+         * Ревизия 11: сессия writer тонкого режима — `fresh` новая,
+         * `resumed` продолжена, `fallback` новая вместо утраченной.
+         */
+        writerSession: z.enum(['fresh', 'resumed', 'fallback']).optional(),
         stages: z
           .array(
             z.strictObject({

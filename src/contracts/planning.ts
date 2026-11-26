@@ -239,4 +239,9 @@ export const planCheckDataSchema = z.strictObject({
   graph: workGraphSchema.optional(),
   graphDigest: digestSchema.optional(),
   basis: digestSchema.optional(),
+  /**
+   * Советы плану, не отказ (alpha.73): в тонком режиме — число работ вне
+   * 3–5. Нет поля — советов нет.
+   */
+  advice: z.array(z.string().min(1).max(1000)).max(10).optional(),
 });

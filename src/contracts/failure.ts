@@ -110,5 +110,6 @@ export {
   lastContextLimit,
   repairPolicy,
   repairRepeats,
+  uncountedStop,
   type RepairRule,
 } from './repair-policy.ts';

@@ -134,6 +134,7 @@ export function usageStream(runtime: 'codex' | 'claude') {
     result: string | undefined,
     terminalReason: string | undefined,
     numTurns: number | undefined,
+    sessionId: string | undefined,
     compactions = 0;
   const turns: string[] = [];
   const line = (text: string) => {
@@ -151,6 +152,11 @@ export function usageStream(runtime: 'codex' | 'claude') {
     }
     const e = event as Record<string, unknown>;
     model ??= eventModel(e);
+    // ID сессии: codex — `thread.started`, claude — `session_id` событий.
+    if (runtime === 'codex' && e.type === 'thread.started' && typeof e.thread_id === 'string')
+      sessionId ??= e.thread_id.slice(0, 200);
+    if (runtime === 'claude' && typeof e.session_id === 'string')
+      sessionId ??= e.session_id.slice(0, 200);
     if (runtime === 'claude' && e.type === 'system' && e.subtype === 'compact_boundary')
       compactions++;
     if (runtime === 'claude' && e.type === 'result')
@@ -222,6 +228,11 @@ export function usageStream(runtime: 'codex' | 'claude') {
     numTurns: () => {
       flush();
       return numTurns;
+    },
+    /** ID сессии runtime (продолжение writer тонкого режима); нет — не сообщил. */
+    sessionId: () => {
+      flush();
+      return sessionId;
     },
     /** Сколько раз runtime сжал контекст за вызов (`compact_boundary`). */
     compactions: () => compactions,

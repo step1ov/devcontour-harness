@@ -22,6 +22,8 @@ export const guideTopics = [
   'recovery',
   'release',
   'relay',
+  // Тонкий режим (alpha.73): весь поток ведущего одним разделом.
+  'thin',
 ] as const;
 export type GuideTopic = (typeof guideTopics)[number];
 

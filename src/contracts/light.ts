@@ -13,11 +13,14 @@ import { idSchema, relativePathSchema } from './primitives.ts';
  * - `strict` — прежняя изоляция (песочница ОС с закрытым чтением, сетью по
  *   доменам, граница инфраструктуры). Явный выбор владельца для чужого кода
  *   или секретов production; заморожен: новых возможностей не получает.
+ * - `thin` (alpha.73) — окружение как у `light`, но поток работы тоньше:
+ *   одна сессия исполнителя на работу, сдача на чистом checkout цели, одно
+ *   ревью; выводов применимости и переноса кандидат→интеграция нет.
  *
  * Политика без поля — `light`. Поле не входит ни в `executionDigest`, ни в
  * `isolationDigest`: смена режима не делает согласования графов устаревшими.
  */
-export const harnessModeSchema = z.enum(['light', 'strict']);
+export const harnessModeSchema = z.enum(['light', 'strict', 'thin']);
 export type HarnessMode = z.infer<typeof harnessModeSchema>;
 export const DEFAULT_HARNESS_MODE: HarnessMode = 'light';
 

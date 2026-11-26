@@ -23,12 +23,14 @@ export function hsetup(options: Parameters<typeof setup>[0]) {
           cliAdapter('claude', {
             executable: bin('fake-claude'),
             toolProfiles: policy.toolProfiles,
+            sessionContinue: policy.harnessMode === 'thin',
           }),
         ),
         codex: wrap(
           cliAdapter('codex', {
             executable: bin('fake-codex'),
             toolProfiles: policy.toolProfiles,
+            sessionContinue: policy.harnessMode === 'thin',
           }),
         ),
       },

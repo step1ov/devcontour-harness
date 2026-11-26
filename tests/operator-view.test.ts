@@ -29,7 +29,7 @@ test('view: пустой вход — корректный документ по
   const view = operatorView(baseInput());
   operatorViewSchema.parse(view);
   assert.equal(view.viewVersion, OPERATOR_VIEW_VERSION);
-  assert.equal(view.viewRevision, 10);
+  assert.equal(view.viewRevision, 11);
   assert.equal(view.generatedAt, new Date(NOW).toISOString());
   assert.deepEqual(view.works, []);
   assert.equal(view.progress.total, 0);

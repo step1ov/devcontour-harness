@@ -1,7 +1,15 @@
 #!/usr/bin/env node
 // FIXTURE ONLY. Подставной CLI codex/claude для тестов механики harness:
 // говорит по протоколу CLI, но ответы берёт из сценария, а не из модели.
-import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, chmodSync } from 'node:fs';
+import {
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  rmSync,
+  existsSync,
+  realpathSync,
+  chmodSync,
+} from 'node:fs';
 import { dirname, join, basename } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 
@@ -9,6 +17,17 @@ const runtime = basename(process.argv[1]).includes('claude') ? 'claude' : 'codex
 const args = process.argv.slice(2);
 if (args.includes('--version')) {
   console.log(`fake-${runtime} 0.0.1 (fixture)`);
+  process.exit(0);
+}
+// Справка — для пробы продолжения сессии (alpha.73): флаги, которые harness
+// передаёт продолжению. FIXTURE_NO_RESUME — CLI без продолжения.
+if (args.includes('--help')) {
+  if (process.env.FIXTURE_NO_RESUME) console.log('Usage: fixture (no resume)');
+  else if (runtime === 'codex')
+    console.log(
+      'Usage: codex exec resume [OPTIONS] [SESSION_ID] [PROMPT]\n  --json\n  --output-schema <FILE>\n  -o, --output-last-message <FILE>',
+    );
+  else console.log('Usage: claude [options]\n  -r, --resume [value]  Resume a conversation');
   process.exit(0);
 }
 // Проверка входа (`claude auth status`, `codex login status`): fixture «вошёл».
@@ -26,6 +45,42 @@ const arg = (name) => {
   const i = args.indexOf(name);
   return i >= 0 ? args[i + 1] : undefined;
 };
+// Сессии (alpha.73), как у настоящих CLI: codex ищет сессию по ID в
+// CODEX_HOME, claude — в CLAUDE_CONFIG_DIR/projects/<настоящий путь cwd>.
+// Продолжение без метки — сообщение CLI «сессии нет»; шаг сценария не
+// расходуется. FIXTURE_RESUME_FAIL — другой отказ до начала (истёкший вход).
+const sessionHome = runtime === 'codex' ? process.env.CODEX_HOME : process.env.CLAUDE_CONFIG_DIR;
+const resumed =
+  runtime === 'codex' ? (args[1] === 'resume' ? args[2] : undefined) : arg('--resume');
+const sessionMark = (id) =>
+  !sessionHome
+    ? undefined
+    : runtime === 'codex'
+      ? join(sessionHome, 'fixture-sessions', id)
+      : join(
+          sessionHome,
+          'projects',
+          realpathSync(process.cwd()).replace(/[^a-zA-Z0-9]/g, '-'),
+          `${id}.jsonl`,
+        );
+if (resumed && process.env.FIXTURE_RESUME_FAIL) {
+  console.error(process.env.FIXTURE_RESUME_FAIL);
+  process.exit(1);
+}
+if (resumed && !(sessionMark(resumed) && existsSync(sessionMark(resumed)))) {
+  console.error(
+    runtime === 'codex'
+      ? `Error: thread/resume failed: session not found: ${resumed}`
+      : `No conversation found with session ID: ${resumed}`,
+  );
+  process.exit(1);
+}
+const sessionId =
+  resumed ?? arg('--session-id') ?? `fixture-${process.pid}-${Date.now().toString(36)}`;
+if (!resumed && sessionMark(sessionId)) {
+  mkdirSync(dirname(sessionMark(sessionId)), { recursive: true });
+  writeFileSync(sessionMark(sessionId), '');
+}
 const schema =
   runtime === 'codex'
     ? JSON.parse(readFileSync(arg('--output-schema'), 'utf8'))
@@ -54,6 +109,8 @@ if (!step) {
   process.exit(2);
 }
 writeFileSync(`${scenarioPath}.${role}.${index}.started`, '');
+// Продолжение сессии: тест видит, какой вызов продолжил какую сессию.
+if (resumed) writeFileSync(`${scenarioPath}.${runtime}.${role}.${index}.resumed`, resumed);
 const prompt = readFileSync(0, 'utf8');
 // Ключи окружения вызова (значения — только у FIXTURE_/PROFILE_): тесты проверяют, что профиль применён.
 writeFileSync(
@@ -282,7 +339,25 @@ if (runtime === 'codex') {
   process.stdout.write(readFileSync(step.stream, 'utf8'));
   process.exit(step.exit ?? 0);
 } else {
-  out({ type: 'system', subtype: 'init', model: step.model ?? 'claude-fixture' });
+  out({
+    type: 'system',
+    subtype: 'init',
+    session_id: sessionId,
+    model: step.model ?? 'claude-fixture',
+  });
+  // Переполнение контекста сессии (alpha.73): итог `prompt_too_long` после ходов.
+  if (step.contextExhausted) {
+    out({ type: 'assistant', message: { content: [{ type: 'text', text: 'fixture' }] } });
+    out({
+      type: 'result',
+      is_error: true,
+      result: 'Prompt is too long',
+      terminal_reason: 'prompt_too_long',
+      num_turns: 5,
+      session_id: sessionId,
+    });
+    process.exit(1);
+  }
   if (started)
     out({ type: 'assistant', message: { content: [{ type: 'text', text: 'fixture' }] } });
   if (step.exit) {

@@ -190,6 +190,11 @@ export function repairDecision(
      * без повтора повторяется автоматически в прежних пределах.
      */
     holdFixed?: (work: WorkState) => boolean;
+    /**
+     * Тонкий режим (alpha.73): отказ возвращается в ту же сессию исполнителя,
+     * правил повтора одного и того же дефекта нет — до `maxAttempts` сдач.
+     */
+    thin?: boolean;
   },
 ): RepairDecision | undefined {
   const blocking = options.blocking ?? ((w: WorkState) => blockingRequest(view, w));
@@ -220,7 +225,11 @@ export function repairDecision(
 
   const work = broken[0]!;
   const kind: FailureKind = work.failureKind ?? 'unknown';
-  const rule = repairPolicy[kind];
+  // Тонкий режим: сдвиг цели мимо замка — повтор проверки без writer.
+  const rule =
+    options.thin && kind === 'stale-base'
+      ? { ...repairPolicy[kind], action: 'retry' as const, repeats: 1 }
+      : repairPolicy[kind];
   const detail = work.failure ? ` Отказ: ${work.failure.slice(0, 300)}` : '';
 
   if (rule.action === 'stop')
@@ -268,7 +277,7 @@ export function repairDecision(
 
   // Тот же дефект дважды подряд без разбора (alpha.71, C3): автоматического
   // повтора нет — разбор ведущего с новой гипотезой, затем попытка с чистого дерева.
-  const defect = repeatedDefectPending(work, view.attempts(work.id));
+  const defect = options.thin ? undefined : repeatedDefectPending(work, view.attempts(work.id));
   if (defect)
     return {
       action: 'stop',
@@ -310,7 +319,7 @@ export function repairDecision(
 
   // Тот же упавший testcase после повтора с выводом проверки: ведущему, а не
   // последней попытке.
-  const repeated = repeatedTestcase(view, work, options.maxAttempts);
+  const repeated = options.thin ? undefined : repeatedTestcase(view, work, options.maxAttempts);
   if (repeated)
     return {
       action: 'stop',
@@ -324,7 +333,7 @@ export function repairDecision(
     ? view.attempts(work.id).filter((a) => a.failureFingerprint === fingerprint).length
     : 0;
   const repeats = repairRepeats(kind, lastContextLimit(view.attempts(work.id)));
-  if (!fingerprint || identical > repeats)
+  if (!fingerprint || (identical > repeats && !(options.thin && rule.action === 'retry')))
     return {
       action: 'stop',
       workId: work.id,

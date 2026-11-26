@@ -42,6 +42,7 @@ import {
   type CliCommand,
   type CliEnvelope,
   type ExecutionPolicy,
+  harnessModeOf,
 } from './contracts/index.ts';
 import { HARNESS_VERSION } from './package.ts';
 import { validateInputs } from './validate.ts';
@@ -281,10 +282,12 @@ function adapters(policy: ExecutionPolicy) {
   return {
     codex: cliAdapter('codex', {
       toolProfiles: policy.toolProfiles,
+      sessionContinue: harnessModeOf(policy) === 'thin',
       ...(bin('codex') ? { executable: bin('codex')! } : {}),
     }),
     claude: cliAdapter('claude', {
       toolProfiles: policy.toolProfiles,
+      sessionContinue: harnessModeOf(policy) === 'thin',
       ...(bin('claude') ? { executable: bin('claude')! } : {}),
     }),
   };
@@ -472,6 +475,7 @@ const options = {
   after: { type: 'string' },
   limit: { type: 'string' },
   reset: { type: 'boolean' },
+  'start-over': { type: 'boolean' },
   once: { type: 'boolean' },
   all: { type: 'boolean' },
   profile: { type: 'string' },
@@ -633,6 +637,7 @@ const flagOwners = {
   kind: ['input-answer'],
   actor: ['input-answer', 'input-carry', 'review-plan', 'review-contract', 'review-accept'],
   by: ['reapprove', 'retry', 'proposal', 'pause'],
+  'start-over': ['retry'],
   proposal: ['proposal'],
   cause: ['diagnose'],
   hypothesis: ['diagnose'],
@@ -1170,11 +1175,13 @@ async function runUpdate(
   return { data: r.data, code: r.code };
 }
 
-/** `init --harness-mode light|strict` (alpha.69): режим новой политики. */
-function harnessModeFlag(value: string | undefined): { harnessMode?: 'light' | 'strict' } {
+/** `init --harness-mode light|strict|thin` (alpha.69, thin — alpha.73): режим новой политики. */
+function harnessModeFlag(value: string | undefined): {
+  harnessMode?: 'light' | 'strict' | 'thin';
+} {
   if (value === undefined) return {};
-  if (value !== 'light' && value !== 'strict')
-    throw new HarnessError('INVALID_INPUT', '--harness-mode: ожидается light или strict', [
+  if (value !== 'light' && value !== 'strict' && value !== 'thin')
+    throw new HarnessError('INVALID_INPUT', '--harness-mode: ожидается light, strict или thin', [
       { path: ['--harness-mode'], message: value },
     ]);
   return { harnessMode: value };
@@ -1822,11 +1829,12 @@ async function run(
               ? h.engine.cancel(need('work'), v.reason, 'operator')
               : h.engine.retry(
                   need('work'),
-                  v.reset
+                  v.reset || v['start-over']
                     ? {
                         // Сброс ведущего называет причину разбором; своя причина — по желанию.
                         reason: lead ? (v.reason ?? '') : need('reason'),
                         ...(v.diagnosis !== undefined ? { diagnosis: v.diagnosis } : {}),
+                        ...(v['start-over'] ? { startOver: true as const } : {}),
                       }
                     : undefined,
                   lead ? 'lead' : 'operator',

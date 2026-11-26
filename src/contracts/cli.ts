@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { workProposalSchema } from './proposals.ts';
+import { harnessModeSchema } from './light.ts';
 import { API_VERSION, STATE_VERSION } from './version.ts';
 import {
   digestSchema,
@@ -533,6 +534,13 @@ export const cliCommands = {
         required: false,
         description: 'Сбросить счётчик попыток; требует --reason',
       },
+      {
+        name: '--start-over',
+        value: 'flag',
+        required: false,
+        description:
+          'Тонкий режим (alpha.73): сброс, после которого работа начинается заново от цели — дерево, ветка и сессия исполнителя убираются; обычный --reset их сохраняет (новая сессия со сводкой). Включает --reset',
+      },
       { name: '--reason', value: 'text', required: false, description: 'Причина сброса' },
       {
         name: '--by',
@@ -802,7 +810,7 @@ export const cliCommands = {
         value: 'text',
         required: false,
         description:
-          'Режим harness новой политики (alpha.69): light — по умолчанию (исполнитель и gates на хосте с Docker, браузером и сетью; одна граница — запись только в своё дерево попытки, временный каталог и кеши); strict — прежняя песочница ОС, заморожен, выбор владельца для чужого кода или секретов production (harnessMode: strict)',
+          'Режим harness новой политики (alpha.69): light — по умолчанию (исполнитель и gates на хосте с Docker, браузером и сетью; одна граница — запись только в своё дерево попытки, временный каталог и кеши); strict — прежняя песочница ОС, заморожен, выбор владельца для чужого кода или секретов production (harnessMode: strict); thin (alpha.73) — окружение light, одна сессия исполнителя на работу, сдача на чистом checkout и одно ревью (harnessMode: thin, review.passes.code: off)',
       },
       {
         name: '--recovery',
@@ -1896,7 +1904,7 @@ export const cliCommands = {
   },
   guide: {
     description:
-      'Раздел инструкции ведущего по теме (alpha.71): session (читается первой в каждой сессии), setup, plan, review, run, recovery, release, relay; печатает текст раздела без конверта, `--json` — конверт с текстом и заголовками; только чтение файлов пакета',
+      'Раздел инструкции ведущего по теме (alpha.71): session (читается первой в каждой сессии), setup, plan, review, run, recovery, release, relay, thin (тонкий режим, alpha.73); печатает текст раздела без конверта, `--json` — конверт с текстом и заголовками; только чтение файлов пакета',
     writes: false,
     idempotency: 'Только чтение. Та же версия пакета и тема дают тот же текст',
     args: [
@@ -1905,7 +1913,7 @@ export const cliCommands = {
         value: 'text',
         required: true,
         description:
-          'Тема: session, setup, plan, review, run, recovery, release, relay; можно позиционно: `harness guide run`',
+          'Тема: session, setup, plan, review, run, recovery, release, relay, thin; можно позиционно: `harness guide run`',
       },
       { name: '--json', value: 'flag', required: false, description: 'JSON-конверт вместо текста' },
     ],
@@ -2681,7 +2689,17 @@ export const statusDataSchema = z.strictObject({
 
 /** Раздел `harness guide` (alpha.71, E3). */
 export const guideDataSchema = z.strictObject({
-  topic: z.enum(['session', 'setup', 'plan', 'review', 'run', 'recovery', 'release', 'relay']),
+  topic: z.enum([
+    'session',
+    'setup',
+    'plan',
+    'review',
+    'run',
+    'recovery',
+    'release',
+    'relay',
+    'thin',
+  ]),
   title: z.string().min(1).max(300),
   headings: z.array(z.string().max(300)).max(100),
   text: z.string().min(1).max(100_000),
@@ -3102,10 +3120,11 @@ export const doctorDataSchema = z.strictObject({
    * Режим harness (alpha.69): `light` по умолчанию или `strict` (явный выбор
    * владельца, заморожен); строка для человека и граница записи облегчённого
    * режима — механизм и открытые на запись кеши. Есть, когда задана политика.
+   * `thin` (alpha.73) — тонкий режим в окружении облегчённого.
    */
   mode: z
     .strictObject({
-      mode: z.enum(['light', 'strict']),
+      mode: harnessModeSchema,
       default: z.boolean(),
       line: z.string(),
       lineEn: z.string(),

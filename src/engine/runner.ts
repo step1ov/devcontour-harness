@@ -4,7 +4,7 @@ import { controllerTemp } from '../environment/controller-temp.ts';
 import type { LeadDiagnosis } from '../contracts/execution.ts';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { toolchainBaseline } from '../environment/toolchain-pin.ts';
 import {
   lstat,
@@ -71,6 +71,7 @@ import {
   derivedApplicabilityOn,
   gateApplicabilityLimits,
   harnessModeOf,
+  hostEnvironment,
   integrationReuseOn,
   writeGuardActive,
   blockingOf,
@@ -269,6 +270,10 @@ import { selfCheckNote, writeSelfCheck, type SelfCheckPlan } from '../verificati
 import { measuredInvoke } from './measured.ts';
 import { continuableDraft, implementationBasis } from './reuse.ts';
 import { requestsOf } from './input-requests.ts';
+import { thinFlow } from '../thin/flow.ts';
+import type { ThinKit } from '../thin/kit.ts';
+import { SessionLost } from '../thin/session.ts';
+import { discardWork } from '../thin/tree.ts';
 import { evaluateInput, normalizeImplementation, type InputEvaluation } from './input-policy.ts';
 
 type Repo = ExecutionPolicy['repositories'][number];
@@ -842,6 +847,9 @@ export class Runner {
         }
         const adopted = this.engine.adopt(a.id, this.owner);
         this.engine.finish(a.id, adopted.token, a.integrationSha);
+        // Приёмка после падения между update-ref и записью (тонкий режим).
+        if (harnessModeOf(this.policy) === 'thin')
+          await this.thinDiscard(a.repositoryId, a.workId).catch(() => undefined);
       } catch (error) {
         this.engine.rejectRecovery(a.id, error instanceof Error ? error.message : String(error));
       }
@@ -897,7 +905,7 @@ export class Runner {
         }),
         // Облегчённый режим (alpha.69): своё имя проекта compose, свои порты
         // и шлюз gates — исполнителю и gates одинаково.
-        ...(harnessModeOf(this.policy) === 'light'
+        ...(hostEnvironment(this.policy)
           ? attemptVariables(
               attempt.id,
               this.attemptPorts.get(attempt.id)?.get(repo.id) ?? {},
@@ -937,8 +945,17 @@ export class Runner {
       outputSchema?: Record<string, unknown>;
       /** Стадия учёта вызова вместо обычной (второй проход ревью — своя). */
       stage?: string;
-      /** Сессия writer: ответвление от сессии исследования (alpha.70); reviewer — всегда новая. */
-      session?: Extract<RuntimeRequest['session'], { kind: 'fork' }>;
+      /**
+       * Сессия writer: ответвление от сессии исследования (alpha.70) или
+       * продолжение сессии работы (тонкий режим, alpha.73); reviewer — всегда новая.
+       */
+      session?: Extract<RuntimeRequest['session'], { kind: 'fork' | 'continue' }>;
+      /** Постоянный домашний каталог CLI writer работы (тонкий режим): в нём сессия. */
+      home?: string;
+      /** ID сессии writer, о котором сообщил runtime, — до разбора исхода (и при отказе). */
+      onSession?: (id: string) => void;
+      /** ID новой сессии writer, заданный хостом (claude `--session-id`). */
+      freshSessionId?: string;
     },
     signal: AbortSignal,
   ): Promise<RuntimeResponse & { redact: Redactor; unreadable?: string; callId: string }> {
@@ -987,7 +1004,7 @@ export class Runner {
     // Исполнитель облегчённого режима под границей: каталог git своего
     // дерева (P8-1; ревью 2 — только он).
     const gitGuard =
-      !review && harnessModeOf(this.policy) === 'light' && writeGuardActive(this.policy)
+      !review && hostEnvironment(this.policy) && writeGuardActive(this.policy)
         ? gitWorktreeGuard(input.cwd)
         : undefined;
     // Вызов под учётом: бюджет проверяется до вызова, расход закрепляется за попыткой.
@@ -1007,7 +1024,12 @@ export class Runner {
         prompt: input.prompt,
         outputSchema:
           input.outputSchema ?? (review ? reviewOutputSchema : implementationOutputSchema),
-        session: !review && input.session ? input.session : { kind: 'fresh' },
+        session:
+          !review && input.session
+            ? input.session
+            : !review && input.freshSessionId
+              ? { kind: 'fresh', id: input.freshSessionId }
+              : { kind: 'fresh' },
         sandbox: {
           mode: this.policy.isolation.mode,
           writable: review ? [] : [input.cwd, ...(scratch ? [scratch] : [])],
@@ -1027,7 +1049,7 @@ export class Runner {
           network: { domains: this.policy.isolation.domains },
           // Облегчённый режим (alpha.69): исполнитель как обычный разработчик,
           // одна граница — запись в своё дерево, свой TMPDIR и кеши.
-          ...(!review && harnessModeOf(this.policy) === 'light'
+          ...(!review && hostEnvironment(this.policy)
             ? {
                 light: writeGuardActive(this.policy)
                   ? (() => {
@@ -1043,9 +1065,12 @@ export class Runner {
                       return {
                         guard: pick('subpath'),
                         ...(denyRead.length ? { guardDenyRead: denyRead } : {}),
+                        ...(input.home ? { home: input.home } : {}),
                       };
                     })()
-                  : {},
+                  : input.home
+                    ? { home: input.home }
+                    : {},
               }
             : {}),
         },
@@ -1068,6 +1093,7 @@ export class Runner {
       // Временные файлы исполнителя — не артефакт попытки: каталог свой, создан выше.
       scratch ? rm(scratch, { recursive: true, force: true }).catch(() => undefined) : undefined,
     );
+    if (!review && response.sessionId) input.onSession?.(response.sessionId);
     // Ответ «передан исполнителю» — только когда runtime вызова writer
     // попытки, выданной с ним, действительно работал (ответ не
     // `unavailable`: процесс запустился), а не по apply, claim или началу
@@ -1108,6 +1134,8 @@ export class Runner {
       };
     if (response.status === 'failed') {
       const message = `${adapter.runtime}: runtime завершился отказом${response.diagnostics.reason ? ': ' + response.diagnostics.reason : ''}`;
+      // Продолжение сессии writer не началось (тонкий режим): сдача начнёт новую.
+      if (response.diagnostics.sessionLost) throw new SessionLost(message);
       // Класс — по признаку адаптера, до разбора текста: числа токенов в
       // причине совпадали бы с признаками отказа провайдера («401», «429»).
       // Текст постоянный, предел — данными: отпечаток один при любом пределе
@@ -1614,6 +1642,8 @@ export class Runner {
      */
     record = true,
   ): Promise<string | undefined> {
+    // Тонкий режим: дерево работы переживает попытку — черновик не нужен.
+    if (harnessModeOf(this.policy) === 'thin') return;
     if (attempt.candidateSha || !attempt.worktree || !attempt.baseSha || !work.approvedDigest)
       return;
     // Метаданные git дерева изменены (ссылка вместо index, переключённый
@@ -1685,6 +1715,7 @@ export class Runner {
     cwd: string,
     redact: Redactor,
   ): Promise<AttemptState> {
+    if (harnessModeOf(this.policy) === 'thin') return attempt;
     const draft = this.engine.read((v) => continuableDraft(v, work, attempt.id));
     if (!draft) return attempt;
     const dir = join(this.dirOf(attempt.repositoryId), 'artifacts', attempt.id, 'implementation');
@@ -1752,6 +1783,120 @@ export class Runner {
     return { ...attempt, continuedFrom };
   }
 
+  /**
+   * Зависимости в дереве исполнителя до его работы (gates установки, кроме
+   * `writerDependencies: false`); отказ установки попытку не роняет, но в
+   * замере виден.
+   */
+  private async writerDependencies(
+    attempt: AttemptState,
+    repo: Repo,
+    cwd: string,
+    base: string,
+    installs: GatePolicy[],
+    artifactDir: string,
+    signal: AbortSignal,
+    execution: ReturnType<typeof executionEnvironment>,
+    trusted: boolean,
+  ): Promise<WriterDependencies | undefined> {
+    if (!installs.length) return undefined;
+    return this.timed(
+      attempt,
+      'writer-dependencies',
+      () =>
+        prepareWriterDependencies({
+          policy: this.policy,
+          cwd,
+          base,
+          trusted,
+          gates: installs,
+          protectedPaths: repo.protectedPaths,
+          artifactDir,
+          signal,
+          execution,
+          boundary: this.boundary(attempt.dependencies),
+        }),
+      (d) => (d.failed ? 'failed' : 'passed'),
+    );
+  }
+
+  /**
+   * Интеграция репозитория по одной (`mergeTails`): слияние, проверки, ревью
+   * и CAS одной работы не перемежаются с другой.
+   */
+  private async serialized<T>(attempt: AttemptState, fn: () => Promise<T>): Promise<T> {
+    const repositoryId = attempt.repositoryId;
+    const previous = this.mergeTails.get(repositoryId) ?? Promise.resolve();
+    let unlock!: () => void;
+    this.mergeTails.set(repositoryId, new Promise<void>((r) => (unlock = r)));
+    try {
+      // Ожидание замка — своя стадия замеров, как у облегчённого режима.
+      await this.timed(attempt, 'integration-wait', () => previous);
+      return await fn();
+    } finally {
+      unlock();
+    }
+  }
+
+  /**
+   * Дерево работы тонкого режима держится, пока работа не принята и не
+   * отменена: его не убирают ни обход деревьев, ни `cleanup --run`.
+   */
+  private keepsWorkTree(attempt: AttemptState, dir: string) {
+    if (harnessModeOf(this.policy) !== 'thin' || !attempt.worktree) return false;
+    const status = this.engine.read((v) => v.work(attempt.workId)?.status);
+    if (status === 'done' || status === 'cancelled') return false;
+    const key = (p: string) => worktreeKey(existsSync(p) ? realpathSync(p) : p);
+    return key(dir) === key(attempt.worktree);
+  }
+
+  /** Убрать дерево, ветку и сессии работы тонкого режима (принята, отменена, сброс ведущего). */
+  private thinDiscard(repositoryId: string, workId: string) {
+    return discardWork(
+      this.repoPath(this.repo(repositoryId)),
+      this.checkout(repositoryId, 'worktrees', `work-${workId}`),
+      workId,
+      this.checkout(repositoryId, 'sessions', workId),
+    );
+  }
+
+  /** Возможности прогона для потока сдачи тонкого режима (`src/thin/`). */
+  private thinKit(): ThinKit {
+    return {
+      engine: this.engine,
+      policy: this.policy,
+      call: this.call.bind(this),
+      gate: this.gate.bind(this),
+      review: this.review.bind(this),
+      environment: this.environment.bind(this),
+      dependencyStore: this.dependencyStore.bind(this),
+      prepareSteps: this.prepareSteps.bind(this),
+      timed: this.timed.bind(this),
+      consumers: this.consumers.bind(this),
+      requirements: this.requirements.bind(this),
+      notes: this.notes.bind(this),
+      history: this.history.bind(this),
+      adapter: this.adapter.bind(this),
+      checkout: this.checkout.bind(this),
+      promote: this.promote.bind(this),
+      hostNotes: this.hostNotes.bind(this),
+      reviewProtocol: this.reviewProtocol.bind(this),
+      assertScope: this.assertScope.bind(this),
+      decideInput: this.decideInput.bind(this),
+      applicableGates: this.applicableGates.bind(this),
+      prepareSelfCheck: this.prepareSelfCheck.bind(this),
+      writerDependencies: this.writerDependencies.bind(this),
+      generate: this.generate.bind(this),
+      verifyGenerated: this.verifyGenerated.bind(this),
+      implemented: (event) => this.options.hooks?.implemented?.(event),
+      serialize: (attempt, fn) => this.serialized(attempt, fn),
+      discard: (repositoryId, workId) => this.thinDiscard(repositoryId, workId),
+      proposalNotes,
+      secretNames: (attempt) =>
+        Object.keys(this.attemptSecrets.get(attempt.id)?.get(attempt.repositoryId) ?? {}),
+    };
+  }
+
   private async execute(claimed: AttemptState, controller: AbortController) {
     let attempt = claimed;
     const repo = this.repo(attempt.repositoryId);
@@ -1797,7 +1942,7 @@ export class Runner {
       // поставщика и потребителя не делят порты. Постоянные ресурсы-порты
       // политики не выделяются. Нет свободного — отказ среды, попытка не
       // засчитывается.
-      if (harnessModeOf(this.policy) === 'light' && this.policy.attemptEnv?.ports?.length) {
+      if (hostEnvironment(this.policy) && this.policy.attemptEnv?.ports?.length) {
         const byRepo = new Map<string, Record<string, number>>();
         const exclude = this.policy.resources
           .filter((r) => r.kind === 'port')
@@ -1827,7 +1972,7 @@ export class Runner {
       // проверяемых потребителей) — свой файл. Секретов политики в нём нет;
       // тестовые секреты попытки (alpha.72, `attemptEnv.secrets`) — свои
       // случайные значения этой попытки, файл всегда только для владельца (0600).
-      if (harnessModeOf(this.policy) === 'light') {
+      if (hostEnvironment(this.policy)) {
         await mkdir(artifacts, { recursive: true });
         const secretsByRepo = new Map<string, Record<string, string>>();
         for (const repositoryId of new Set([
@@ -1946,6 +2091,23 @@ export class Runner {
           }
           const base = await git(repoPath, 'rev-parse', repo.targetRef);
           await this.options.hooks?.prepared?.({ work, attempt, baseSha: base });
+          // Тонкий режим (alpha.73): дальше — поток сдачи `src/thin/`; без
+          // переиспользования кандидата, черновика и фазы кандидата.
+          if (harnessModeOf(this.policy) === 'thin') {
+            await thinFlow.handover(this.thinKit(), {
+              attempt,
+              work,
+              repo,
+              repoPath,
+              base,
+              artifacts,
+              worktrees,
+              signal,
+              ...(context ? { context } : {}),
+              rearm,
+            });
+            return;
+          }
           // Основания записываются до реализации; в той же транзакции решается,
           // берётся ли кандидат предыдущей попытки вместо нового кода.
           const reuse = this.engine.implementationBasis(
@@ -2024,32 +2186,21 @@ export class Runner {
                 attempt.reusedFrom || repo.writerDependencies === false
                   ? []
                   : writerDependencyGates(gates);
-              let dependencies: WriterDependencies | undefined;
-              if (installs.length)
-                dependencies = await this.timed(
-                  attempt,
-                  'writer-dependencies',
-                  () =>
-                    prepareWriterDependencies({
-                      policy: this.policy,
-                      cwd,
-                      base,
-                      // Манифесты из черновика писал прежний исполнитель; черновик
-                      // без манифестов ставит зависимости базы.
-                      trusted: !(
-                        attempt.continuedFrom?.applied &&
-                        draftTouchesInstall(attempt.continuedFrom.files)
-                      ),
-                      gates: installs,
-                      protectedPaths: repo.protectedPaths,
-                      artifactDir: join(artifacts, 'candidate', 'writer-dependencies'),
-                      signal,
-                      execution,
-                      boundary: this.boundary(attempt.dependencies),
-                    }),
-                  // Отказ установки попытку не роняет, но в замере виден.
-                  (d) => (d.failed ? 'failed' : 'passed'),
-                );
+              const dependencies = await this.writerDependencies(
+                attempt,
+                repo,
+                cwd,
+                base,
+                installs,
+                join(artifacts, 'candidate', 'writer-dependencies'),
+                signal,
+                execution,
+                // Манифесты из черновика писал прежний исполнитель; черновик
+                // без манифестов ставит зависимости базы.
+                !(
+                  attempt.continuedFrom?.applied && draftTouchesInstall(attempt.continuedFrom.files)
+                ),
+              );
               const sha = attempt.reusedFrom
                 ? await this.timed(attempt, 'implementation-reuse', () =>
                     this.reuseCandidate(attempt, work, repo, cwd, base, context).then(
@@ -2644,7 +2795,10 @@ export class Runner {
               preWriter ||
               // Отказ до работы с известной причиной preflight: не засчитывается.
               (origin instanceof TaskFailure && origin.diagnosis === 'preflight')) &&
-            !attempt.candidateSha,
+            // Тонкий режим ведёт кандидата в своей копии попытки: по записанному.
+            !(harnessModeOf(this.policy) === 'thin'
+              ? persisted?.candidateSha
+              : attempt.candidateSha),
           ...(heartbeatCause ? { heartbeatCause } : {}),
         };
         const input = !stalled && origin instanceof TaskFailure ? origin.input : undefined;
@@ -2786,7 +2940,7 @@ export class Runner {
         });
     }
     if (!existsSync(file) && !interrupted.length) return { status: 'nothing-pending' as const };
-    const pending: Retained & { reason: string } = existsSync(file)
+    const all: Retained & { reason: string } = existsSync(file)
       ? (JSON.parse(await readFile(file, 'utf8')) as Retained & { reason: string })
       : {
           reason: 'interrupted',
@@ -2813,6 +2967,11 @@ export class Runner {
           ],
           snapshots: [],
         };
+    // Общее дерево работы тонкого режима — не дерево этой попытки (H2).
+    const pending = {
+      ...all,
+      worktrees: all.worktrees.filter((t) => !this.keepsWorkTree(attempt, t.dir)),
+    };
     // Окружения прежних попыток лежат в каталоге состояния, новых — под
     // корнем рабочих деревьев вне дерева.
     const outside = this.checkoutRoot().root;
@@ -2866,12 +3025,24 @@ export class Runner {
 
   private async sweepWorktrees(dryRun: boolean) {
     const worktrees: WorktreeCleanupEntry[] = [];
+    // Тонкий режим: принятая или отменённая работа, чьё дерево уже убрано, —
+    // её ветка и сессии тоже.
+    if (!dryRun && harnessModeOf(this.policy) === 'thin')
+      for (const w of this.engine.read((v) => v.works()))
+        if (
+          (w.status === 'done' || w.status === 'cancelled') &&
+          !existsSync(this.checkout(w.order.repositoryId, 'worktrees', `work-${w.id}`))
+        )
+          await this.thinDiscard(w.order.repositoryId, w.id).catch(() => undefined);
     const attempts = this.engine.read((v) =>
       v.attempts().map((attempt) => {
         const work = v.work(attempt.workId);
-        const latest = v.attempts(attempt.workId).every((a) => a.attempt <= attempt.attempt);
+        const all = v.attempts(attempt.workId);
+        const latest = all.every((a) => a.attempt <= attempt.attempt);
         return {
           attempt,
+          // Порядок выдачи у работы: номера незасчитанных попыток повторяются.
+          order: all.findIndex((a) => a.id === attempt.id),
           refusal: attemptRefusal(attempt, work, latest, this.jobs.has(attempt.id)),
         };
       }),
@@ -2888,8 +3059,14 @@ export class Runner {
           ...(item.attempt.worktree
             ? [item.attempt.worktree, item.attempt.worktree + '-integration']
             : []),
-        ])
-          owners.set(worktreeKey(path), item);
+        ]) {
+          // Дерево работы тонкого режима — общее у её попыток: владелец —
+          // последняя попытка работы, а не последняя в порядке обхода.
+          const key = worktreeKey(path);
+          const prior = owners.get(key);
+          if (prior?.attempt.workId === item.attempt.workId && prior.order > item.order) continue;
+          owners.set(key, item);
+        }
       }
       const roots = [
         this.checkout(repo.id, 'worktrees'),
@@ -2917,7 +3094,8 @@ export class Runner {
         try {
           entry.sizeKb = await sizeKb(path);
           prior = await readRemoval(artifacts, path);
-          let refusal = owner.refusal;
+          let refusal =
+            owner.refusal ?? (this.keepsWorkTree(owner.attempt, path) ? 'recoverable' : undefined);
           if (!refusal)
             try {
               if (await cleanupUnfinished(artifacts, await receipts(artifacts)))
@@ -2971,6 +3149,14 @@ export class Runner {
           entry.removalStarted = true;
           await removeTree(repoPath, path, Runner.cleanupRemovalMs);
           entry.action = 'removed';
+          // Дерево работы тонкого режима (работа принята или отменена): с ним
+          // уходят её ветка и сессии.
+          if (
+            harnessModeOf(this.policy) === 'thin' &&
+            owner.attempt.worktree &&
+            worktreeKey(owner.attempt.worktree) === path
+          )
+            await this.thinDiscard(owner.attempt.repositoryId, owner.attempt.workId);
           await recordRemoval(artifacts, entry, 'removed', prior);
         } catch (error) {
           entry.action = 'failed';
@@ -5327,9 +5513,24 @@ export class Runner {
         await dependencyFreshness(this.repositories(), attempt.dependencies),
       );
     signal.throwIfAborted();
+    await this.promote(attempt, work, repo, sha, base);
+  }
+
+  /**
+   * Продвинуть target на проверенный `sha` от `base`: fencing, CAS
+   * (`update-ref <ref> <sha> <base>`) и приёмка — одна транзакция. Если
+   * процесс упадёт после update-ref, recovery сверит сохранённые evidence до
+   * приёмки. Цель сдвинулась — `stale-base`.
+   */
+  private async promote(
+    attempt: AttemptState,
+    work: WorkState,
+    repo: Repo,
+    sha: string,
+    base: string,
+  ) {
+    const repoPath = this.repoPath(repo);
     await this.assertTargetDetached(repo);
-    // Fencing, CAS продвижения и приёмка — одна транзакция. Если процесс упадёт
-    // после update-ref, recovery сверит сохранённые evidence до приёмки.
     try {
       this.engine.finish(attempt.id, attempt.token, sha, () => {
         // Источник требований мог измениться, пока шли проверки и ревью:

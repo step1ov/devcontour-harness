@@ -237,6 +237,8 @@ const ADDITIVE_ARGS = new Set([
   // Восстановление ведущим после повторных отказов (0.1.0-alpha.66).
   'retry--by',
   'retry--diagnosis',
+  // Работа заново от цели в тонком режиме (0.1.0-alpha.73).
+  'retry--start-over',
   'init--recovery',
   'init--diagnose-after',
   'init--lead-resets',
@@ -508,6 +510,12 @@ test('H3-01: прежние команды и схемы их данных не 
     if (k === 'properties' && v && typeof v === 'object' && 'ui' in v && 'command' in v) {
       const rest = { ...(v as Record<string, unknown>) };
       delete rest.ui;
+      v = rest;
+    }
+    // Советы plan-check тонкого режима (0.1.0-alpha.73).
+    if (k === 'properties' && v && typeof v === 'object' && 'checkPlan' in v && 'advice' in v) {
+      const rest = { ...(v as Record<string, unknown>) };
+      delete rest.advice;
       v = rest;
     }
     // Режим harness в doctor (0.1.0-alpha.69).

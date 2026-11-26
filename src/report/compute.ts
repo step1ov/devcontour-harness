@@ -3,6 +3,7 @@
 // `valueReportSchema` (src/contracts/report.ts).
 
 import { failureRefOf } from '../contracts/failure-catalog.ts';
+import { uncountedStop } from '../contracts/repair-policy.ts';
 import { attemptLine, type AttemptLineFacts } from '../contracts/attempt-line.ts';
 import { HarnessError } from '../contracts/errors.ts';
 import type {
@@ -247,7 +248,7 @@ export function failureBucketOf(a: AttemptState): FailureBucket | null {
   if (!finishedStatuses.has(a.status) || a.interrupted === 'shutdown') return null;
   if (a.blocked) return 'environment';
   // Исполнитель остановился из-за окружения (`writerBlocked`): корзина среды.
-  if (a.writerBlocked) return 'environment';
+  if (a.writerBlocked || a.leadCause === 'gate-environment') return 'environment';
   if (a.failureKind) return bucketOfKind[a.failureKind];
   if (a.status === 'expired') return 'environment';
   if (a.status === 'cancelled') return 'operator';
@@ -267,8 +268,7 @@ const counted = (a: AttemptState, givenBack: ReadonlySet<string>) =>
   a.status !== 'active' &&
   a.interrupted !== 'shutdown' &&
   !a.blocked &&
-  !a.writerBlocked &&
-  !a.writerSplit &&
+  !uncountedStop(a) &&
   a.status !== 'expired' &&
   a.failureKind !== 'environment' &&
   a.failureKind !== 'provider-auth' &&
@@ -392,7 +392,7 @@ function lastFailureView(a: AttemptState, bucket: FailureBucket): LastFailure {
           ? 'writer-split'
           : a.writerBlocked
             ? 'writer-environment'
-            : a.environmentCause,
+            : (a.leadCause ?? a.environmentCause),
       ),
     ),
   };
@@ -412,8 +412,7 @@ export function attemptCounted(
   maxAttempts: number,
 ): boolean {
   if (a.status === 'active' || a.status === 'succeeded') return true;
-  if (a.interrupted || a.status === 'expired' || a.blocked || a.writerBlocked || a.writerSplit)
-    return false;
+  if (a.interrupted || a.status === 'expired' || a.blocked || uncountedStop(a)) return false;
   if (a.failureKind === 'environment' || a.failureKind === 'provider-auth') return false;
   if (a.failureKind === 'needs-input') {
     const earlier = attempts

@@ -1,6 +1,6 @@
 import { HarnessError } from '../contracts/errors.ts';
 import { stageOfStep } from '../control/stage.ts';
-import { blocksWork, inputPolicyOf, leadAnswerBasis } from '../contracts/index.ts';
+import { blocksWork, harnessModeOf, inputPolicyOf, leadAnswerBasis } from '../contracts/index.ts';
 import {
   MAX_NEUTRAL_FAILURES,
   failedBeforeWork,
@@ -61,6 +61,8 @@ export interface StopSource {
 export interface StopInputOptions {
   maxAttempts: number;
   repairBudget: number;
+  /** Тонкий режим (alpha.73): без правил повтора того же дефекта; по политике источника. */
+  thin?: boolean;
   /** Одна работа; неизвестная — `NOT_FOUND`. */
   workId?: string;
   /**
@@ -159,7 +161,8 @@ const phaseOf: Partial<Record<WorkStatus, StopPhase>> = {
  * порты хоста, которые движок спрашивает о каждой работе (основание
  * постановки, `claimable`, группа бюджета при пределе группы).
  */
-export function stopInputsOf(h: StopSource, options: StopInputOptions): StopInput[] {
+export function stopInputsOf(h: StopSource, input: StopInputOptions): StopInput[] {
+  const options = harnessModeOf(h.policy) === 'thin' ? { ...input, thin: true } : input;
   const jobs = h.workflows.list().filter((j) => j.kind === 'graph');
   const now = h.engine.clock();
   return h.engine.read((v) => stopInputsIn(h, options, v, { jobs, now }));
@@ -543,6 +546,10 @@ export function stopInputsIn(
               : {};
           })(attempts.findLast((a) => a.status !== 'active')),
           ...((last) =>
+            work.status === 'failed' && kind === 'needs-lead' && last?.leadCause
+              ? { leadCause: last.leadCause }
+              : {})(attempts.findLast((a) => a.status !== 'active')),
+          ...((last) =>
             work.status === 'failed' && writerBlockedStop(kind, attempts)
               ? {
                   writerBlocked: {
@@ -799,6 +806,7 @@ function outlookOf(
   if (!episodes.length) {
     const decision = repairDecision(ctx.v, [...works], {
       blocking: (w) => ctx.requestsOf(w.id).find(blocksWork),
+      ...(options.thin ? { thin: true } : {}),
       budgetLeft: options.repairBudget - used,
       maxAttempts: options.maxAttempts,
       leadHold: ctx.leadHold,
@@ -809,7 +817,10 @@ function outlookOf(
   // Пока идут эпизоды, сломанные без эпизода ждут; дальше — повтор по очереди.
   const ahead: Outlook = episodes.length ? 'wait' : 'retry';
   for (const [i, w] of plain.entries()) {
-    const rule = repairPolicy[w.failureKind ?? 'unknown'];
+    const rule =
+      options.thin && w.failureKind === 'stale-base'
+        ? { action: 'retry' as const }
+        : repairPolicy[w.failureKind ?? 'unknown'];
     const attempts = ctx.attemptsOf(w.id);
     const repeats = repairRepeats(
       w.failureKind ?? 'unknown',
@@ -819,12 +830,14 @@ function outlookOf(
     const identical = w.failureFingerprint
       ? attempts.filter((a) => a.failureFingerprint === w.failureFingerprint).length
       : repeats + 1;
+    // Тонкий режим (alpha.73): правил повтора того же дефекта нет.
     const retry =
       rule.action === 'retry' &&
-      identical - 1 < repeats &&
+      (options.thin || identical - 1 < repeats) &&
       !acceptanceGap(ctx.v, w) &&
-      !repeatedTestcase(ctx.v, w, options.maxAttempts) &&
-      !repeatedDefectPending(w, attempts) &&
+      (options.thin ||
+        (!repeatedTestcase(ctx.v, w, options.maxAttempts) &&
+          !repeatedDefectPending(w, attempts))) &&
       !ctx.leadHold(w) &&
       (w.neutralFailures ?? 0) < MAX_NEUTRAL_FAILURES &&
       w.attempt < options.maxAttempts &&

@@ -1967,6 +1967,21 @@ view`) в пределе длины сохраняет хвост — остат
 - **`doctor.notes`.** Новое необязательное поле: ожидаемые состояния словами
   (`browser-checks …`); прежние потребители его не читают.
 
+### 0.1.0-alpha.73
+
+`viewRevision: 11`: панель должна принимать `settings.harnessMode.mode:
+"thin"` и необязательное `attempts[].writerSession` (`fresh`, `resumed`,
+`fallback`) — devcontour-harness-ui с поддержкой ревизии 11. Новое в
+состоянии — необязательные `attempt.writerSession`, `attempt.leadCause`,
+`resets[].startOver`, транзакция `run.writer-session`, причины
+`gate-environment` и `merge-conflict`. Откат на alpha.72 не читает такое
+состояние: откат — только на копии до обновления.
+
+- Облегчённый и строгий режимы не меняются; тонкий включается только явно
+  (`harnessMode: "thin"`).
+- Хост со своим адаптером CLI должен объявить `sessionContinue`, иначе
+  каждая сдача тонкого режима — новая сессия.
+
 ### 0.1.0-alpha.72
 
 Номера форматов прежние, `viewRevision: 10`. Новое — необязательные поля:

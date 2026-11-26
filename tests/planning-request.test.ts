@@ -19,6 +19,7 @@ import {
   planningRequest,
   standaloneInstructions,
 } from '../src/planning/index.ts';
+import { THIN_TASK_SIZE_SECTION } from '../src/planning/request.ts';
 import { generatePolicy } from '../src/init/policy.ts';
 import { resolveProfile } from '../src/profiles/resolve.ts';
 
@@ -446,4 +447,29 @@ test('H2-01: standaloneInstructions — T1–T5, T6 только с требов
     prompt.endsWith('Host instructions:\n' + withReq.join('\n\n') + '\n\nUser brief:\nGreet'),
   );
   assert.doesNotMatch(prompt, /templates\/|skills\//);
+});
+
+test('alpha.73: тонкий режим — 3–5 работ по сценарию с точными gates вместо обычного размера; plan-check советует вне 3–5', async () => {
+  const f = facts();
+  const request = planningRequest({ brief: 'Add a price endpoint', facts: f, thin: true });
+  assert.equal(request.recommendedTasks, 5);
+  assert.ok(request.prompt.includes(THIN_TASK_SIZE_SECTION));
+  assert.ok(!request.prompt.includes(S.s1b), 'обычный размер задачи не повторяется');
+  assert.match(THIN_TASK_SIZE_SECTION, /3–5 tasks/);
+  assert.match(THIN_TASK_SIZE_SECTION, /exact gates/);
+  assert.match(THIN_TASK_SIZE_SECTION, /only by repository/);
+  // Обычный режим — прежний раздел.
+  assert.ok(planningRequest({ brief: 'x', facts: f }).prompt.includes(S.s1b));
+  const { thinAdvice } = await import('../src/planning/check.ts');
+  const generatedPolicy = () =>
+    generatePolicy({ profile: resolveProfile('npm-ci'), writer: 'claude' }).input;
+  const thin = executionPolicySchema.parse({
+    ...JSON.parse(JSON.stringify(generatedPolicy())),
+    harnessMode: 'thin',
+  });
+  assert.match(thinAdvice(thin, 2) ?? '', /^THIN_PLAN_SIZE: работ 2 — меньше 3/);
+  assert.match(thinAdvice(thin, 6) ?? '', /^THIN_PLAN_SIZE: работ 6 — больше 5/);
+  assert.equal(thinAdvice(thin, 3), undefined);
+  assert.equal(thinAdvice(thin, 5), undefined);
+  assert.equal(thinAdvice(executionPolicySchema.parse(generatedPolicy()), 9), undefined);
 });
