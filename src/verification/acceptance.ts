@@ -5,6 +5,7 @@ import {
   derivedApplicabilityOn,
   digestOf,
   integrationReuseOn,
+  acceptancePhases,
   expandGateRefs,
   selectReviewer,
   vendorOf,
@@ -60,6 +61,8 @@ export interface PropertyProofInput {
   /** Случаи закреплённой версии корпуса; `null` — закреплённая версия не найдена. */
   corpus?: CorpusSnapshot | null | undefined;
   evidence: ProofEvidence[];
+  /** Фазы приёмки (`acceptancePhases`); нет — обе. */
+  phases?: readonly ('candidate' | 'integration')[];
 }
 
 /** Решающая запись gate на фазе: последняя запись этой фазы, SHA и версии. */
@@ -102,7 +105,7 @@ export function propertyProofProblem(input: PropertyProofInput): string | undefi
       input.corpus ?? undefined,
     );
     const own = expected?.corpus?.cases.length ?? 0;
-    for (const phase of ['candidate', 'integration'] as const) {
+    for (const phase of input.phases ?? (['candidate', 'integration'] as const)) {
       // Gate свойства обязателен независимо от состава requiredGates: иначе
       // проваленный gate свойства можно было бы исключить и подставить другой PASS.
       const check = decisive(input, phase, gate);
@@ -758,7 +761,7 @@ export function resultProblems(result: RunResult, context: ReceiverContext): str
   // (`notApplicableProblem` по политике получателя); доказательства
   // требований и договоров — только PASS.
   const named = proofGates(order, context.contracts);
-  const decisiveAll = (['candidate', 'integration'] as const).flatMap((phase) => [
+  const decisiveAll = acceptancePhases(policy).flatMap((phase) => [
     ...required.map((gate) => ({
       phase,
       gate,
@@ -1043,6 +1046,7 @@ export function resultProblems(result: RunResult, context: ReceiverContext): str
     effective,
     corpus,
     evidence,
+    phases: acceptancePhases(policy),
   });
   if (proof) problems.push(proof);
   return problems;

@@ -37,6 +37,11 @@ export interface ThinKit {
   checkout: Runner['checkout'];
   /** CAS продвижения target и приёмка одной транзакцией. */
   promote: Runner['promote'];
+  hostNotes: Runner['hostNotes'];
+  reviewProtocol: Runner['reviewProtocol'];
+  assertScope: Runner['assertScope'];
+  decideInput: Runner['decideInput'];
+  applicableGates: Runner['applicableGates'];
 }
 
 /** Сдача работы: попытка после общей подготовки прогона (порты, контекст, зависимости, база). */

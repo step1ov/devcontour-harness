@@ -1,6 +1,3 @@
-/* eslint-disable @typescript-eslint/no-unsafe-member-access --
- * Тест правит сырой JSON политики до разбора схемой.
- */
 /**
  * 0.1.0-alpha.73: шов прогона тонкого режима. После общей подготовки
  * попытка уходит в поток сдачи `src/thin/` с привязанными возможностями
@@ -11,6 +8,7 @@ import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
+import { TaskFailure } from '../src/contracts/index.ts';
 import { thinFlow } from '../src/thin/flow.ts';
 import type { ThinHandover, ThinKit } from '../src/thin/kit.ts';
 import { approve, implement, runAll, setup } from './runner-fixture.ts';
@@ -20,14 +18,36 @@ const thin = (p: Record<string, unknown>) => {
   p.maxAttempts = 1;
 };
 
-test('thin: попытка — в поток сдачи после общей подготовки, с возможностями прогона', async () => {
+test('thin: попытка — в поток сдачи с привязанными возможностями прогона; promote — CAS с stale-base', async () => {
   const ctx = setup({ scenario: { writer: implement(), reviewer: approve() }, policy: thin });
   const original = thinFlow.handover;
-  const seen: { kit?: ThinKit; input?: ThinHandover } = {};
+  const seen: { kit?: ThinKit; input?: ThinHandover; stale?: unknown; history?: number } = {};
   thinFlow.handover = (kit, input) => {
     seen.kit = kit;
     seen.input = input;
-    return original(kit, input);
+    // Привязанный метод прогона работает вне объекта Runner.
+    seen.history = kit.history(input.attempt).length;
+    // Первый CAS: цель сдвинута после проверки — promote отказывает stale-base.
+    let moved = false;
+    const promote: ThinKit['promote'] = async (attempt, work, repo, sha, base) => {
+      if (!moved) {
+        moved = true;
+        ctx.repo.git(
+          'update-ref',
+          repo.targetRef,
+          ctx.repo.git('commit-tree', `${base}^{tree}`, '-p', base, '-m', 'race'),
+        );
+        try {
+          await kit.promote(attempt, work, repo, sha, base);
+        } catch (error) {
+          seen.stale = error;
+          throw error;
+        }
+        return;
+      }
+      return kit.promote(attempt, work, repo, sha, base);
+    };
+    return original({ ...kit, promote }, input);
   };
   try {
     await runAll(ctx);
@@ -35,34 +55,22 @@ test('thin: попытка — в поток сдачи после общей п
     thinFlow.handover = original;
   }
   const kit = seen.kit!;
-  for (const name of [
-    'call',
-    'gate',
-    'review',
-    'environment',
-    'dependencyStore',
-    'prepareSteps',
-    'timed',
-    'consumers',
-    'requirements',
-    'notes',
-    'history',
-    'adapter',
-    'checkout',
-    'promote',
-  ] as const)
-    assert.equal(typeof kit[name], 'function', name);
+  for (const name of Object.keys(kit) as (keyof ThinKit)[])
+    if (name !== 'engine' && name !== 'policy') assert.equal(typeof kit[name], 'function', name);
   assert.equal(kit.policy.harnessMode, 'thin');
+  assert.equal(seen.history, 1);
   const input = seen.input!;
-  assert.equal(input.base, ctx.repo.git('rev-parse', ctx.policy.repositories[0]!.targetRef));
   assert.equal(input.work.id, ctx.graph.orders[0]!.id);
-  // Заглушка S5: явный отказ ведущему, исполнитель не вызывался, дерева попытки нет.
+  assert.ok(
+    seen.stale instanceof TaskFailure && seen.stale.kind === 'stale-base',
+    String(seen.stale),
+  );
+  // Проверка заново на новой цели — принято; черновика нет, дерево работы убрано.
   const [attempt] = ctx.engine.read((v) => v.attempts(input.work.id));
-  assert.equal(attempt!.failureKind, 'needs-lead');
-  assert.match(attempt!.error ?? '', /тонкого режима .* не реализован/);
-  assert.equal(attempt!.worktree, undefined);
+  assert.equal(attempt!.status, 'succeeded', attempt!.error);
   assert.equal(attempt!.partial, undefined, 'черновик не снимается');
-  assert.equal(existsSync(`${ctx.scenarioPath}.claude.writer.count`), false);
+  assert.equal(existsSync(attempt!.worktree!), false);
+  assert.equal(ctx.repo.git('rev-parse', `${attempt!.integrationSha}^1^{commit}`).length, 40);
 });
 
 test('light: прежний путь — шов не задействован', async () => {

@@ -272,6 +272,7 @@ import { continuableDraft, implementationBasis } from './reuse.ts';
 import { requestsOf } from './input-requests.ts';
 import { thinFlow } from '../thin/flow.ts';
 import type { ThinKit } from '../thin/kit.ts';
+import { SessionLost } from '../thin/session.ts';
 import { evaluateInput, normalizeImplementation, type InputEvaluation } from './input-policy.ts';
 
 type Repo = ExecutionPolicy['repositories'][number];
@@ -1119,6 +1120,8 @@ export class Runner {
       };
     if (response.status === 'failed') {
       const message = `${adapter.runtime}: runtime завершился отказом${response.diagnostics.reason ? ': ' + response.diagnostics.reason : ''}`;
+      // Продолжение сессии writer не началось (тонкий режим): сдача начнёт новую.
+      if (response.diagnostics.sessionLost) throw new SessionLost(message);
       // Класс — по признаку адаптера, до разбора текста: числа токенов в
       // причине совпадали бы с признаками отказа провайдера («401», «429»).
       // Текст постоянный, предел — данными: отпечаток один при любом пределе
@@ -1785,6 +1788,11 @@ export class Runner {
       adapter: this.adapter.bind(this),
       checkout: this.checkout.bind(this),
       promote: this.promote.bind(this),
+      hostNotes: this.hostNotes.bind(this),
+      reviewProtocol: this.reviewProtocol.bind(this),
+      assertScope: this.assertScope.bind(this),
+      decideInput: this.decideInput.bind(this),
+      applicableGates: this.applicableGates.bind(this),
     };
   }
 
@@ -2922,9 +2930,12 @@ export class Runner {
     const attempts = this.engine.read((v) =>
       v.attempts().map((attempt) => {
         const work = v.work(attempt.workId);
-        const latest = v.attempts(attempt.workId).every((a) => a.attempt <= attempt.attempt);
+        const all = v.attempts(attempt.workId);
+        const latest = all.every((a) => a.attempt <= attempt.attempt);
         return {
           attempt,
+          // Порядок выдачи у работы: номера незасчитанных попыток повторяются.
+          order: all.findIndex((a) => a.id === attempt.id),
           refusal: attemptRefusal(attempt, work, latest, this.jobs.has(attempt.id)),
         };
       }),
@@ -2946,11 +2957,7 @@ export class Runner {
           // последняя попытка работы, а не последняя в порядке обхода.
           const key = worktreeKey(path);
           const prior = owners.get(key);
-          if (
-            prior?.attempt.workId === item.attempt.workId &&
-            prior.attempt.attempt > item.attempt.attempt
-          )
-            continue;
+          if (prior?.attempt.workId === item.attempt.workId && prior.order > item.order) continue;
           owners.set(key, item);
         }
       }

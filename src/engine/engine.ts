@@ -89,6 +89,7 @@ import {
   type WorkOrder,
   type WorkState,
   hostEnvironment,
+  acceptancePhases,
   strictSandbox,
   PROPOSAL_LIMITS,
   RESEARCH_LIMIT,
@@ -3013,7 +3014,7 @@ export class Engine {
       const shaOf = (phase: EvidenceRecord['phase']) =>
         phase === 'candidate' ? a.candidateSha! : sha;
       const ran = Object.fromEntries(
-        (['candidate', 'integration'] as const).map((phase) => [
+        acceptancePhases(this.policy).map((phase) => [
           phase,
           (a.requiredGates ?? []).filter(
             (gate) => decisive(['test'], phase, shaOf(phase), gate) !== undefined,
@@ -3021,7 +3022,7 @@ export class Engine {
         ]),
       ) as Record<EvidenceRecord['phase'], string[]>;
       for (const gate of a.requiredGates ?? [])
-        for (const phase of ['candidate', 'integration'] as const) {
+        for (const phase of acceptancePhases(this.policy)) {
           // Исход исполнения решает всегда; неприменимость — только без него.
           const record =
             decisive(['test'], phase, shaOf(phase), gate) ??
@@ -3062,7 +3063,7 @@ export class Engine {
                 (record?.kind === 'not-applicable' ? ': ' + problem : ''),
             );
         }
-      for (const phase of ['candidate', 'integration'] as const)
+      for (const phase of acceptancePhases(this.policy))
         if (
           !last('review', phase, phase === 'candidate' ? a.candidateSha : sha, 'independent-review')
         )
@@ -3091,7 +3092,7 @@ export class Engine {
       // Попытка без изменений (кандидат — база) принимается только с
       // подтверждением reviewer обеих фаз, что приёмка уже выполнена.
       if (a.candidateSha === a.baseSha)
-        for (const phase of ['candidate', 'integration'] as const) {
+        for (const phase of acceptancePhases(this.policy)) {
           const decisive = a.evidence.findLast(
             (e) =>
               e.kind === 'review' &&
@@ -3180,6 +3181,7 @@ export class Engine {
         effective: a.checks?.effective,
         corpus: a.checks?.corpus ? pinnedCorpus(tx, a.checks.corpus) : undefined,
         evidence: a.evidence,
+        phases: acceptancePhases(this.policy),
       });
       if (proof) throw new HarnessError('GATE_FAILED', proof);
       const contract = this.contractBlocker(w, tx);
