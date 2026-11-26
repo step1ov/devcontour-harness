@@ -27,6 +27,8 @@ writeFileSync(
       HARNESS_LEAD_DRIVE_CURSOR: process.env.HARNESS_LEAD_DRIVE_CURSOR,
       HARNESS_LEAD_DRIVE_SESSION: process.env.HARNESS_LEAD_DRIVE_SESSION,
       HARNESS_LEAD_DRIVE_EVENT: process.env.HARNESS_LEAD_DRIVE_EVENT,
+      H: process.env.H,
+      PATH: process.env.PATH,
     },
   }),
 );

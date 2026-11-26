@@ -408,6 +408,14 @@ export function leadCommandEntry(
       return phase === 'start'
         ? one('ведущий запустил harness run', 'the lead started harness run')
         : one('harness run ведущего закончился', "the lead's harness run ended");
+    case 'run-detach':
+      // Решение ведущего — запуск; начало и конец самого run пишет run.
+      return phase === 'end'
+        ? one(
+            'ведущий запустил harness run отдельным процессом',
+            'the lead started harness run as a separate process',
+          )
+        : undefined;
     case 'review-plan':
       return one(
         'ведущий отправил план на независимое ревью',
@@ -520,6 +528,7 @@ export function leadCommandEntry(
 /** Команды, которые журнал ведущего записывает сам. */
 export const LEAD_LOGGED_COMMANDS = [
   'run',
+  'run-detach',
   'review-plan',
   'review-contract',
   'review-accept',

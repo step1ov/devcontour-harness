@@ -12,9 +12,12 @@ The state directory lives outside the repository; `run` creates it.
 To keep `run` going after your shell command returns, start it detached:
 `$H run --detach --log <file> --graph … --policy … --state … --author …`.
 It starts `run` as its own process (own process group and session, stdin
-closed, stdout and stderr appended to `<file>`, mode 0600), prints the pid
-and returns at once, in bash and zsh alike — no `&`, `nohup`, `set -m` or
-`setsid` needed. It records the start in `<state>/run-detach.json`.
+closed, stdout and stderr appended to `<file>`, mode 0600), waits (up to
+30 s) until the run sets its start marker or takes the controller role and
+prints the pid — in bash and zsh alike, no `&`, `nohup`, `set -m` or
+`setsid` needed. If the run exits with an error first, it refuses
+(`NOT_READY`) with the exit code and the last 40 lines of `<file>`. It
+records the start in `<state>/run-detach.json`.
 
 **Waiting for progress.** While `run` works (in the background or in another
 process), do not loop `status`. Block on the next event that matters instead:
@@ -61,14 +64,15 @@ release you leave without a decision does not wake you again: the driver
 stops after waiting a while for any change (a `review-release` you started
 in the background, a policy fix). Begin every session with `$H lead begin`:
 without an open session your `run` and `input-resolve` are not written to
-your log and do not count as a decision. Start `harness run` only detached
+your log and do not count as a decision (the run's own start and end
+records are not your decisions; `run --detach` is). Start `harness run` only detached
 (`$H run --detach --log <file> …`, above) so it outlives your turn and is
 not stopped with your session. Then end your turn with a
 short summary. Do not call `$H wait` and do not loop: the driver wakes you
 on the next failure, hold, question for you, a human's answer, ready
-release or stopped queue (when works are ready and nothing is yours, it
-restarts the last `run --detach` itself, without a session; after three
-restarts in a row that move no work it wakes you); accepted works, failures harness retries by itself and
+release or stopped queue (only you start runs; for a stopped queue the
+summary shows the last `run --detach` log and its last lines); accepted
+works, failures harness retries by itself and
 events already resolved do not wake you. A new executor question you may
 not answer wakes you once (`HARNESS_LEAD_DRIVE_EVENT=owner-question`): do
 not answer it yourself — pass it to the owner's channel (a Relay open
@@ -100,9 +104,11 @@ and stderr go straight to `--log` files (`session-N.prompt.md`, `.out`,
 JSON. A session longer than `--session-timeout` is stopped with its whole
 process group (SIGTERM, then SIGKILL after 10 s) and counts as a failed
 session. Unchanged state the lead already got without a decision is waited
-on for `--repeat-wait` (default 10m) before stopping. The driver restarts
-the last `run --detach` itself when works are ready and nothing is for the
-lead (`data.restarts`). Owner notices (stderr and `data.notices`): a question the lead may
+on for `--repeat-wait` (default 10m) before stopping. The driver never
+starts runs itself. Each session gets an executable wrapper of this exact
+harness CLI in `$H` and on `PATH` (`H`), so `$H …` works in every separate
+shell call; `HARNESS_BIN`, when set, is the path of one executable harness
+file. Owner notices (stderr and `data.notices`): a question the lead may
 not answer (plus one `owner-question` session to pass it on), a step only a
 human takes for one work (budget, provider access) and the lead's
 `lead end --waiting owner`; the driver keeps waiting while other work can go

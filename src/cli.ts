@@ -1555,11 +1555,21 @@ async function run(
         if (a === '--log') i++;
         else if (!a.startsWith('--log=')) args.push(a);
       }
-      const r = detachRun({ stateDir: state, args, log });
+      const r = await detachRun({ stateDir: state, args, log });
       process.stderr.write(
-        `harness: run запущен отдельным процессом: pid ${r.pid}, журнал ${r.log}\n`,
+        `harness: run запущен отдельным процессом: pid ${r.pid}, журнал ${r.log}${r.confirmed ? '' : r.exitCode === 0 ? ' (уже закончился успешно)' : ' (запуск не подтверждён за 30 с)'}\n`,
       );
-      return { command, data: { pid: r.pid, log: r.log, at: r.at, args: r.args } };
+      return {
+        command,
+        data: {
+          pid: r.pid,
+          log: r.log,
+          at: r.at,
+          args: r.args,
+          confirmed: r.confirmed,
+          ...(r.exitCode !== undefined ? { exitCode: r.exitCode } : {}),
+        },
+      };
     }
     case 'lead-drive': {
       // Ожидание за ведущего без модели (alpha.72, P9-9): wait + новая сессия на событии.

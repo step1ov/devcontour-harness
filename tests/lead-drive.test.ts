@@ -11,12 +11,18 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { digestOf, type InputOutcome } from '../src/contracts/index.ts';
 import type { Engine } from '../src/engine/engine.ts';
-import { DRIVE_EXIT_CODES, driveLead, parseAgentTemplate } from '../src/control/drive.ts';
-import { harnessInvocation } from '../src/control/detach.ts';
+import {
+  DRIVE_EXIT_CODES,
+  driveLead,
+  eventSummary,
+  parseAgentTemplate,
+  writeHarnessWrapper,
+} from '../src/control/drive.ts';
+import { detachRun, harnessInvocation, lastDetachedRun } from '../src/control/detach.ts';
 import { accessSync, chmodSync } from 'node:fs';
 import { leadDriveDataSchema } from '../src/contracts/cli.ts';
 import { engineOf, graphOf, policyOf, ready, sha } from './engine-fixture.ts';
@@ -215,10 +221,12 @@ test('lead drive: отказ, который ждёт ведущего, — но
   assert.ok(rec.stdin.startsWith(GOALS), 'сначала цели оператора');
   assert.match(rec.stdin, /Событие: failed/);
   assert.ok(rec.stdin.includes(a.workId));
-  assert.ok(rec.stdin.includes('H() { /opt/harness/bin/harness "$@"; }'));
-  assert.match(rec.stdin, /Начните с `H lead begin --state/);
-  assert.ok(rec.stdin.includes(`H retry --state`), 'команды этого события');
-  assert.ok(rec.stdin.includes('H guide recovery'));
+  assert.match(rec.stdin, /^H=\S+\/H {3}# CLI harness этой версии/m);
+  assert.ok(rec.env.H && rec.env.H.endsWith('/H'), 'обёртка H в окружении');
+  assert.ok(rec.env.PATH?.startsWith(dirname(rec.env.H)), 'и в PATH');
+  assert.match(rec.stdin, /Начните с `\$H lead begin --state/);
+  assert.ok(rec.stdin.includes(`$H retry --state`), 'команды этого события');
+  assert.ok(rec.stdin.includes('$H guide recovery'));
   assert.match(rec.stdin, /HARNESS_LEAD_DRIVE=1: ждёт драйвер/);
   assert.ok(!/session-|history/i.test(rec.stdin), 'без истории прошлых сессий');
   assert.equal(rec.env.HARNESS_LEAD_DRIVE, '1');
@@ -250,7 +258,7 @@ test('lead drive: очередь без harness run будит ведущего;
   const rec = await sessionRecord(dir, 2);
   assert.equal(rec.argv.at(-1), `s2:c${data.sessions[1]!.cursor}`);
   assert.match(rec.stdin, /`harness run` не идёт/);
-  assert.match(rec.stdin, /H run --detach --log <журнал run> --graph/);
+  assert.match(rec.stdin, /\$H run --detach --log <журнал run> --graph/);
   assert.deepEqual(sessionFiles(dir).length, 3);
   env.store.close();
 });
@@ -396,7 +404,7 @@ test('lead drive: вопрос, на который ведущему отвеч�
   const woke = await second.promise;
   assert.equal(woke.sessions[0]?.kind, 'question');
   assert.deepEqual(woke.notices, []);
-  assert.match((await sessionRecord(second.dir, 1)).stdin, /H input-show/);
+  assert.match((await sessionRecord(second.dir, 1)).stdin, /\$H input-show/);
   lead.store.close();
 });
 
@@ -429,8 +437,8 @@ test('lead drive: весь код принят — сессия ведущего
   accept(env.engine, a.id, a.token);
   const rec = await sessionRecord(dir, 1);
   assert.equal(rec.env.HARNESS_LEAD_DRIVE_EVENT, 'release-ready');
-  assert.match(rec.stdin, /H review-release/);
-  assert.match(rec.stdin, /H release done/);
+  assert.match(rec.stdin, /\$H review-release/);
+  assert.match(rec.stdin, /\$H release done/);
   // «Ведущий» закончил выпуск, пока сессия идёт.
   env.engine.recordLead((log, now) => ({
     log: {
@@ -709,7 +717,7 @@ test('ревью LOW: пауза перепроверки stopped после с�
   env.store.close();
 });
 
-const FAKE_RUN = fileURLToPath(new URL('./fixtures/lead-drive/fake-run.mjs', import.meta.url));
+const HEALTHY_RUN = fileURLToPath(new URL('./fixtures/lead-drive/healthy-run.ts', import.meta.url));
 const decide = (env: Env, action = 'lead.retry') =>
   env.engine.recordLead((log, now) => ({
     log: {
@@ -773,7 +781,7 @@ test('ревью 2 M2: вопрос, выведенный из остановк�
   go(dir, 3);
   assert.equal(fromStop.env.HARNESS_LEAD_DRIVE_EVENT, 'question');
   assert.ok(
-    fromStop.stdin.includes(`H input-resolve --state`) && fromStop.stdin.includes(request.id),
+    fromStop.stdin.includes(`$H input-resolve --state`) && fromStop.stdin.includes(request.id),
   );
   assert.doesNotMatch(fromStop.stdin, /--actor lead/);
   const data = await promise;
@@ -843,43 +851,6 @@ test('ревью 2 LOW: ответ оператора на вопрос, на к
   env.store.close();
 });
 
-test('ревью 2 H1: готовые работы и ведущему нечего делать — драйвер сам перезапускает run --detach; три перезапуска без хода — будит ведущего', async () => {
-  const env = engineOf();
-  ready(env.engine, graphOf({ a: [] }));
-  const runs = mkdtempSync(join(tmpdir(), 'harness-drive-runs-'));
-  writeFileSync(
-    join(env.dir, 'run-detach.json'),
-    JSON.stringify({
-      invocation: [process.execPath, FAKE_RUN, runs],
-      args: ['--state', env.dir, '--policy', 'p.json'],
-      cwd: runs,
-      log: join(runs, 'run.log'),
-      pid: 1,
-      at: new Date().toISOString(),
-    }),
-  );
-  const { promise } = driveOf(env, {}, { idleSessions: 1, graceMs: 200 });
-  const data = await promise;
-  assert.equal(data.restarts, 3);
-  assert.equal(data.sessions.length, 1);
-  assert.equal(data.sessions[0]!.kind, 'stopped');
-  const until = Date.now() + 3000;
-  while (Date.now() < until) {
-    if (
-      existsSync(join(runs, 'runs.txt')) &&
-      readFileSync(join(runs, 'runs.txt'), 'utf8').split('\n').filter(Boolean).length === 3
-    )
-      break;
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  assert.deepEqual(
-    readFileSync(join(runs, 'runs.txt'), 'utf8').split('\n').filter(Boolean),
-    Array(3).fill(`run --state ${env.dir} --policy p.json`),
-  );
-  leadDriveDataSchema.parse(data);
-  env.store.close();
-});
-
 test('ревью 2 M4: вызов harness — HARNESS_BIN, исполняемый файл, иначе node с execArgv', () => {
   const dir = mkdtempSync(join(tmpdir(), 'harness-inv-'));
   const plain = join(dir, 'cli.js');
@@ -906,39 +877,123 @@ test('ревью 2 M4: вызов harness — HARNESS_BIN, исполняемы�
   );
 });
 
-test('ревью 2 H1: `H run --detach --log …` из bash и zsh запускает run отдельным процессом', async () => {
+test('ревью 3: строка сводки `$H run --detach …` из bash и zsh (пути с пробелом) запускает run и ждёт его метку', () => {
+  const root = mkdtempSync(join(tmpdir(), 'harness detach '));
   const q = (w: string) => `'${w.replace(/'/g, `'\\''`)}'`;
-  const fn = `H() { ${[process.execPath, '--import', import.meta.resolve('tsx'), cli].map(q).join(' ')} "$@"; }`;
-  const policy = join(mkdtempSync(join(tmpdir(), 'harness-detach-p-')), 'policy.json');
+  // Обёртку драйвер кладёт в путь без пробелов (`$H` без кавычек делится оболочкой).
+  const wrapper = writeHarnessWrapper(mkdtempSync(join(tmpdir(), 'harness-h-')), [
+    process.execPath,
+    '--import',
+    import.meta.resolve('tsx'),
+    cli,
+  ]);
+  // HARNESS_BIN — один исполняемый файл: здесь исправный поддельный run.
+  const bin = join(root, 'fake harness');
+  writeFileSync(
+    bin,
+    `#!/bin/sh\nexec ${[process.execPath, '--import', import.meta.resolve('tsx'), HEALTHY_RUN].map(q).join(' ')} "$@"\n`,
+    { mode: 0o755 },
+  );
+  const policy = join(root, 'policy file.json');
   writeFileSync(policy, JSON.stringify(example('policy')));
   for (const shell of ['bash', 'zsh']) {
     const which = spawnSync('/bin/sh', ['-c', `command -v ${shell}`], { encoding: 'utf8' });
     if (which.status !== 0) continue;
-    const root = mkdtempSync(join(tmpdir(), `harness-detach-${shell}-`));
-    const state = join(root, 'state');
-    const log = join(root, 'run.log');
-    const r = spawnSync(
-      shell,
-      ['-c', `${fn}; H run --detach --log ${q(log)} --state ${q(state)} --policy ${q(policy)}`],
-      { encoding: 'utf8', timeout: 60_000 },
+    const state = join(root, `state ${shell}`);
+    const log = join(root, `run ${shell}.log`);
+    const summary = eventSummary(
+      { kind: 'stopped', status: '', cursor: 0, waitedMs: 0 },
+      { stateDir: state, policyPath: policy, wrapper, session: 1, maxSessions: 1 },
     );
+    const line = summary
+      .split('\n')
+      .find((l) => l.includes('run --detach --log <журнал run>'))!
+      .trim()
+      .replace('<журнал run>', q(log))
+      .replace(' --graph <граф>', '')
+      .replace('<claude|codex>', 'codex');
+    const r = spawnSync(shell, ['-c', line], {
+      encoding: 'utf8',
+      timeout: 60_000,
+      env: { ...process.env, H: wrapper, HARNESS_BIN: bin },
+    });
     assert.equal(r.status, 0, `${shell}: ${r.stderr}`);
     const envelope = JSON.parse(r.stdout) as {
       command: string;
-      data: { pid: number; log: string };
+      data: { pid: number; log: string; confirmed: boolean };
     };
     assert.equal(envelope.command, 'run-detach');
+    assert.equal(envelope.data.confirmed, true, `${shell}: run поставил метку запуска`);
     assert.equal(envelope.data.log, log);
-    const until = Date.now() + 30_000;
-    while (
-      (!existsSync(log) || !readFileSync(log, 'utf8').includes('"command":"run"')) &&
-      Date.now() < until
-    )
-      await new Promise((res) => setTimeout(res, 100));
-    assert.ok(
-      readFileSync(log, 'utf8').includes('"command":"run"'),
-      `${shell}: run написал в журнал`,
-    );
-    assert.ok(existsSync(join(state, 'run-detach.json')));
+    assert.match(readFileSync(log, 'utf8'), /fake run started/);
+    assert.equal(lastDetachedRun(state)?.log, log);
   }
+});
+
+test('ревью 3: run --detach — run вышел с ошибкой: отказ с кодом выхода и хвостом журнала', () => {
+  const root = mkdtempSync(join(tmpdir(), 'harness-detach-fail-'));
+  const policy = join(root, 'policy.json');
+  writeFileSync(policy, JSON.stringify(example('policy')));
+  const log = join(root, 'run.log');
+  const r = spawnSync(
+    process.execPath,
+    [
+      '--import',
+      import.meta.resolve('tsx'),
+      cli,
+      'run',
+      '--detach',
+      '--log',
+      log,
+      '--state',
+      join(root, 'state'),
+      '--policy',
+      policy,
+    ],
+    { encoding: 'utf8', timeout: 60_000 },
+  );
+  assert.equal(r.status, 3, r.stderr);
+  const envelope = JSON.parse(r.stdout) as {
+    ok: boolean;
+    error: { code: string; message: string };
+  };
+  assert.equal(envelope.ok, false);
+  assert.equal(envelope.error.code, 'NOT_READY');
+  assert.match(envelope.error.message, /run вышел с кодом \d+/);
+  assert.match(envelope.error.message, /PROJECT_FILE_MISSING/, 'хвост журнала run в отказе');
+});
+
+test('ревью 3: исправный run --detach — подтверждён меткой; сводка stopped показывает журнал последнего run', async () => {
+  const env = engineOf();
+  ready(env.engine, graphOf({ a: [] }));
+  const policy = join(env.dir, 'policy.json');
+  writeFileSync(policy, JSON.stringify(env.engine.policy));
+  const log = join(env.dir, 'run.log');
+  const r = await detachRun({
+    stateDir: env.dir,
+    args: ['--state', env.dir, '--policy', policy],
+    log,
+    invocation: [process.execPath, '--import', import.meta.resolve('tsx'), HEALTHY_RUN],
+  });
+  assert.equal(r.confirmed, true);
+  await new Promise((res) => setTimeout(res, 2000)); // run закончился, очередь стоит
+  const { dir, promise } = driveOf(env, {}, { idleSessions: 1 });
+  await promise;
+  const rec = await sessionRecord(dir, 1);
+  assert.ok(rec.stdin.includes(`Журнал последнего run --detach: ${log}`));
+  assert.match(rec.stdin, /\| fake run started/);
+  env.store.close();
+});
+
+test('ревью 3: записи начала и конца run в журнале ведущего — не решение', async () => {
+  const env = engineOf();
+  ready(env.engine, graphOf({ a: [] }));
+  const { dir, promise } = driveOf(env, { mode: 'wait-go' }, { idleSessions: 1 });
+  await sessionRecord(dir, 1);
+  decide(env, 'lead.run');
+  go(dir, 1);
+  const data = await promise;
+  assert.equal(data.sessions[0]!.progressed, false);
+  assert.equal(data.outcome, 'no-progress');
+  env.store.close();
 });
