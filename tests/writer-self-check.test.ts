@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
+  ATTEMPT_ENV_WRITER_TEXT,
   FAILURE_PATHS_RELEASE_TEXT,
   FAILURE_PATHS_REVIEW_TEXT,
   FAILURE_PATHS_WRITER_TEXT,
@@ -63,6 +64,11 @@ test('writer: подсказка называет команды и cwd gates о
   const reviewer = readFileSync(`${ctx.scenarioPath}.reviewer.0.prompt`, 'utf8');
   assert.ok(reviewer.includes(FAILURE_PATHS_REVIEW_TEXT), 'чеклист reviewer попытки');
   assert.ok(!reviewer.includes(FAILURE_PATHS_WRITER_TEXT));
+  // alpha.72: файл окружения попытки — только для чтения; reviewer подсказки не получает.
+  assert.ok(head.includes(ATTEMPT_ENV_WRITER_TEXT), 'attempt-env.json только для чтения');
+  assert.match(ATTEMPT_ENV_WRITER_TEXT, /attempt-env\.json\) is read-only/);
+  assert.match(ATTEMPT_ENV_WRITER_TEXT, /copies it to its own temporary file/);
+  assert.ok(!reviewer.includes(ATTEMPT_ENV_WRITER_TEXT));
   ctx.store.close();
 });
 

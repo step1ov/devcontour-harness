@@ -205,6 +205,13 @@ export const FAILURE_PATHS_WRITER_TEXT =
 export const WRITER_SELF_CHECK_TEXT =
   'Self-check before you hand back: run each gate command above yourself from the worktree root (in its cwd when one is given), in the listed order, and fix what fails instead of handing back a red gate. If a gate cannot run in your environment (a service, browser or port is unavailable), the environment-block rule applies: name the gate and the exact error in the summary and still return completed=true when the work itself is done; completed=false is only for unfinished work. The harness runs the same gates again as the trusted check; your run only saves an attempt.';
 
+/**
+ * Файл окружения попытки только для чтения (alpha.72, пилот 9: тест
+ * исполнителя получил EPERM, записывая `attempt-env.json`).
+ */
+export const ATTEMPT_ENV_WRITER_TEXT =
+  'The attempt environment file (HARNESS_ATTEMPT_ENV_FILE, attempt-env.json) is read-only: read it, never write it — writing it fails with EPERM. A test that needs a modified version copies it to its own temporary file and points HARNESS_ATTEMPT_ENV_FILE at the copy for that test.';
+
 export function prompt(input: {
   work: WorkState;
   attempt: AttemptState;
@@ -266,6 +273,7 @@ export function prompt(input: {
       : '',
     'Gates that prove this work: ' + JSON.stringify(input.gates),
     review ? '' : WRITER_SELF_CHECK_TEXT,
+    review ? '' : ATTEMPT_ENV_WRITER_TEXT,
     review ? FAILURE_PATHS_REVIEW_TEXT : FAILURE_PATHS_WRITER_TEXT,
     (review && input.findings
       ? 'Historical attempt errors and gate observations (diagnostic context only). Only controller-issued ids in the review findings sections below may appear in `previous`; do not derive ids from this history: '
