@@ -31,6 +31,15 @@ export interface ThinDelta {
   feedback?: string;
   findings?: CodeReviewHistory;
   context?: ContextSnapshot;
+  /** Цель слита в дерево работы перед сдачей; `conflicts` — файлы с конфликтом. */
+  merged?: { conflicts: string[] };
+}
+
+/** Что сказать исполнителю о слиянии цели в его дерево. */
+export function mergeText(m: { conflicts: string[] }): string {
+  return m.conflicts.length
+    ? `The target branch moved; the harness merged it into this worktree and the merge has conflicts in: ${m.conflicts.join(', ')}. Resolve them (keep both intents), make sure no conflict markers remain, rerun your gates, then hand back.`
+    : 'The target branch moved; the harness merged it into this worktree cleanly. Rerun your gates on the merged tree.';
 }
 
 const deltaParts = (d: ThinDelta) => [
@@ -38,6 +47,7 @@ const deltaParts = (d: ThinDelta) => [
   d.feedback ?? '',
   findingsText(d.findings, false),
   answersText(d.context),
+  d.merged ? mergeText(d.merged) : '',
 ];
 
 /** Запрос продолжения той же сессии. */

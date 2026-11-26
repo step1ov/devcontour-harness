@@ -269,7 +269,7 @@ export function leadHold(
   if (
     (defects.length >= policy.diagnoseAfter ||
       hangTwice ||
-      (repeated && pending.includes(repeated.runs[1]))) &&
+      (!policy.thin && repeated && pending.includes(repeated.runs[1]))) &&
     work.attempt < maxAttempts
   )
     return { kind: 'diagnosis-required', failures: pending };

@@ -42,6 +42,14 @@ export interface ThinKit {
   assertScope: Runner['assertScope'];
   decideInput: Runner['decideInput'];
   applicableGates: Runner['applicableGates'];
+  prepareSelfCheck: Runner['prepareSelfCheck'];
+  writerDependencies: Runner['writerDependencies'];
+  generate: Runner['generate'];
+  verifyGenerated: Runner['verifyGenerated'];
+  /** Хук хоста `implemented` (договор хоста): кандидат записан. */
+  implemented: (
+    event: Parameters<NonNullable<NonNullable<Runner['options']['hooks']>['implemented']>>[0],
+  ) => unknown;
 }
 
 /** Сдача работы: попытка после общей подготовки прогона (порты, контекст, зависимости, база). */

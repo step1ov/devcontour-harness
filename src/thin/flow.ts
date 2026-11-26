@@ -28,8 +28,16 @@ import { prompt } from '../engine/prompt.ts';
 import { git } from '../environment/process.ts';
 import { redactDeep } from '../environment/redaction.ts';
 import { orderedScope } from '../verification/gate-scope.ts';
+import { generatorNote, selectGenerators } from '../verification/generators.ts';
+import { writerDependenciesNote, writerDependencyGates } from '../verification/gates.ts';
 import type { ThinHandover, ThinKit } from './kit.ts';
-import { handoverSummary, resumePrompt, THIN_WRITER_TEXT, type ThinDelta } from './prompt.ts';
+import {
+  handoverSummary,
+  mergeText,
+  resumePrompt,
+  THIN_WRITER_TEXT,
+  type ThinDelta,
+} from './prompt.ts';
 import { thinEnvironment, thinGate } from './rerun.ts';
 import { lostSession, planSession, sessionHome, sessionsDir } from './session.ts';
 import {
@@ -37,6 +45,7 @@ import {
   ensureWorkTree,
   integrationTree,
   mergeBase,
+  mergeTarget,
   removeTree,
   workBranch,
 } from './tree.ts';
@@ -51,9 +60,25 @@ async function writer(
   attempt: AttemptState,
   tree: string,
   gates: Gates,
+  /** Слияние текущей цели в дерево работы перед этой сдачей; конфликт — файлы. */
+  merged?: { conflicts: string[] },
 ) {
   const { work, repo, base, artifacts, signal, context } = h;
   const execution = kit.environment(attempt, 'candidate', tree);
+  // Зависимости в дереве работы и самопроверка — как в облегчённом режиме:
+  // исполнитель сам гоняет проверки поручения.
+  const dependencies = await kit.writerDependencies(
+    attempt,
+    repo,
+    tree,
+    base,
+    repo.writerDependencies === false ? [] : writerDependencyGates(gates),
+    join(artifacts, 'candidate', 'writer-dependencies'),
+    signal,
+    execution,
+    true,
+  );
+  await kit.prepareSelfCheck(attempt, repo, join(artifacts, 'self-check'));
   const history = kit.history(attempt);
   const previous = history.filter((a) => a.id !== attempt.id).at(-1);
   const findings = (await kit.reviewProtocol(attempt.reviewer))
@@ -73,6 +98,7 @@ async function writer(
     ...(feedback ? { feedback } : {}),
     ...(findings ? { findings } : {}),
     ...(context ? { context } : {}),
+    ...(merged ? { merged } : {}),
   };
   const full = prompt({
     work,
@@ -89,7 +115,10 @@ async function writer(
     notes: [
       ...kit.notes(attempt, false),
       ...(await kit.hostNotes(work, attempt, false)),
+      ...(dependencies ? [writerDependenciesNote(dependencies)] : []),
+      ...(repo.generators?.length ? [generatorNote(repo.generators)!] : []),
       THIN_WRITER_TEXT,
+      ...(merged ? [mergeText(merged)] : []),
     ],
     ...(findings ? { findings } : {}),
     ...(feedback ? { feedback } : {}),
@@ -176,12 +205,32 @@ async function candidateOf(
     throw new Error('Ответ исполнителя вне схемы: ' + parsed.error.issues[0]?.message);
   const data = parsed.success ? parsed.data : normalized!.output;
   kit.engine.heartbeat(attempt.id, attempt.token);
-  const sha = await commitWork(tree, `${work.id}: ${work.order.title}`);
+  let sha = await commitWork(tree, `${work.id}: ${work.order.title}`);
   const from = await mergeBase(tree, base, sha);
-  const empty = await kit.assertScope(work, repo, tree, context, [from, sha], true);
-  const changed = (await git(tree, 'diff', '--no-renames', '--name-only', from, sha))
-    .split('\n')
-    .filter(Boolean);
+  const changedOf = async (to: string) =>
+    (await git(tree, 'diff', '--no-renames', '--name-only', from, to)).split('\n').filter(Boolean);
+  // Генераторы политики — на изменённые входы, до проверки области: их
+  // выходы — не правка исполнителя.
+  const generators = selectGenerators(repo.generators ?? [], await changedOf(sha));
+  if (generators.length) {
+    h.rearm();
+    await kit.generate(attempt, generators, tree, 'write', 'candidate', {
+      execution: kit.environment(attempt, 'candidate', tree),
+      signal: h.signal,
+      artifacts: h.artifacts,
+    });
+    sha = await commitWork(tree, `${work.id}: generated outputs`);
+  }
+  const empty = await kit.assertScope(
+    work,
+    repo,
+    tree,
+    context,
+    [from, sha],
+    true,
+    generators.flatMap((g) => g.outputs),
+  );
+  const changed = await changedOf(sha);
   const decided = {
     ...data,
     ...(data.inputRequest ? { inputRequest: redactDeep(data.inputRequest, response.redact) } : {}),
@@ -200,6 +249,7 @@ async function candidateOf(
       'empty-result',
       'Изменений нет: сдача отчиталась о выполнении без правок в дереве работы',
     );
+  await kit.implemented({ attempt, output: data, sha });
   return sha;
 }
 
@@ -244,8 +294,26 @@ async function verify(
         sha,
         from,
       );
-      for (const gate of applicable)
-        await thinGate(kit, { attempt: at, cwd, sha, gate, artifacts, signal, execution });
+      // Выходы генераторов на слиянии обязаны остаться прежними (проверка
+      // после gates установки, как в облегчённом режиме).
+      const generators = repo.generators?.length
+        ? selectGenerators(
+            repo.generators,
+            (await git(cwd, 'diff', '--no-renames', '--name-only', from, candidate))
+              .split('\n')
+              .filter(Boolean),
+          )
+        : [];
+      await kit.verifyGenerated(
+        at,
+        applicable,
+        gates,
+        generators,
+        cwd,
+        'integration',
+        { execution, signal, artifacts },
+        (gate) => thinGate(kit, { attempt: at, cwd, sha, gate, artifacts, signal, execution }),
+      );
       await kit.consumers(at, cwd, sha, artifacts, signal);
       kit.requirements(at, work, repoPath, cwd, sha, 'integration');
       h.rearm();
@@ -267,10 +335,13 @@ export const thinFlow = {
   handover: async (kit: ThinKit, h: ThinHandover): Promise<string> => {
     const { work, repo, repoPath, base, artifacts, signal } = h;
     const dir = kit.checkout(repo.id, 'worktrees', `work-${work.id}`);
-    await ensureWorkTree(repoPath, dir, work.id, base);
+    const { created } = await ensureWorkTree(repoPath, dir, work.id, base);
     // Writer всегда в одном и том же дереве работы (настоящий путь): по нему
     // CLI находит сессию прошлой сдачи.
     const tree = realpathSync(dir);
+    // Цель сдвинулась с прошлой сдачи: она сливается в ветку работы; конфликт
+    // остаётся в дереве, его разрешает исполнитель (не ход ведущего).
+    const merged = created ? undefined : await mergeTarget(tree, base);
     kit.engine.phase(h.attempt.id, h.attempt.token, 'running', { baseSha: base, worktree: dir });
     let attempt: AttemptState = { ...h.attempt, baseSha: base, worktree: dir };
     const gates = orderedScope(repo.gates, attempt.requiredGates ?? repo.gates.map((g) => g.id));
@@ -288,7 +359,8 @@ export const thinFlow = {
         signal,
         base,
       },
-      async () => candidateOf(kit, h, attempt, tree, await writer(kit, h, attempt, tree, gates)),
+      async () =>
+        candidateOf(kit, h, attempt, tree, await writer(kit, h, attempt, tree, gates, merged)),
     );
     kit.engine.phase(attempt.id, attempt.token, 'verifying', { candidateSha: candidate });
     attempt = { ...attempt, candidateSha: candidate };

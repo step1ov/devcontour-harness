@@ -19,7 +19,12 @@ const thin = (p: Record<string, unknown>) => {
 };
 
 test('thin: попытка — в поток сдачи с привязанными возможностями прогона; promote — CAS с stale-base', async () => {
-  const ctx = setup({ scenario: { writer: implement(), reviewer: approve() }, policy: thin });
+  const implemented: string[] = [];
+  const ctx = setup({
+    scenario: { writer: implement(), reviewer: approve() },
+    policy: thin,
+    runner: { hooks: { implemented: (e) => void implemented.push(e.sha) } },
+  });
   const original = thinFlow.handover;
   const seen: { kit?: ThinKit; input?: ThinHandover; stale?: unknown; history?: number } = {};
   thinFlow.handover = (kit, input) => {
@@ -69,6 +74,7 @@ test('thin: попытка — в поток сдачи с привязанны�
   const [attempt] = ctx.engine.read((v) => v.attempts(input.work.id));
   assert.equal(attempt!.status, 'succeeded', attempt!.error);
   assert.equal(attempt!.partial, undefined, 'черновик не снимается');
+  assert.deepEqual(implemented, [attempt!.candidateSha], 'хук хоста implemented');
   assert.equal(existsSync(attempt!.worktree!), false);
   assert.equal(ctx.repo.git('rev-parse', `${attempt!.integrationSha}^1^{commit}`).length, 40);
 });

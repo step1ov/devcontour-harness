@@ -39,6 +39,29 @@ export async function commitWork(dir: string, message: string): Promise<string> 
   return git(dir, 'rev-parse', 'HEAD');
 }
 
+/**
+ * Слить текущую цель в ветку работы, если она сдвинулась с общей базы. Чистое
+ * слияние — коммит; конфликт остаётся в дереве (маркеры, MERGE_HEAD) для
+ * исполнителя. Цель уже в ветке — `undefined`.
+ */
+export async function mergeTarget(
+  dir: string,
+  target: string,
+): Promise<{ conflicts: string[] } | undefined> {
+  if ((await git(dir, 'merge-base', target, 'HEAD')) === target) return undefined;
+  try {
+    await git(dir, ...HARNESS_GIT, 'merge', '--no-ff', '--no-edit', '--no-gpg-sign', target);
+    return { conflicts: [] };
+  } catch {
+    const files = (await git(dir, 'diff', '--name-only', '--diff-filter=U').catch(() => ''))
+      .split('\n')
+      .filter(Boolean);
+    // Слияние не началось (незакоммиченные правки прошлой сдачи мешают):
+    // дерево как есть, цель сольётся на проверке.
+    return files.length ? { conflicts: files } : undefined;
+  }
+}
+
 /** Общая с целью база кандидата: от неё считаются область и сводка сдачи. */
 export const mergeBase = (dir: string, target: string, candidate: string) =>
   git(dir, 'merge-base', target, candidate);

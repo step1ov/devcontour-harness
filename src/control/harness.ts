@@ -1473,6 +1473,7 @@ export class Harness {
         leadHold: (w) => this.engine.leadHoldOf(w, tx),
         // Удержание gate снято исправлением (alpha.71, E2): повтор без ведущего.
         holdFixed: (w) => this.engine.holdLifted(w, tx),
+        thin: harnessModeOf(this.policy) === 'thin',
       });
       if (!decided || decided.action === 'stop') return decided;
       this.workflows.repair(job, `repair:${decided.kind}`, () => {

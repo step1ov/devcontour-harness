@@ -1769,6 +1769,43 @@ export class Runner {
     return { ...attempt, continuedFrom };
   }
 
+  /**
+   * Зависимости в дереве исполнителя до его работы (gates установки, кроме
+   * `writerDependencies: false`); отказ установки попытку не роняет, но в
+   * замере виден.
+   */
+  private async writerDependencies(
+    attempt: AttemptState,
+    repo: Repo,
+    cwd: string,
+    base: string,
+    installs: GatePolicy[],
+    artifactDir: string,
+    signal: AbortSignal,
+    execution: ReturnType<typeof executionEnvironment>,
+    trusted: boolean,
+  ): Promise<WriterDependencies | undefined> {
+    if (!installs.length) return undefined;
+    return this.timed(
+      attempt,
+      'writer-dependencies',
+      () =>
+        prepareWriterDependencies({
+          policy: this.policy,
+          cwd,
+          base,
+          trusted,
+          gates: installs,
+          protectedPaths: repo.protectedPaths,
+          artifactDir,
+          signal,
+          execution,
+          boundary: this.boundary(attempt.dependencies),
+        }),
+      (d) => (d.failed ? 'failed' : 'passed'),
+    );
+  }
+
   /** Возможности прогона для потока сдачи тонкого режима (`src/thin/`). */
   private thinKit(): ThinKit {
     return {
@@ -1793,6 +1830,11 @@ export class Runner {
       assertScope: this.assertScope.bind(this),
       decideInput: this.decideInput.bind(this),
       applicableGates: this.applicableGates.bind(this),
+      prepareSelfCheck: this.prepareSelfCheck.bind(this),
+      writerDependencies: this.writerDependencies.bind(this),
+      generate: this.generate.bind(this),
+      verifyGenerated: this.verifyGenerated.bind(this),
+      implemented: (event) => this.options.hooks?.implemented?.(event),
     };
   }
 
@@ -2085,32 +2127,21 @@ export class Runner {
                 attempt.reusedFrom || repo.writerDependencies === false
                   ? []
                   : writerDependencyGates(gates);
-              let dependencies: WriterDependencies | undefined;
-              if (installs.length)
-                dependencies = await this.timed(
-                  attempt,
-                  'writer-dependencies',
-                  () =>
-                    prepareWriterDependencies({
-                      policy: this.policy,
-                      cwd,
-                      base,
-                      // Манифесты из черновика писал прежний исполнитель; черновик
-                      // без манифестов ставит зависимости базы.
-                      trusted: !(
-                        attempt.continuedFrom?.applied &&
-                        draftTouchesInstall(attempt.continuedFrom.files)
-                      ),
-                      gates: installs,
-                      protectedPaths: repo.protectedPaths,
-                      artifactDir: join(artifacts, 'candidate', 'writer-dependencies'),
-                      signal,
-                      execution,
-                      boundary: this.boundary(attempt.dependencies),
-                    }),
-                  // Отказ установки попытку не роняет, но в замере виден.
-                  (d) => (d.failed ? 'failed' : 'passed'),
-                );
+              const dependencies = await this.writerDependencies(
+                attempt,
+                repo,
+                cwd,
+                base,
+                installs,
+                join(artifacts, 'candidate', 'writer-dependencies'),
+                signal,
+                execution,
+                // Манифесты из черновика писал прежний исполнитель; черновик
+                // без манифестов ставит зависимости базы.
+                !(
+                  attempt.continuedFrom?.applied && draftTouchesInstall(attempt.continuedFrom.files)
+                ),
+              );
               const sha = attempt.reusedFrom
                 ? await this.timed(attempt, 'implementation-reuse', () =>
                     this.reuseCandidate(attempt, work, repo, cwd, base, context).then(

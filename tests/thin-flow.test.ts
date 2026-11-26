@@ -48,6 +48,13 @@ function thin(options: Options & { maxAttempts?: number }) {
   return { ...ctx, work, run, attempts, prompt, resumed, head, h: () => h! };
 }
 
+/** Сдвинуть цель коммитом с файлом `path` (содержимое `text`) из дерева исполнителя. */
+const moveTarget = (path: string, text: string) =>
+  `T=$(git rev-parse refs/heads/harness/accepted); export GIT_INDEX_FILE="$PWD/../.idx-$$"; git read-tree $T; ` +
+  `B=$(printf '${text}' | git hash-object -w --stdin); git update-index --add --cacheinfo 100644,$B,${path}; ` +
+  `TREE=$(git write-tree); C=$(git -c user.name=x -c user.email=x@x commit-tree $TREE -p $T -m moved); ` +
+  `git update-ref refs/heads/harness/accepted $C $T; rm -f "$GIT_INDEX_FILE"`;
+
 const rec = <T extends object>(step: T) => ({ ...step, recordPrompt: true });
 
 test('thin: одна сдача — слияние, gates и ревью на интеграции, приёмка; дерево и сессии убраны', async () => {
@@ -158,6 +165,60 @@ test('отказ ревью → ID находки controller в продолже
   assert.match(ctx.prompt(1), /Нет обработки пустого имени/);
 });
 
+test('три одинаковых провала gate — та же сессия до maxAttempts, затем ведущему (правил повтора нет)', async () => {
+  const ctx = thin({
+    scenario: { writer: rec(implement({ 'src/greet.js': wrong })), reviewer: approve() },
+  });
+  const d = await ctx.run();
+  const all = ctx.attempts();
+  assert.equal(all.length, 3, d.workflow?.error);
+  assert.ok(all.every((a) => a.failureKind === 'gate'));
+  assert.equal(new Set(all.map((a) => a.failureFingerprint)).size, 1, 'один и тот же провал');
+  assert.deepEqual(
+    all.map((a) => a.writerSession?.mode),
+    ['fresh', 'resumed', 'resumed'],
+  );
+  assert.match(d.workflow?.error ?? '', /исчерпан бюджет попыток/);
+});
+
+test('цель сдвинулась после сдачи — слита в ветку работы; конфликт остаётся исполнителю', async () => {
+  const ctx = thin({
+    scenario: {
+      writer: [
+        { ...rec(implement({ 'src/greet.js': wrong })), shell: moveTarget('README.md', 'moved') },
+        rec(implement()),
+      ],
+      reviewer: approve(),
+    },
+  });
+  await ctx.run();
+  const [first, second] = ctx.attempts();
+  assert.equal(first!.failureKind, 'gate');
+  assert.equal(second!.status, 'succeeded', second!.error);
+  assert.match(ctx.prompt(1), /merged it into this worktree cleanly/);
+
+  const clash = thin({
+    scenario: {
+      writer: [
+        {
+          ...rec(implement({ 'src/greet.js': wrong })),
+          shell: moveTarget('src/greet.js', 'other'),
+        },
+        rec(implement()),
+      ],
+      reviewer: approve(),
+    },
+  });
+  await clash.run();
+  const [a] = clash.attempts();
+  assert.equal(a!.leadCause, 'merge-conflict', a!.error);
+  clash.h().engine.retry(clash.work, undefined, 'lead');
+  await clash.run();
+  const [, b] = clash.attempts();
+  assert.equal(b!.status, 'succeeded', b!.error);
+  assert.match(clash.prompt(1), /merge has conflicts in: src\/greet\.js/);
+});
+
 test('три отказа — работа исчерпана, маршрут ведущего', async () => {
   // Разные дефекты: одинаковый дважды подряд — ход ведущего раньше (правило повторов).
   const rejectWith = (message: string, closes = false) => ({
@@ -250,13 +311,6 @@ test('сбой среды gate дважды — ведущему (gate-environme
   const tree = swept.worktrees.find((e) => e.path.endsWith(`work-${ctx.work}`));
   assert.equal(tree?.attemptId, second!.id);
 });
-
-/** Сдвинуть цель коммитом с файлом `path` (содержимое `text`) из дерева исполнителя. */
-const moveTarget = (path: string, text: string) =>
-  `T=$(git rev-parse refs/heads/harness/accepted); export GIT_INDEX_FILE="$PWD/../.idx-$$"; git read-tree $T; ` +
-  `B=$(printf '${text}' | git hash-object -w --stdin); git update-index --add --cacheinfo 100644,$B,${path}; ` +
-  `TREE=$(git write-tree); C=$(git -c user.name=x -c user.email=x@x commit-tree $TREE -p $T -m moved); ` +
-  `git update-ref refs/heads/harness/accepted $C $T; rm -f "$GIT_INDEX_FILE"`;
 
 test('цель сдвинулась между сдачами — слияние на новой цели; конфликт — ведущему (merge-conflict)', async () => {
   const ctx = thin({
