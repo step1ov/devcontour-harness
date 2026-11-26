@@ -202,6 +202,8 @@ const ADDITIVE_EVENT_TYPES = new Set([
 ]);
 /** Аддитивные флаги прежних команд после H2. */
 const ADDITIVE_ARGS = new Set([
+  // Кто ставит паузу (0.1.0-alpha.72, P9-3).
+  'pause--by',
   // Проба ограничений песочницы проверок по флагу (0.1.0-alpha.68).
   'doctor--probe-sandbox',
   'status--detail',
@@ -256,6 +258,8 @@ const ADDITIVE_REFUSALS = new Set([
   'retry:NOT_READY',
   // retry: третья попытка — только после разбора ведущего (0.1.0-alpha.66).
   'retry:DIAGNOSIS_REQUIRED',
+  // pause: --by вне lead/operator (0.1.0-alpha.72).
+  'pause:INVALID_INPUT',
 ]);
 /** Аддитивные значения перечней после H2. */
 const ADDITIVE_ENUM_VALUES = new Set([
@@ -571,6 +575,15 @@ test('H3-01: прежние команды и схемы их данных не 
       if ('line' in o && 'lineEn' in o && 'writeGuard' in o) delete o.securityTier;
       if ('plainEn' in o && 'bucket' in o && 'runId' in o) delete o.reference;
       if ('retryPlanned' in o && 'evidence' in o && 'phase' in o) delete o.reference;
+      if (Object.keys(o).length !== before) v = o;
+    }
+    // alpha.72 (P9-3): кто поставил паузу — `control.pausedBy` и `by` события
+    // `control.paused`.
+    if (k === 'properties' && v && typeof v === 'object') {
+      const o = { ...(v as Record<string, unknown>) };
+      const before = Object.keys(o).length;
+      if ('paused' in o && 'pauseReason' in o) delete o.pausedBy;
+      if ('reason' in o && 'failures' in o && 'by' in o && Object.keys(o).length === 3) delete o.by;
       if (Object.keys(o).length !== before) v = o;
     }
     // alpha.68: кем исполнен повтор и откуда актёр (`retry`: `by`, `bySource`).

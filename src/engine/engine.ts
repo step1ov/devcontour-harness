@@ -1381,7 +1381,11 @@ export class Engine {
    * человека: она заменяет любую паузу, и классы отказов прежней паузы с ней
    * не переживают.
    */
-  pause(reason: 'operator' | 'shutdown') {
+  pause(
+    reason: 'operator' | 'shutdown',
+    /** Кто ставит паузу `operator` (alpha.72, P9-3): `lead` — ведущий; нет — человек. */
+    by?: 'lead' | 'operator',
+  ) {
     return this.tx('scheduler.paused', (tx) => {
       const control = tx.control();
       if (control.paused && reason === 'shutdown' && control.pauseReason !== 'reconfigure')
@@ -1399,6 +1403,7 @@ export class Engine {
       // Хост сравнивает его с началом своей работы (пауза до старта снимается
       // циклом, после — нет), и сохранённое прежнее время выдало бы свежее
       // решение за давнее.
+      const lead = reason === 'operator' && by === 'lead';
       const next = {
         ...control,
         paused: true,
@@ -1406,9 +1411,11 @@ export class Engine {
         pausedAt: iso(this.now()),
         pauseOperation: undefined,
         pauseFailures: undefined,
+        pausedBy: lead ? ('lead' as const) : undefined,
       };
+      if (!lead) delete next.pausedBy;
       tx.setControl(next);
-      tx.emit({ type: 'control.paused', payload: { reason } });
+      tx.emit({ type: 'control.paused', payload: { reason, ...(lead ? { by: 'lead' } : {}) } });
       return { control: next, changed: true };
     });
   }
@@ -1444,9 +1451,11 @@ export class Engine {
         pausedAt: undefined,
         pauseOperation: undefined,
         pauseFailures: undefined,
+        pausedBy: undefined,
         waits: control.waits?.filter((w) => w.kind !== 'base-check'),
       };
       if (!next.waits?.length) delete next.waits;
+      delete next.pausedBy;
       tx.setControl(next);
       tx.emit({ type: 'control.resumed', payload: { reason } });
       return { control: next, changed: true };

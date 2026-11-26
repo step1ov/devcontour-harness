@@ -137,6 +137,13 @@ const pauseText = (control: ControlState): Text => {
         actor: 'controller',
       };
     default:
+      // Паузу поставил ведущий (alpha.72, P9-3): его решение, снимает он.
+      if (control.pauseReason === 'operator' && control.pausedBy === 'lead')
+        return {
+          ru: 'пауза очереди: поставил ведущий (перепланирование) — снимет ведущий',
+          en: 'queue paused by the lead (re-planning) — the lead resumes it',
+          actor: 'lead',
+        };
       return {
         ru: 'пауза очереди: поставил оператор — снимите паузу, когда готовы',
         en: 'queue paused by the operator — resume when ready',

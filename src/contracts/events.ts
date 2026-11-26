@@ -375,6 +375,8 @@ export const eventPayloads = {
   'control.paused': z.strictObject({
     reason: z.enum(['operator', 'shutdown', 'runtime', 'base-check', 'reconfigure']),
     failures: z.array(failureKindSchema).optional(),
+    /** Паузу `operator` поставил ведущий (alpha.72, P9-3); нет — человек. */
+    by: z.literal('lead').optional(),
   }),
   'control.resumed': z.strictObject({
     reason: z.enum(['operator', 'shutdown', 'runtime', 'base-check', 'reconfigure']),

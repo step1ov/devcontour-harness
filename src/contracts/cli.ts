@@ -486,8 +486,17 @@ export const cliCommands = {
     description: 'Пауза оператора: новые claims запрещены, активные попытки продолжаются',
     writes: true,
     idempotency: 'Повтор ничего не меняет',
-    args: [state],
-    refusals: ['NOT_FOUND'],
+    args: [
+      state,
+      {
+        name: '--by',
+        value: 'text',
+        required: false,
+        description:
+          'Кто ставит паузу (alpha.72): lead — ведущий (перепланирование; status, explain и представление называют его тем, кто её снимет); operator — человек; без флага — lead в открытой сессии ведущего, иначе operator',
+      },
+    ],
+    refusals: ['NOT_FOUND', 'INVALID_INPUT'],
   },
   resume: {
     description:
@@ -2277,6 +2286,8 @@ export const queueViewSchema = z.strictObject({
   cause: z.enum(diagnosisCauses).optional(),
   actor: z.enum(diagnosisActors).nullable().optional(),
   action: z.enum(diagnosisActions).optional(),
+  /** Паузу `operator` поставил ведущий (alpha.72, P9-3): снимает он; нет — человек. */
+  by: z.literal('lead').optional(),
 });
 
 /**

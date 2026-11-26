@@ -622,6 +622,7 @@ export function stopInputsIn(
           paused: control.paused && !(work.status !== 'failed' && pauseLifts()),
           ...(control.pauseReason ? { pauseReason: control.pauseReason } : {}),
           ...(control.pauseFailures ? { pauseFailures: [...control.pauseFailures] } : {}),
+          ...(control.pausedBy ? { pausedBy: control.pausedBy } : {}),
         },
         ...(last ? { phase: phaseOf[last.phase] ?? 'claim', runId: last.id } : {}),
         evidence,

@@ -5960,6 +5960,10 @@
             "reconfigure"
           ]
         },
+        "pausedBy": {
+          "type": "string",
+          "const": "lead"
+        },
         "pausedAt": {
           "type": "string",
           "format": "date-time",

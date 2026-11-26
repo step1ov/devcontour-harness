@@ -71,11 +71,18 @@ export function queuePause(control: {
   paused: boolean;
   pauseReason?: PauseReason;
   pauseFailures?: readonly FailureKind[];
+  /** Паузу `operator` поставил ведущий (alpha.72, P9-3): снимает он же. */
+  pausedBy?: 'lead';
 }): QueuePause | undefined {
   if (!control.paused) return undefined;
   const reason = control.pauseReason ?? 'runtime';
   if (reason === 'operator' || reason === 'shutdown')
-    return { code: 'PAUSED', cause: 'operator-pause', actor: 'user', action: 'resume-queue' };
+    return {
+      code: 'PAUSED',
+      cause: 'operator-pause',
+      actor: pauseActor(control),
+      action: 'resume-queue',
+    };
   if (reason === 'runtime') {
     const paused = control.pauseFailures?.[0] ?? 'environment';
     return {
@@ -87,6 +94,15 @@ export function queuePause(control: {
   }
   return { code: 'PAUSED', cause: 'not-ready', actor: 'controller', action: 'wait' };
 }
+
+/**
+ * Кто снимает паузу `operator`: ведущий, если поставил её он (`pausedBy:
+ * lead`, alpha.72, P9-3), иначе человек.
+ */
+export const pauseActor = (control: { pauseReason?: PauseReason; pausedBy?: 'lead' }) =>
+  control.pauseReason === 'operator' && control.pausedBy === 'lead'
+    ? ('lead' as const)
+    : ('user' as const);
 
 export const stopCauses = [
   'provider-auth',
@@ -304,7 +320,12 @@ export type StopInput =
          */
         outlook?: 'retry' | 'wait' | 'stop';
       };
-      control: { paused: boolean; pauseReason?: PauseReason; pauseFailures?: FailureKind[] };
+      control: {
+        paused: boolean;
+        pauseReason?: PauseReason;
+        pauseFailures?: FailureKind[];
+        pausedBy?: 'lead';
+      };
       phase?: StopPhase;
       runId?: string;
       evidence?: EvidenceLink[];
@@ -631,9 +652,9 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
             code: 'PAUSED',
             cause: 'operator-pause',
             phase: 'claim',
-            actor: 'user',
+            actor: pauseActor(control),
             action: 'resume-queue',
-            note: `Восстановление свойства (${work.recovery.status}) ждёт снятия паузы.`,
+            note: `Восстановление свойства (${work.recovery.status}) ждёт снятия паузы${pauseActor(control) === 'lead' ? ' ведущим' : ''}.`,
           };
     if (!automatic && work.budgetBlock)
       return {
@@ -980,7 +1001,9 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
           ? `Выдача остановлена отказом класса ${pause.cause}; после исправления — harness resume.`
           : pause.action === 'wait'
             ? `Очередь ждёт операции ${control.pauseReason}.`
-            : 'Продолжение — harness resume.',
+            : pause.actor === 'lead'
+              ? 'Паузу поставил ведущий (перепланирование); продолжение — его harness resume.'
+              : 'Продолжение — harness resume.',
     };
   const active = activePhase[work.status];
   const idle = work.liveness;

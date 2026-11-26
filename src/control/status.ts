@@ -3,6 +3,7 @@ import {
   STATE_VERSION,
   WORKSPACE_OWNER,
   inputPolicyOf,
+  pausedByLead,
   type statusDataSchema,
   type AttemptState,
   type CallRecord,
@@ -617,6 +618,8 @@ function statusDetail(source: StatusSource, v: ExecutionView, graphId?: string) 
           ? { failures: [...control.pauseFailures] }
           : {}),
         ...(queuePause(control) ?? {}),
+        // Паузу поставил ведущий (alpha.72, P9-3): снимает он, не человек.
+        ...(control.paused && pausedByLead(control) ? { by: 'lead' as const } : {}),
       };
   return {
     at: new Date(now).toISOString(),

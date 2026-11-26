@@ -632,7 +632,7 @@ const flagOwners = {
   option: ['input-answer'],
   kind: ['input-answer'],
   actor: ['input-answer', 'input-carry', 'review-plan', 'review-contract', 'review-accept'],
-  by: ['reapprove', 'retry', 'proposal'],
+  by: ['reapprove', 'retry', 'proposal', 'pause'],
   proposal: ['proposal'],
   cause: ['diagnose'],
   hypothesis: ['diagnose'],
@@ -1769,7 +1769,16 @@ async function run(
       const b = binding(need('state'));
       const h = open(need('state'), b, true);
       try {
-        if (command === 'pause') return { command, data: h.engine.pause('operator') };
+        if (command === 'pause') {
+          // Кто ставит паузу (alpha.72, P9-3): явный --by; без него в открытой
+          // сессии ведущего — ведущий (его перепланирование), иначе человек.
+          if (v.by !== undefined && v.by !== 'lead' && v.by !== 'operator')
+            throw new HarnessError('INVALID_INPUT', '--by: lead или operator', [
+              { path: ['--by'], message: v.by },
+            ]);
+          const by = v.by ?? (leadSessionOpen(h.engine) ? 'lead' : 'operator');
+          return { command, data: h.engine.pause('operator', by) };
+        }
         if (command === 'resume') return { command, data: h.engine.resume() };
         if (command === 'deliver')
           return {
