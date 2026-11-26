@@ -458,6 +458,7 @@ test('P7-6: CLI review-release — договор команды и данные
       ['--role', false],
       ['--author', false],
       ['--repository', false],
+      ['--docs-work', false],
     ],
   );
   assert.equal(cliDataSchemas['review-release'], codeReviewRecordSchema);
@@ -733,6 +734,45 @@ test('ревью 1: release.docs: required держит release done и при r
   const state = g.engine.read((v) => releaseDocsState(v, { release: { docs: 'advisory' } }));
   assert.deepEqual(state.roots, ['w2']);
   assert.equal(state.status, 'pending');
+});
+
+test('alpha.72, P9-6: источник задач без меток — работа документации названа явно --docs-work; опечатка — INVALID_INPUT', async () => {
+  const f = fixture((p) => (p.release = { review: 'advisory', docs: 'required' }));
+  // Работа d — документация после w, но метки docs у неё нет (Relay).
+  ready(f.engine, graphOf({ w: [], d: ['w'] }));
+  accept(f.engine, f.base, f.head);
+  accept(f.engine, f.base, f.head);
+  const done = (docsWorks?: string[]) =>
+    releaseDone(f.engine, {
+      summary: 'готово',
+      heads: f.heads(),
+      fullGates: { app: undefined },
+      ...(docsWorks ? { docsWorks } : {}),
+    });
+  // Без явного названия d — корень выпуска, работы документации нет.
+  notReady(() => done(), /нет работы с меткой docs после корневых работ \(d\).*--docs-work <id>/);
+  const invalid = (fn: () => unknown, pattern: RegExp) =>
+    assert.throws(fn, (e: unknown) => {
+      assert.ok(e instanceof HarnessError);
+      assert.equal(e.code, 'INVALID_INPUT');
+      assert.match(e.message, pattern);
+      return true;
+    });
+  invalid(() => done(['nope']), /--docs-work nope: такой работы в состоянии нет/);
+  // Шаг тот же: названная работа должна быть после корней.
+  notReady(() => done(['w']), /не зависит от корневых работ d/);
+  const state = f.engine.read((v) =>
+    releaseDocsState(v, { release: { docs: 'required' } }, { docsWorks: ['d'] }),
+  );
+  assert.deepEqual([state.status, state.roots, state.declared], ['done', ['w'], ['d']]);
+  assert.match(releaseDocsLine(state) ?? '', /принята \(названа ведущим: d\)/);
+  // review-release с тем же названием шаг не держит; без него — отказ.
+  await assert.rejects(f.review(), /--docs-work <id>/);
+  await assert.rejects(f.review({ docsWorks: ['nope'] }), /такой работы в состоянии нет/);
+  f.scenario({ reviewer: verdict(true) });
+  const r = await f.review({ docsWorks: ['d'] });
+  assert.equal(r.approved, true);
+  leadDataSchema.parse(done(['d']));
 });
 
 test('ревью 2: второй проход приёмки выпуска, изменивший своё дерево, не принимается — действует первый', async () => {

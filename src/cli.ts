@@ -524,6 +524,7 @@ const options = {
   'apply-loopback': { type: 'boolean' },
   'accept-limitation': { type: 'string', multiple: true },
   'continue-review': { type: 'string', multiple: true },
+  'docs-work': { type: 'string', multiple: true },
   watch: { type: 'boolean' },
   'lead-technical-answers': { type: 'boolean' },
   interval: { type: 'string' },
@@ -644,6 +645,7 @@ const flagOwners = {
   'lead-resets': ['init'],
   'accept-limitation': ['review-plan', 'review-contract', 'review-accept'],
   'continue-review': ['review-plan', 'review-contract'],
+  'docs-work': ['review-release', 'release-done'],
   'request-version': ['input-answer', 'input-apply', 'input-cancel', 'input-supersede'],
   'context-digest': ['input-target', 'input-apply'],
   answer: ['input-apply'],
@@ -760,6 +762,19 @@ const readText = (path: string, what: string) => {
 };
 
 const reportFormats = ['json', 'md', 'html'] as const;
+
+/** `--docs-work`: ID списком через запятую или повтором флага; нет — поля нет. */
+function docsWorksOf(list?: string[]) {
+  const ids = [
+    ...new Set(
+      (list ?? [])
+        .flatMap((x) => x.split(','))
+        .map((x) => x.trim())
+        .filter(Boolean),
+    ),
+  ];
+  return ids.length ? ids : undefined;
+}
 
 /**
  * Решения по находкам из флагов review-plan / review-contract: ID — списком
@@ -1862,6 +1877,7 @@ async function run(
                 : releaseDone(h.engine, {
                     summary: need('summary'),
                     ...(await h.releaseCheck()),
+                    ...optional('docsWorks', docsWorksOf(v['docs-work'])),
                   });
         if (command === 'lead-end') {
           // Готовые работы, а никто не запущен (alpha.68, P6-33): сессия
@@ -2503,6 +2519,7 @@ async function run(
           ...optional('role', v.role),
           ...optional('author', author),
           ...optional('repositoryId', v.repository),
+          ...optional('docsWorks', docsWorksOf(v['docs-work'])),
           // Пределы шагов (прогон gates и reviewer) — свои у каждого (ревью final M3).
           signal: abort.signal,
         });

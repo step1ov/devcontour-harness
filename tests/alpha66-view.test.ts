@@ -672,7 +672,7 @@ test('P4-10: CLI lead begin|note|end и release done — синонимы, до�
   }
   assert.deepEqual(
     cliCommands['release-done'].args.map((a) => a.name),
-    ['--state', '--summary'],
+    ['--state', '--summary', '--docs-work'],
   );
   // capabilities: ответ view (общая операция) описывает поля ревизии 6.
   const viewTool = harnessCapabilities().tools.find((x) => x.name === 'view')!;

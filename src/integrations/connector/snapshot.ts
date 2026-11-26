@@ -626,6 +626,8 @@ export function buildSnapshot(input: {
   const tasks: TaskManifest[] = [];
   /** Какие локальные пакеты у какой задачи (по порядку): часть ревизии набора. */
   const packsByTask: [string, string[]][] = [];
+  /** Метки поручений по задаче (alpha.72): входят в ревизию набора. */
+  const labelsBy: [string, string[]][] = [];
   const truncated: string[] = [];
   let totalBytes = 0;
   let contextBytes = 0;
@@ -993,8 +995,10 @@ export function buildSnapshot(input: {
       requirements: [],
       contracts: [],
       context: [entry.id, ...(mapping.context ?? [])],
+      ...(mapping.labels ? { labels: mapping.labels } : {}),
     });
     packsByTask.push([identityOf, mapping.context ?? []]);
+    if (mapping.labels) labelsBy.push([identityOf, [...mapping.labels].sort()]);
 
     tasks.push({
       ref: mapping.ref,
@@ -1067,6 +1071,9 @@ export function buildSnapshot(input: {
       ...((by) => (by.length ? { taskContext: [...by].sort(([a], [b]) => (a < b ? -1 : 1)) } : {}))(
         v === 'orders' ? contextOrdersBy : contextBy,
       ),
+      // Метки поручений (alpha.72) — часть поручения: их правка — новое
+      // согласование. Без меток ревизия прежняя.
+      ...(labelsBy.length ? { labels: [...labelsBy].sort(([a], [b]) => (a < b ? -1 : 1)) } : {}),
     });
   const revision = setRevision(2);
   const legacyRevision = setRevision(1);

@@ -5,7 +5,13 @@
 // (`Engine.recordLead`); представление оператора читает её как раздел `lead`,
 // ленту и шаг «итоговый отчёт» прогноза.
 
-import { releaseDocsLine, releaseDocsOpen, releaseDocsState } from './release-docs.ts';
+import {
+  checkDocsWorks,
+  RELEASE_DOCS_HINT,
+  releaseDocsLine,
+  releaseDocsOpen,
+  releaseDocsState,
+} from './release-docs.ts';
 import {
   HarnessError,
   LEAD_LIMITS,
@@ -233,6 +239,8 @@ export function releaseDone(
      * записи — тоже отказ.
      */
     fullGates: Readonly<Record<string, string | undefined>>;
+    /** Явные работы документации выпуска (`--docs-work`, alpha.72, P9-6). */
+    docsWorks?: readonly string[];
   },
 ): LeadData {
   const summary = cleanLeadText(options.summary, LEAD_LIMITS.summary, 'release done --summary');
@@ -271,12 +279,17 @@ export function releaseDone(
     );
     // Шаг документации (alpha.70, ревью 1): `required` держит сам
     // `release done`, независимо от правила ревью выпуска.
-    const docs = releaseDocsState(view, engine.policy);
+    checkDocsWorks(view, options.docsWorks, 'release done');
+    const docs = releaseDocsState(
+      view,
+      engine.policy,
+      options.docsWorks ? { docsWorks: options.docsWorks } : {},
+    );
     const docsLine = releaseDocsOpen(docs) ? releaseDocsLine(docs) : undefined;
     if (docsLine && docs.mode === 'required')
       throw new HarnessError(
         'NOT_READY',
-        `Выпуск не готов: ${docsLine}; release.docs: required — примите работу документации (метка docs, зависит от корневых работ выпуска)`,
+        `Выпуск не готов: ${docsLine}; release.docs: required — ${RELEASE_DOCS_HINT}`,
       );
     const problem = releaseReviewProblem(review);
     if (problem && review.required)

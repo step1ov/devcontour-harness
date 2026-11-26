@@ -384,7 +384,7 @@ test('H3-01: каждая общая операция читается из до
     assert.equal(op.input.safeParse({ unknownArg: 'x' }).success, false, c);
   }
   // multiple объявлен только у --requirements plan-request, --intent handoff,
-  // --evidence diagnose и
+  // --evidence diagnose, --docs-work review-release / release-done (alpha.72) и
   // решений по находкам review-plan / review-contract / review-accept.
   const multiple = Object.entries(cliCommands).flatMap(([c, contract]) =>
     (contract.args as readonly CliArgument[]).filter((a) => a.multiple).map((a) => c + a.name),
@@ -398,6 +398,8 @@ test('H3-01: каждая общая операция читается из до
     'diagnose--evidence',
     'handoff--intent',
     'plan-request--requirements',
+    'review-release--docs-work',
+    'release-done--docs-work',
   ]);
   assert.deepEqual(Object.keys(sharedOperations.capabilities.input.shape), []);
 });

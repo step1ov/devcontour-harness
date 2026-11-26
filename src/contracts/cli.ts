@@ -185,6 +185,16 @@ const contextDigestArg: CliArgument = {
   description: 'Digest снимка контекста с ответом (input-context), прошедшего review-plan',
 };
 
+/** `--docs-work` (alpha.72, P9-6): работа документации выпуска названа явно. */
+const docsWorkArg: CliArgument = {
+  name: '--docs-work',
+  value: 'id',
+  required: false,
+  multiple: true,
+  description:
+    'ID работы документации выпуска (или список через запятую), когда источник задач не несёт метку docs (Relay): для release.docs она — работа документации, как с меткой; шаг по-прежнему требует, чтобы она была принята и зависела от корневых работ',
+};
+
 /**
  * Решения по находкам плана и контракта (docs/review-protocol.md, §8):
  * применяются раундом, который запускает команда.
@@ -1587,6 +1597,7 @@ export const cliCommands = {
         required: false,
         description: 'ID репозитория политики; нужен, если их несколько',
       },
+      docsWorkArg,
     ],
     refusals: [
       'INVALID_INPUT',
@@ -1818,8 +1829,9 @@ export const cliCommands = {
         required: true,
         description: 'Итоговый отчёт простыми словами (до 2000 символов)',
       },
+      docsWorkArg,
     ],
-    refusals: ['NOT_FOUND', 'NOT_READY'],
+    refusals: ['NOT_FOUND', 'NOT_READY', 'INVALID_INPUT'],
   },
   'env-up': {
     description:
