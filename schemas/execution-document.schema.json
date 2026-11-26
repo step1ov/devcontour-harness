@@ -2639,6 +2639,10 @@
               "reason": {
                 "type": "string",
                 "maxLength": 500
+              },
+              "spec": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
               }
             },
             "required": [

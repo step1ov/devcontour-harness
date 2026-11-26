@@ -4,13 +4,14 @@
 //   3. коммит дерева — кандидат;
 //   4. дерево интеграции: чистый checkout цели + слияние кандидата;
 //   5. gates поручения, проверки потребителей, требования, одно ревью;
-//   6. CAS цели. Цель сдвинулась — проверка заново один раз, без writer.
+//   6. CAS цели под замком интеграции репозитория. Цель сдвинулась — проверка
+//      заново один раз; ещё раз — незасчитанный повтор следующей сдачей без writer.
 // Отказ — обычный отказ попытки (те же записи, фаза integration): следующая
 // сдача продолжит ту же сессию с находками. Принятие убирает дерево работы
 // и её сессии.
 
+import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
-import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
   codeReviewHistory,
@@ -19,12 +20,13 @@ import {
   inputPolicyOf,
   INPUT_LIMITS,
   TaskFailure,
+  uncountedStop,
   type AttemptState,
   type RuntimeRequest,
 } from '../contracts/index.ts';
 import { gateFeedback } from '../engine/gate-feedback.ts';
 import { evaluateInput, normalizeImplementation } from '../engine/input-policy.ts';
-import { prompt } from '../engine/prompt.ts';
+import { attemptSecretsNote, prompt } from '../engine/prompt.ts';
 import { git } from '../environment/process.ts';
 import { redactDeep } from '../environment/redaction.ts';
 import { orderedScope } from '../verification/gate-scope.ts';
@@ -39,16 +41,8 @@ import {
   type ThinDelta,
 } from './prompt.ts';
 import { thinEnvironment, thinGate } from './rerun.ts';
-import { lostSession, planSession, sessionHome, sessionsDir } from './session.ts';
-import {
-  commitWork,
-  ensureWorkTree,
-  integrationTree,
-  mergeBase,
-  mergeTarget,
-  removeTree,
-  workBranch,
-} from './tree.ts';
+import { intervention, lostSession, planSession, sessionHome } from './session.ts';
+import { commitWork, ensureWorkTree, integrationTree, mergeBase, mergeTarget } from './tree.ts';
 
 const text = (error: unknown) => (error instanceof Error ? error.message : String(error));
 type Gates = ThinHandover['repo']['gates'];
@@ -81,6 +75,9 @@ async function writer(
   await kit.prepareSelfCheck(attempt, repo, join(artifacts, 'self-check'));
   const history = kit.history(attempt);
   const previous = history.filter((a) => a.id !== attempt.id).at(-1);
+  // Провал gates — последней засчитанной сдачи с провалом gate: незасчитанная
+  // остановка (сбой среды, конфликт) его не заменяет.
+  const failedGates = history.filter((a) => a.id !== attempt.id && a.failureKind === 'gate').at(-1);
   const findings = (await kit.reviewProtocol(attempt.reviewer))
     ? kit.engine.read((v) =>
         codeReviewHistory(
@@ -90,11 +87,16 @@ async function writer(
         ),
       )
     : undefined;
-  const feedback = previous
-    ? (await gateFeedback(previous, execution.redact).catch(() => undefined))?.text
+  const feedback = failedGates
+    ? (await gateFeedback(failedGates, execution.redact).catch(() => undefined))?.text
     : undefined;
   const delta: ThinDelta = {
     ...(previous?.error ? { reason: previous.error } : {}),
+    ...(previous &&
+    (uncountedStop(previous) || previous.blocked || previous.failureKind === 'environment')
+      ? { stopped: true }
+      : {}),
+    ...(attempt.input ? { answer: attempt.input.requestId } : {}),
     ...(feedback ? { feedback } : {}),
     ...(findings ? { findings } : {}),
     ...(context ? { context } : {}),
@@ -117,6 +119,8 @@ async function writer(
       ...(await kit.hostNotes(work, attempt, false)),
       ...(dependencies ? [writerDependenciesNote(dependencies)] : []),
       ...(repo.generators?.length ? [generatorNote(repo.generators)!] : []),
+      ...((names) => (names.length ? [attemptSecretsNote(names)] : []))(kit.secretNames(attempt)),
+      ...kit.proposalNotes(work),
       THIN_WRITER_TEXT,
       ...(merged ? [mergeText(merged)] : []),
     ],
@@ -135,58 +139,65 @@ async function writer(
   };
   const home = await sessionHome(kit, repo, work, attempt.runtime);
   const dir = join(artifacts, 'implementation');
-  const invoke = (
-    request: string,
-    session: Extract<RuntimeRequest['session'], { kind: 'continue' }> | undefined,
-    callDir: string,
-  ) =>
-    kit.timed(attempt, 'implementation', () =>
-      kit.call(
-        kit.adapter(attempt.runtime),
-        {
-          task: 'implement',
-          attempt,
-          cwd: tree,
-          dir: callDir,
-          phase: 'candidate',
-          prompt: request,
-          home,
-          ...(session ? { session } : {}),
-        },
-        signal,
-      ),
-    );
-  const plan = await planSession(kit, attempt);
-  let mode: 'fresh' | 'resumed' | 'fallback' = plan.kind === 'resume' ? 'resumed' : 'fresh';
-  let reason = plan.kind === 'fresh' ? plan.reason : undefined;
-  let response;
-  try {
-    response =
-      plan.kind === 'resume'
-        ? await invoke(resumePrompt(delta), { kind: 'continue', id: plan.id }, dir)
-        : await invoke(
-            // Новая сессия над деревом прежних сдач — со сводкой того, что в нём.
-            previous && reason ? full + '\n\n' + (await summary(reason)) : full,
-            undefined,
-            dir,
-          );
-  } catch (error) {
-    // Переполнение контекста или потерянная сессия: один новый вызов в той
-    // же попытке со сводкой сдачи; второй такой же — обычный отказ попытки.
-    if (!lostSession(error)) throw error;
-    mode = 'fallback';
-    reason = text(error).slice(0, 500);
-    response = await invoke(full + '\n\n' + (await summary(reason)), undefined, dir + '-fallback');
-  }
-  const id = response.sessionId ?? (plan.kind === 'resume' ? plan.id : undefined);
-  if (id)
+  const record = (id: string, mode: 'fresh' | 'resumed' | 'fallback', reason?: string) =>
     kit.engine.recordWriterSession(attempt.id, attempt.token, {
       runtime: attempt.runtime,
       id,
       mode,
       ...(reason ? { reason } : {}),
+      ...(work.approvedDigest ? { spec: work.approvedDigest } : {}),
     });
-  return response;
+  // Сессия записывается до исхода вызова: ID claude задаёт harness, ID codex
+  // приходит событием — и при отказе следующая сдача продолжит её.
+  const invoke = (
+    request: string,
+    session: Extract<RuntimeRequest['session'], { kind: 'continue' }> | undefined,
+    mode: 'fresh' | 'resumed' | 'fallback',
+    reason?: string,
+  ) => {
+    const preset = !session && attempt.runtime === 'claude' ? randomUUID() : undefined;
+    if (session) record(session.id, mode, reason);
+    if (preset) record(preset, mode, reason);
+    return kit.timed(
+      attempt,
+      mode === 'fallback' ? 'implementation-fallback' : 'implementation',
+      () =>
+        kit.call(
+          kit.adapter(attempt.runtime),
+          {
+            task: 'implement',
+            attempt,
+            cwd: tree,
+            dir: mode === 'fallback' ? dir + '-fallback' : dir,
+            phase: 'candidate',
+            prompt: request,
+            home,
+            ...(session ? { session } : {}),
+            ...(preset ? { freshSessionId: preset } : {}),
+            onSession: (id) => record(id, mode, reason),
+          },
+          signal,
+        ),
+    );
+  };
+  const plan = await planSession(kit, attempt, work);
+  try {
+    return plan.kind === 'resume'
+      ? await invoke(resumePrompt(delta), { kind: 'continue', id: plan.id }, 'resumed')
+      : await invoke(
+          // Новая сессия над деревом прежних сдач — со сводкой того, что в нём.
+          previous ? full + '\n\n' + (await summary(plan.reason ?? 'новая сессия')) : full,
+          undefined,
+          'fresh',
+          plan.reason,
+        );
+  } catch (error) {
+    // Переполнение контекста или потерянная сессия: один новый вызов в той
+    // же попытке со сводкой сдачи; второй такой же — обычный отказ попытки.
+    if (!lostSession(error)) throw error;
+    const why = text(error).slice(0, 500);
+    return invoke(full + '\n\n' + (await summary(why)), undefined, 'fallback', why);
+  }
 }
 
 /** Ответ writer → кандидат: разбор, коммит дерева, область, вопросы. */
@@ -334,49 +345,67 @@ async function verify(
 export const thinFlow = {
   handover: async (kit: ThinKit, h: ThinHandover): Promise<string> => {
     const { work, repo, repoPath, base, artifacts, signal } = h;
+    // Сброс попыток ведущим — работа заново от цели: прежние дерево, ветка и сессии убраны.
+    if (intervention(kit, h.attempt, work)?.reset) await kit.discard(repo.id, work.id);
     const dir = kit.checkout(repo.id, 'worktrees', `work-${work.id}`);
     const { created } = await ensureWorkTree(repoPath, dir, work.id, base);
     // Writer всегда в одном и том же дереве работы (настоящий путь): по нему
     // CLI находит сессию прошлой сдачи.
     const tree = realpathSync(dir);
+    const head = await git(tree, 'rev-parse', 'HEAD');
+    // Прошлая сдача упала только сдвигом цели после проверки, а дерево то же:
+    // проверка заново без writer (незасчитанный повтор).
+    const previous = kit
+      .history(h.attempt)
+      .filter((a) => a.id !== h.attempt.id)
+      .at(-1);
+    const recheckOnly =
+      previous?.failureKind === 'stale-base' && previous.candidateSha === head ? head : undefined;
     // Цель сдвинулась с прошлой сдачи: она сливается в ветку работы; конфликт
     // остаётся в дереве, его разрешает исполнитель (не ход ведущего).
-    const merged = created ? undefined : await mergeTarget(tree, base);
+    const merged = created || recheckOnly ? undefined : await mergeTarget(tree, base);
     kit.engine.phase(h.attempt.id, h.attempt.token, 'running', { baseSha: base, worktree: dir });
     let attempt: AttemptState = { ...h.attempt, baseSha: base, worktree: dir };
     const gates = orderedScope(repo.gates, attempt.requiredGates ?? repo.gates.map((g) => g.id));
     const execution = kit.environment(attempt, 'candidate', tree);
     h.rearm();
-    const candidate = await thinEnvironment(
-      kit,
-      {
-        attempt,
-        repo,
-        cwd: tree,
-        dir: join(artifacts, 'candidate'),
-        stage: 'candidate',
-        execution,
-        signal,
-        base,
-      },
-      async () =>
-        candidateOf(kit, h, attempt, tree, await writer(kit, h, attempt, tree, gates, merged)),
-    );
-    kit.engine.phase(attempt.id, attempt.token, 'verifying', { candidateSha: candidate });
-    attempt = { ...attempt, candidateSha: candidate };
-    let sha: string | undefined;
-    for (let round = 0; sha === undefined; round++)
-      try {
-        sha = await verify(kit, h, attempt, gates);
-      } catch (error) {
-        // Цель сдвинулась между проверкой и CAS: проверка заново, без writer, один раз.
-        if (round > 0 || !(error instanceof TaskFailure) || error.kind !== 'stale-base')
-          throw error;
-      }
+    const candidate =
+      recheckOnly ??
+      (await thinEnvironment(
+        kit,
+        {
+          attempt,
+          repo,
+          cwd: tree,
+          dir: join(artifacts, 'candidate'),
+          stage: 'candidate',
+          execution,
+          signal,
+          base,
+        },
+        async () =>
+          candidateOf(kit, h, attempt, tree, await writer(kit, h, attempt, tree, gates, merged)),
+      ));
+    // База попытки — общая с целью база кандидата.
+    const from = await mergeBase(tree, base, candidate);
+    kit.engine.phase(attempt.id, attempt.token, 'verifying', {
+      candidateSha: candidate,
+      baseSha: from,
+    });
+    attempt = { ...attempt, candidateSha: candidate, baseSha: from };
+    // Слияние, проверки, ревью и CAS — под замком интеграции репозитория.
+    const sha = await kit.serialize(repo.id, async () => {
+      for (let round = 0; ; round++)
+        try {
+          return await verify(kit, h, attempt, gates);
+        } catch (error) {
+          // Цель сдвинулась между проверкой и CAS: проверка заново, без writer, один раз.
+          if (round > 0 || !(error instanceof TaskFailure) || error.kind !== 'stale-base')
+            throw error;
+        }
+    });
     // Принято: дерево работы, её ветка и сессии больше не нужны.
-    await removeTree(repoPath, dir).catch(() => undefined);
-    await git(repoPath, 'branch', '-D', workBranch(work.id)).catch(() => undefined);
-    await rm(sessionsDir(kit, repo, work), { recursive: true, force: true }).catch(() => undefined);
+    await kit.discard(repo.id, work.id);
     return sha;
   },
 };

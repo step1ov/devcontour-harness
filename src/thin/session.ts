@@ -37,13 +37,45 @@ export const sessionsDir = (kit: ThinKit, repo: Repo, work: WorkState) =>
 /** Как начать вызов writer этой сдачи. */
 export type SessionPlan = { kind: 'resume'; id: string } | { kind: 'fresh'; reason?: string };
 
+/**
+ * Вмешательство ведущего после последней сессии: разбор, сброс попыток или
+ * новая постановка. После него — новая сессия (со сводкой и заметками
+ * разбора); сброс (`reset`) — ещё и работа заново от цели.
+ */
+export function intervention(
+  kit: ThinKit,
+  attempt: AttemptState,
+  work: WorkState,
+): { reason: string; reset: boolean } | undefined {
+  const last = kit
+    .history(attempt)
+    .filter((a) => a.id !== attempt.id && a.writerSession)
+    .at(-1);
+  if (!last) return undefined;
+  const since = last.startedAt;
+  const lead = work.leadRecovery;
+  if (lead?.resets.some((r) => r.at > since))
+    return { reason: 'сброс попыток: работа заново от цели', reset: true };
+  if (lead?.diagnoses.some((d) => d.at > since || d.addenda?.some((x) => x.at > since)))
+    return { reason: 'разбор ведущего после прошлой сдачи', reset: false };
+  if (last.writerSession?.spec && last.writerSession.spec !== work.approvedDigest)
+    return { reason: 'постановка работы изменилась', reset: false };
+  return undefined;
+}
+
 /** Последняя записанная сессия работы того же runtime и умеет ли CLI её продолжить. */
-export async function planSession(kit: ThinKit, attempt: AttemptState): Promise<SessionPlan> {
+export async function planSession(
+  kit: ThinKit,
+  attempt: AttemptState,
+  work: WorkState,
+): Promise<SessionPlan> {
   const previous = kit
     .history(attempt)
     .filter((a) => a.id !== attempt.id && a.writerSession)
     .at(-1)?.writerSession;
   if (!previous) return { kind: 'fresh' };
+  const lead = intervention(kit, attempt, work);
+  if (lead) return { kind: 'fresh', reason: lead.reason };
   if (previous.runtime !== attempt.runtime)
     return { kind: 'fresh', reason: `runtime сменился: ${previous.runtime} → ${attempt.runtime}` };
   const caps = await kit

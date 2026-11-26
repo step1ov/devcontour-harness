@@ -182,9 +182,14 @@ export function verificationRows(a: AttemptState): VerificationRow[] {
   const missing: VerificationRow[] = [];
   const reachedIntegration =
     !!a.integrationSha || a.evidence.some((e) => e.phase === 'integration');
-  for (const phase of reachedIntegration
-    ? (['candidate', 'integration'] as const)
-    : (['candidate'] as const))
+  // Попытка тонкого режима (alpha.73, дерево работы `work-<id>`): фазы
+  // кандидата нет — пропущенных строк кандидата тоже.
+  const thin = /(^|\/)work-[^/]+$/.test(a.worktree ?? '');
+  for (const phase of thin
+    ? (['integration'] as const)
+    : reachedIntegration
+      ? (['candidate', 'integration'] as const)
+      : (['candidate'] as const))
     for (const gate of new Set((a.requiredGates ?? []).map(displayId)))
       if (!has(phase, gate))
         missing.push({ gate, kind: 'gate', phase, result: 'skipped', how: 'not-run' });

@@ -46,6 +46,14 @@ export interface ThinKit {
   writerDependencies: Runner['writerDependencies'];
   generate: Runner['generate'];
   verifyGenerated: Runner['verifyGenerated'];
+  /** Интеграция репозитория по одной (`mergeTails`, как в облегчённом режиме). */
+  serialize: <T>(repositoryId: string, fn: () => Promise<T>) => Promise<T>;
+  /** Убрать дерево, ветку и сессии работы. */
+  discard: (repositoryId: string, workId: string) => Promise<void>;
+  /** Заметки о предложениях исполнителей (отклонённое разделение). */
+  proposalNotes: (work: WorkState) => string[];
+  /** Имена тестовых секретов попытки (`attemptEnv.secrets`). */
+  secretNames: (attempt: AttemptState) => string[];
   /** Хук хоста `implemented` (договор хоста): кандидат записан. */
   implemented: (
     event: Parameters<NonNullable<NonNullable<Runner['options']['hooks']>['implemented']>>[0],

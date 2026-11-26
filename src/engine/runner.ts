@@ -4,7 +4,7 @@ import { controllerTemp } from '../environment/controller-temp.ts';
 import type { LeadDiagnosis } from '../contracts/execution.ts';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { toolchainBaseline } from '../environment/toolchain-pin.ts';
 import {
   lstat,
@@ -273,6 +273,7 @@ import { requestsOf } from './input-requests.ts';
 import { thinFlow } from '../thin/flow.ts';
 import type { ThinKit } from '../thin/kit.ts';
 import { SessionLost } from '../thin/session.ts';
+import { discardWork } from '../thin/tree.ts';
 import { evaluateInput, normalizeImplementation, type InputEvaluation } from './input-policy.ts';
 
 type Repo = ExecutionPolicy['repositories'][number];
@@ -846,6 +847,9 @@ export class Runner {
         }
         const adopted = this.engine.adopt(a.id, this.owner);
         this.engine.finish(a.id, adopted.token, a.integrationSha);
+        // Приёмка после падения между update-ref и записью (тонкий режим).
+        if (harnessModeOf(this.policy) === 'thin')
+          await this.thinDiscard(a.repositoryId, a.workId).catch(() => undefined);
       } catch (error) {
         this.engine.rejectRecovery(a.id, error instanceof Error ? error.message : String(error));
       }
@@ -948,6 +952,10 @@ export class Runner {
       session?: Extract<RuntimeRequest['session'], { kind: 'fork' | 'continue' }>;
       /** Постоянный домашний каталог CLI writer работы (тонкий режим): в нём сессия. */
       home?: string;
+      /** ID сессии writer, о котором сообщил runtime, — до разбора исхода (и при отказе). */
+      onSession?: (id: string) => void;
+      /** ID новой сессии writer, заданный хостом (claude `--session-id`). */
+      freshSessionId?: string;
     },
     signal: AbortSignal,
   ): Promise<RuntimeResponse & { redact: Redactor; unreadable?: string; callId: string }> {
@@ -1016,7 +1024,12 @@ export class Runner {
         prompt: input.prompt,
         outputSchema:
           input.outputSchema ?? (review ? reviewOutputSchema : implementationOutputSchema),
-        session: !review && input.session ? input.session : { kind: 'fresh' },
+        session:
+          !review && input.session
+            ? input.session
+            : !review && input.freshSessionId
+              ? { kind: 'fresh', id: input.freshSessionId }
+              : { kind: 'fresh' },
         sandbox: {
           mode: this.policy.isolation.mode,
           writable: review ? [] : [input.cwd, ...(scratch ? [scratch] : [])],
@@ -1080,6 +1093,7 @@ export class Runner {
       // Временные файлы исполнителя — не артефакт попытки: каталог свой, создан выше.
       scratch ? rm(scratch, { recursive: true, force: true }).catch(() => undefined) : undefined,
     );
+    if (!review && response.sessionId) input.onSession?.(response.sessionId);
     // Ответ «передан исполнителю» — только когда runtime вызова writer
     // попытки, выданной с ним, действительно работал (ответ не
     // `unavailable`: процесс запустился), а не по apply, claim или началу
@@ -1806,6 +1820,44 @@ export class Runner {
     );
   }
 
+  /**
+   * Интеграция репозитория по одной (`mergeTails`): слияние, проверки, ревью
+   * и CAS одной работы не перемежаются с другой.
+   */
+  private async serialized<T>(repositoryId: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.mergeTails.get(repositoryId) ?? Promise.resolve();
+    let unlock!: () => void;
+    this.mergeTails.set(repositoryId, new Promise<void>((r) => (unlock = r)));
+    try {
+      await previous;
+      return await fn();
+    } finally {
+      unlock();
+    }
+  }
+
+  /**
+   * Дерево работы тонкого режима держится, пока работа не принята и не
+   * отменена: его не убирают ни обход деревьев, ни `cleanup --run`.
+   */
+  private keepsWorkTree(attempt: AttemptState, dir: string) {
+    if (harnessModeOf(this.policy) !== 'thin' || !attempt.worktree) return false;
+    const status = this.engine.read((v) => v.work(attempt.workId)?.status);
+    if (status === 'done' || status === 'cancelled') return false;
+    const key = (p: string) => worktreeKey(existsSync(p) ? realpathSync(p) : p);
+    return key(dir) === key(attempt.worktree);
+  }
+
+  /** Убрать дерево, ветку и сессии работы тонкого режима (принята, отменена, сброс ведущего). */
+  private thinDiscard(repositoryId: string, workId: string) {
+    return discardWork(
+      this.repoPath(this.repo(repositoryId)),
+      this.checkout(repositoryId, 'worktrees', `work-${workId}`),
+      workId,
+      this.checkout(repositoryId, 'sessions', workId),
+    );
+  }
+
   /** Возможности прогона для потока сдачи тонкого режима (`src/thin/`). */
   private thinKit(): ThinKit {
     return {
@@ -1835,6 +1887,11 @@ export class Runner {
       generate: this.generate.bind(this),
       verifyGenerated: this.verifyGenerated.bind(this),
       implemented: (event) => this.options.hooks?.implemented?.(event),
+      serialize: (repositoryId, fn) => this.serialized(repositoryId, fn),
+      discard: (repositoryId, workId) => this.thinDiscard(repositoryId, workId),
+      proposalNotes,
+      secretNames: (attempt) =>
+        Object.keys(this.attemptSecrets.get(attempt.id)?.get(attempt.repositoryId) ?? {}),
     };
   }
 
@@ -2736,7 +2793,10 @@ export class Runner {
               preWriter ||
               // Отказ до работы с известной причиной preflight: не засчитывается.
               (origin instanceof TaskFailure && origin.diagnosis === 'preflight')) &&
-            !attempt.candidateSha,
+            // Тонкий режим ведёт кандидата в своей копии попытки: по записанному.
+            !(harnessModeOf(this.policy) === 'thin'
+              ? persisted?.candidateSha
+              : attempt.candidateSha),
           ...(heartbeatCause ? { heartbeatCause } : {}),
         };
         const input = !stalled && origin instanceof TaskFailure ? origin.input : undefined;
@@ -2878,7 +2938,7 @@ export class Runner {
         });
     }
     if (!existsSync(file) && !interrupted.length) return { status: 'nothing-pending' as const };
-    const pending: Retained & { reason: string } = existsSync(file)
+    const all: Retained & { reason: string } = existsSync(file)
       ? (JSON.parse(await readFile(file, 'utf8')) as Retained & { reason: string })
       : {
           reason: 'interrupted',
@@ -2905,6 +2965,11 @@ export class Runner {
           ],
           snapshots: [],
         };
+    // Общее дерево работы тонкого режима — не дерево этой попытки (H2).
+    const pending = {
+      ...all,
+      worktrees: all.worktrees.filter((t) => !this.keepsWorkTree(attempt, t.dir)),
+    };
     // Окружения прежних попыток лежат в каталоге состояния, новых — под
     // корнем рабочих деревьев вне дерева.
     const outside = this.checkoutRoot().root;
@@ -3018,7 +3083,8 @@ export class Runner {
         try {
           entry.sizeKb = await sizeKb(path);
           prior = await readRemoval(artifacts, path);
-          let refusal = owner.refusal;
+          let refusal =
+            owner.refusal ?? (this.keepsWorkTree(owner.attempt, path) ? 'recoverable' : undefined);
           if (!refusal)
             try {
               if (await cleanupUnfinished(artifacts, await receipts(artifacts)))
@@ -3072,6 +3138,14 @@ export class Runner {
           entry.removalStarted = true;
           await removeTree(repoPath, path, Runner.cleanupRemovalMs);
           entry.action = 'removed';
+          // Дерево работы тонкого режима (работа принята или отменена): с ним
+          // уходят её ветка и сессии.
+          if (
+            harnessModeOf(this.policy) === 'thin' &&
+            owner.attempt.worktree &&
+            worktreeKey(owner.attempt.worktree) === path
+          )
+            await this.thinDiscard(owner.attempt.repositoryId, owner.attempt.workId);
           await recordRemoval(artifacts, entry, 'removed', prior);
         } catch (error) {
           entry.action = 'failed';

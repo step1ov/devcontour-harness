@@ -225,7 +225,11 @@ export function repairDecision(
 
   const work = broken[0]!;
   const kind: FailureKind = work.failureKind ?? 'unknown';
-  const rule = repairPolicy[kind];
+  // Тонкий режим: сдвиг цели мимо замка — повтор проверки без writer.
+  const rule =
+    options.thin && kind === 'stale-base'
+      ? { ...repairPolicy[kind], action: 'retry' as const, repeats: 1 }
+      : repairPolicy[kind];
   const detail = work.failure ? ` Отказ: ${work.failure.slice(0, 300)}` : '';
 
   if (rule.action === 'stop')

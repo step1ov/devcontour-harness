@@ -328,7 +328,7 @@ export function cliAdapter(
       if (r.session.kind === 'fork' || (r.session.kind === 'continue' && r.task !== 'implement'))
         throw new Error(`${runtime}: продолжение сессии не поддерживается`);
       const resume = r.session.kind === 'continue' ? r.session.id : undefined;
-      const freshId = randomUUID();
+      const freshId = (r.session.kind === 'fresh' ? r.session.id : undefined) ?? randomUUID();
       const review = r.task !== 'implement';
       const dir = r.artifactDir ?? (await mkdtemp(join(controllerTemp.dir(), 'harness-call-')));
       await mkdir(dir, { recursive: true });

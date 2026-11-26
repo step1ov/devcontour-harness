@@ -271,7 +271,8 @@ export interface RuntimeRequest {
    * reviewer не получает ID сессии writer.
    */
   session:
-    | { kind: 'fresh' }
+    /** `id` — ID новой сессии, заданный хостом (claude `--session-id`, тонкий режим). */
+    | { kind: 'fresh'; id?: string }
     | { kind: 'continue'; id: string }
     /**
      * Новая сессия writer, ответвлённая от сессии исследования работы

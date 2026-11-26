@@ -817,7 +817,10 @@ function outlookOf(
   // Пока идут эпизоды, сломанные без эпизода ждут; дальше — повтор по очереди.
   const ahead: Outlook = episodes.length ? 'wait' : 'retry';
   for (const [i, w] of plain.entries()) {
-    const rule = repairPolicy[w.failureKind ?? 'unknown'];
+    const rule =
+      options.thin && w.failureKind === 'stale-base'
+        ? { action: 'retry' as const }
+        : repairPolicy[w.failureKind ?? 'unknown'];
     const attempts = ctx.attemptsOf(w.id);
     const repeats = repairRepeats(
       w.failureKind ?? 'unknown',

@@ -4,7 +4,7 @@
 // checkout текущей цели и слияние закоммиченного кандидата, поэтому
 // неотслеживаемые и игнорируемые файлы исполнителя в проверку не попадают.
 
-import { existsSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { mkdir, rm } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { TaskFailure } from '../contracts/index.ts';
@@ -13,13 +13,39 @@ import { git } from '../environment/process.ts';
 /** Ветка дерева работы. */
 export const workBranch = (workId: string) => `harness/work-${workId}`;
 
-/** Дерево работы: есть — как есть (с правками прошлых сдач), нет — от цели. */
+/** Зарегистрировано ли дерево у репозитория (а не просто каталог). */
+async function registered(repoPath: string, dir: string) {
+  const list = await git(repoPath, 'worktree', 'list', '--porcelain').catch(() => '');
+  const real = existsSync(dir) ? realpathSync(dir) : dir;
+  return list.split('\n').some((l) => l.startsWith('worktree ') && l.slice(9) === real);
+}
+
+/**
+ * Дерево работы: зарегистрированное — как есть (с правками прошлых сдач);
+ * ветка работы есть, а дерева нет (убрано) — дерево на её коммитах; нет и
+ * ветки — от цели.
+ */
 export async function ensureWorkTree(repoPath: string, dir: string, workId: string, base: string) {
-  if (existsSync(dir)) return { created: false };
+  if (existsSync(dir) && (await registered(repoPath, dir))) return { created: false };
+  await removeTree(repoPath, dir);
   await mkdir(dirname(dir), { recursive: true });
-  // `-B`: ветка прежней (принятой или отменённой) жизни работы начинается заново.
-  await git(repoPath, 'worktree', 'add', '-B', workBranch(workId), dir, base);
+  const branch = workBranch(workId);
+  const exists = await git(repoPath, 'rev-parse', '--verify', '-q', `refs/heads/${branch}`)
+    .then(() => true)
+    .catch(() => false);
+  if (exists) {
+    await git(repoPath, 'worktree', 'add', dir, branch);
+    return { created: false };
+  }
+  await git(repoPath, 'worktree', 'add', '-b', branch, dir, base);
   return { created: true };
+}
+
+/** Дерево, ветка и сессии работы — после приёмки, отмены или сброса ведущего. */
+export async function discardWork(repoPath: string, dir: string, workId: string, sessions: string) {
+  await removeTree(repoPath, dir).catch(() => undefined);
+  await git(repoPath, 'branch', '-D', workBranch(workId)).catch(() => undefined);
+  await rm(sessions, { recursive: true, force: true }).catch(() => undefined);
 }
 
 const HARNESS_GIT = [

@@ -90,6 +90,7 @@ import {
   type WorkState,
   hostEnvironment,
   acceptancePhases,
+  harnessModeOf,
   strictSandbox,
   PROPOSAL_LIMITS,
   RESEARCH_LIMIT,
@@ -2602,6 +2603,7 @@ export class Engine {
           id: session.id.slice(0, 200),
           mode: session.mode,
           ...(session.reason ? { reason: session.reason.slice(0, 500) } : {}),
+          ...(session.spec ? { spec: session.spec } : {}),
         },
       }),
     );
@@ -2891,7 +2893,14 @@ export class Engine {
       if (evidence.recheck) {
         const of = evidence.recheck.of;
         const first = a.evidence.find((e) => e.id === of);
-        const prior = a.evidence.filter((e) => e.recheck && e.phase === evidence.phase);
+        // Тонкий режим (alpha.73): один повтор на gate и SHA слияния, а не на фазу.
+        const thin = harnessModeOf(this.policy) === 'thin';
+        const prior = a.evidence.filter(
+          (e) =>
+            e.recheck &&
+            e.phase === evidence.phase &&
+            (!thin || (e.gate === evidence.gate && e.sha === evidence.sha)),
+        );
         const extra =
           prior.length === 1 &&
           prior[0]!.recheck!.of === of &&
@@ -3289,7 +3298,12 @@ export class Engine {
       kind === 'needs-lead' && (thinLeadCauses as readonly string[]).includes(options.cause ?? '')
         ? (options.cause as ThinLeadCause)
         : undefined;
-    const uncountedStop = writerBlocked || !!leadCause;
+    // Цель сдвинулась мимо замка интеграции (тонкий режим): повтор проверки
+    // без writer, не дефект сдачи.
+    const uncountedStop =
+      writerBlocked ||
+      !!leadCause ||
+      (kind === 'stale-base' && harnessModeOf(this.policy) === 'thin');
     // Отказ окружения, который повтор не снимет (gate зовёт ps в песочнице):
     // без автоматического повтора и без паузы выдачи — ход ведущего.
     const noRetry =

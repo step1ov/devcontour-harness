@@ -677,6 +677,8 @@ export const attemptStateSchema = z.strictObject({
       id: z.string().min(1).max(200),
       mode: z.enum(['fresh', 'resumed', 'fallback']),
       reason: z.string().max(500).optional(),
+      /** Согласованная постановка, под которой шла сессия: новая — новая сессия. */
+      spec: digestSchema.optional(),
     })
     .optional(),
   failureKind: failureKindSchema.optional(),
