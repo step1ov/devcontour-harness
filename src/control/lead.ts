@@ -149,19 +149,42 @@ export function leadNote(engine: Engine, options: { text: string; workId?: strin
   });
 }
 
-/** `lead end`: закончить сессию (необязательная строка — чем закончил). */
-export function leadEnd(engine: Engine, options: { text?: string } = {}): LeadData {
+/** Код записи `lead end --waiting owner` (alpha.72): ведущий ждёт решения владельца. */
+export const LEAD_WAITING_OWNER = 'lead.waiting-owner';
+
+/**
+ * `lead end`: закончить сессию (необязательная строка — чем закончил).
+ * `waitingOwner` (alpha.72, `--waiting owner --reason`): ведущий остановился
+ * на решении, которое принимает только владелец; драйвер ведущего (`lead
+ * drive`) сообщает это владельцу и ждёт дальше, а не будит ведущего снова.
+ */
+export function leadEnd(
+  engine: Engine,
+  options: { text?: string; waitingOwner?: string } = {},
+): LeadData {
   const note = options.text
     ? cleanLeadText(options.text, LEAD_LIMITS.note, 'lead end --text')
     : undefined;
+  const waiting =
+    options.waitingOwner !== undefined
+      ? cleanLeadText(options.waitingOwner, LEAD_LIMITS.note - 40, 'lead end --reason')
+      : undefined;
   return engine.recordLead((log, now) => {
-    const entry: LeadEntry = {
-      at: iso(now),
-      kind: 'end',
-      action: 'lead.end',
-      plain: note ? `ведущий закончил работу: ${note}` : 'ведущий закончил работу',
-      plainEn: note ? `the lead stopped working: ${note}` : 'the lead stopped working',
-    };
+    const entry: LeadEntry = waiting
+      ? {
+          at: iso(now),
+          kind: 'end',
+          action: LEAD_WAITING_OWNER,
+          plain: `ведущий ждёт решения владельца: ${waiting}`,
+          plainEn: `the lead waits for the owner's decision: ${waiting}`,
+        }
+      : {
+          at: iso(now),
+          kind: 'end',
+          action: 'lead.end',
+          plain: note ? `ведущий закончил работу: ${note}` : 'ведущий закончил работу',
+          plainEn: note ? `the lead stopped working: ${note}` : 'the lead stopped working',
+        };
     const base = append(log, entry, now);
     const next: LeadLog = base.session
       ? { ...base, session: { ...base.session, endedAt: iso(now), until: iso(now) } }
@@ -385,6 +408,14 @@ export function leadCommandEntry(
       return phase === 'start'
         ? one('ведущий запустил harness run', 'the lead started harness run')
         : one('harness run ведущего закончился', "the lead's harness run ended");
+    case 'run-detach':
+      // Решение ведущего — запуск; начало и конец самого run пишет run.
+      return phase === 'end'
+        ? one(
+            'ведущий запустил harness run отдельным процессом',
+            'the lead started harness run as a separate process',
+          )
+        : undefined;
     case 'review-plan':
       return one(
         'ведущий отправил план на независимое ревью',
@@ -497,6 +528,7 @@ export function leadCommandEntry(
 /** Команды, которые журнал ведущего записывает сам. */
 export const LEAD_LOGGED_COMMANDS = [
   'run',
+  'run-detach',
   'review-plan',
   'review-contract',
   'review-accept',

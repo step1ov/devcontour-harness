@@ -1789,6 +1789,19 @@ export const cliCommands = {
         required: false,
         description: 'Чем ведущий закончил — короткая строка',
       },
+      {
+        name: '--waiting',
+        value: 'text',
+        required: false,
+        description:
+          'owner (alpha.72): ведущий остановился на решении, которое принимает только владелец (с --reason: какое); драйвер ведущего (harness lead drive) сообщает его владельцу и ждёт дальше, а не будит ведущего снова',
+      },
+      {
+        name: '--reason',
+        value: 'text',
+        required: false,
+        description: 'С --waiting owner: какое решение владельца нужно, простыми словами',
+      },
     ],
     refusals: ['NOT_FOUND'],
   },
@@ -1912,6 +1925,99 @@ export const cliCommands = {
       },
     ],
     refusals: ['NOT_FOUND'],
+  },
+  'run-detach': {
+    description:
+      'harness run отдельным процессом (alpha.72): `harness run --detach --log <файл> …` с теми же параметрами, что run; процесс в своей группе и сессии, stdin закрыт, stdout и stderr — в файл журнала; команда ждёт (до 30 с), пока run не поставит метку запуска или не займёт роль controller, и возвращает pid; run вышел с ошибкой — отказ NOT_READY с кодом выхода и последними 40 строками журнала. Работает из любой оболочки (bash, zsh) без set -m, setsid и nohup. Запись запуска — <state>/run-detach.json: harness lead drive показывает ведущему путь и хвост журнала, когда очередь стоит. Синоним: harness run --detach',
+    writes: true,
+    idempotency:
+      'Каждый вызов запускает новый процесс run; два run одного каталога состояния разводит controller (второй — CONTROLLER_BUSY в своём журнале)',
+    args: [
+      state,
+      policy,
+      {
+        name: '--log',
+        value: 'path',
+        required: true,
+        description: 'Файл журнала run (stdout и stderr, дописывается, права 0600)',
+      },
+      {
+        name: '--graph',
+        value: 'path',
+        required: false,
+        description: 'Как у run; прочие параметры run передаются ему как есть',
+      },
+    ],
+    refusals: ['INVALID_INPUT', 'NOT_READY'],
+  },
+  'lead-drive': {
+    description:
+      'Ждать за ведущего без модели (alpha.72): то же ожидание и курсор, что harness wait; команду ведущего хоста (--agent) запускает только на значимом событии — отказ или удержание, которые harness сам не чинит, вопрос, на который может ответить ведущий, новый вопрос владельца (один раз: передать владельцу, не отвечая), ответ владельца, готовый выпуск, очередь без harness run (или ещё без каталога состояния); событие, устаревшее к запуску, ведущего не будит. Каждая сессия новая: цели оператора (--prompt-file) и короткая сводка события с командами на stdin, окружение HARNESS_LEAD_DRIVE=1, HARNESS_LEAD_DRIVE_CURSOR, HARNESS_LEAD_DRIVE_SESSION, HARNESS_LEAD_DRIVE_EVENT; своя группа процессов, stdout и stderr — в файлы --log (или /dev/null). Принятие работы, таймаут ожидания и отказ, который harness повторит сам, ведущего не будят. Прогресс — только решения ведущего (команды его журнала, кроме начала и конца run, которые пишет сам run; итог выпуска, графы, раунды ревью), не lead begin и заметки; состояние без нового события второй раз подряд без решения ведущего не будит (сначала ждёт изменений --repeat-wait). Синоним: harness lead drive',
+    writes: false,
+    idempotency:
+      'Сам драйвер состояние только читает; пока ждёт, продлевает активную сессию ведущего (как harness wait), если она открыта; пишут запущенные им сессии ведущего. Коды выхода — исходы, не ошибки (`ok: true`, решает `outcome`): 0 release-done (release done записан, весь код принят), 20 owner (run не идёт, готовых работ нет, а остальное ждёт владельца: вопрос, на который ведущему отвечать нельзя, шаг только человека — бюджет, доступ к провайдеру — или lead end --waiting owner; пауза оператора — сразу; пока другое идёт, это только уведомления в stderr и notices), 21 no-progress (--idle-sessions сессий подряд без решений ведущего или сверх --session-timeout, либо то же состояние снова без его решения), 22 max-sessions, 23 agent-error (команда не запустилась), 16 aborted (сигнал)',
+    args: [
+      state,
+      {
+        ...policy,
+        required: true,
+        description: 'ExecutionPolicy JSON: для explain и команд сводки',
+      },
+      {
+        name: '--agent',
+        value: 'text',
+        required: true,
+        description:
+          "Команда ведущего хоста одной строкой, без оболочки (кавычки склеивают аргументы), prompt — на stdin; подстановки {session}, {cursor}, {prompt-file}. Пример: 'codex exec --json -C /repo -'",
+      },
+      {
+        name: '--prompt-file',
+        value: 'path',
+        required: true,
+        description: 'Короткий prompt оператора с целями выпуска: начало каждой сессии',
+      },
+      {
+        name: '--max-sessions',
+        value: 'number',
+        required: false,
+        description: 'Предел сессий ведущего за запуск драйвера (1–500, по умолчанию 20)',
+      },
+      {
+        name: '--idle-sessions',
+        value: 'number',
+        required: false,
+        description:
+          'Сессий подряд без изменения состояния до остановки с диагнозом (1–20, по умолчанию 3)',
+      },
+      {
+        name: '--timeout',
+        value: 'duration',
+        required: false,
+        description: 'Предел одного внутреннего ожидания: Nm, Nh или Ns; по умолчанию 60m',
+      },
+      {
+        name: '--session-timeout',
+        value: 'duration',
+        required: false,
+        description:
+          'Предел одной сессии ведущего (по умолчанию 60m): дольше — SIGTERM, через 10 с SIGKILL; такая сессия считается неудачной (--idle-sessions)',
+      },
+      {
+        name: '--repeat-wait',
+        value: 'duration',
+        required: false,
+        description:
+          'То же состояние снова без решения ведущего: сколько ждать любого изменения (событие, запись, правка политики) до выхода no-progress; по умолчанию 10m',
+      },
+      {
+        name: '--log',
+        value: 'path',
+        required: false,
+        description:
+          'Каталог журналов: session-N.prompt.md, session-N.out (stdout), session-N.err (stderr)',
+      },
+    ],
+    refusals: ['NOT_FOUND', 'INVALID_INPUT'],
   },
   'lead-outline': {
     description:
@@ -2585,6 +2691,66 @@ export const waitDataSchema = z.strictObject({
   /** Номер события, с которого продолжит `wait --after <cursor>` (ревью D/E HIGH-1). */
   cursor: z.number().int().min(0),
   waitedMs: z.number().int().min(0),
+});
+
+/** Итог `harness run --detach` (alpha.72). */
+export const runDetachDataSchema = z.strictObject({
+  pid: z.number().int().positive(),
+  log: z.string().min(1),
+  at: isoTimeSchema,
+  args: z.array(z.string()),
+  /** Run подтвердил запуск (метка запуска или роль controller) за время ожидания. */
+  confirmed: z.boolean(),
+  /** Run уже закончился успешно за время ожидания. */
+  exitCode: z.literal(0).optional(),
+});
+
+/** Итог `harness lead drive` (alpha.72, P9-9). */
+export const leadDriveDataSchema = z.strictObject({
+  outcome: z.enum([
+    'release-done',
+    'aborted',
+    'owner',
+    'no-progress',
+    'max-sessions',
+    'agent-error',
+  ]),
+  message: z.string().max(2000),
+  sessions: z
+    .array(
+      z.strictObject({
+        session: z.number().int().positive(),
+        kind: z.union([waitDataSchema.shape.kind, z.literal('owner-question')]),
+        workId: idSchema.optional(),
+        cursor: z.number().int().min(0),
+        exitCode: z.number().int().nullable(),
+        progressed: z.boolean(),
+        timedOut: z.literal(true).optional(),
+        ms: z.number().int().min(0),
+      }),
+    )
+    .max(200),
+  notices: z
+    .array(
+      z.strictObject({
+        at: isoTimeSchema,
+        kind: z.enum(['owner-question', 'owner-answered', 'owner-step', 'owner-waiting']),
+        requestId: z.string().min(1).max(200).optional(),
+        workId: idSchema.optional(),
+        message: z.string().max(500),
+      }),
+    )
+    .max(50),
+  waits: z.number().int().min(0),
+  cursor: z.number().int().min(0),
+  status: z.string().max(500),
+  last: z
+    .strictObject({
+      kind: waitDataSchema.shape.kind,
+      workId: idSchema.optional(),
+      next: waitDataSchema.shape.next,
+    })
+    .optional(),
 });
 
 export const eventsDataSchema = z.strictObject({
@@ -3804,6 +3970,8 @@ export const cliDataSchemas = {
   status: statusDataSchema,
   events: eventsDataSchema,
   wait: waitDataSchema,
+  'lead-drive': leadDriveDataSchema,
+  'run-detach': runDetachDataSchema,
   guide: guideDataSchema,
   pause: controlDataSchema,
   resume: controlDataSchema,
