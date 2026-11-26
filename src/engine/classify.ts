@@ -137,7 +137,10 @@ export function environmentCauseOf(
   if (
     kind === 'needs-lead' &&
     error instanceof TaskFailure &&
-    (error.diagnosis === 'writer-environment' || error.diagnosis === 'writer-split')
+    (error.diagnosis === 'writer-environment' ||
+      error.diagnosis === 'writer-split' ||
+      error.diagnosis === 'gate-environment' ||
+      error.diagnosis === 'merge-conflict')
   )
     return error.diagnosis;
   if (kind !== 'environment') return 'none';

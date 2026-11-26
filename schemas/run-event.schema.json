@@ -1268,6 +1268,8 @@
                 "resource-busy",
                 "writer-environment",
                 "writer-split",
+                "gate-environment",
+                "merge-conflict",
                 "toolchain",
                 "other",
                 "none"

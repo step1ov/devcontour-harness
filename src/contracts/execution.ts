@@ -144,6 +144,12 @@ export const noRetryEnvironmentCauses = [
   'gate-definition',
 ] as const;
 export type NoRetryEnvironmentCause = (typeof noRetryEnvironmentCauses)[number];
+/**
+ * Причины `needs-lead` тонкого режима (alpha.73) — как остановка исполнителя
+ * из-за окружения: попытка не засчитана, паузы очереди и удержаний нет.
+ */
+export const thinLeadCauses = ['gate-environment', 'merge-conflict'] as const;
+export type ThinLeadCause = (typeof thinLeadCauses)[number];
 /** Код отказа gate, с которого начинается сводка evidence отказа без повтора. */
 export const NO_RETRY_GATE_CODES: Record<NoRetryEnvironmentCause, string> = {
   'sandbox-process-list': 'GATE_SANDBOX_PROCESS_LIST',
@@ -658,6 +664,21 @@ export const attemptStateSchema = z.strictObject({
     .optional(),
   /** Итог исполнителя незавершённой попытки своими словами (до 500 знаков). */
   writerSummary: z.string().max(500).optional(),
+  /** Причина `needs-lead` тонкого режима (`thinLeadCauses`): попытка не засчитана. */
+  leadCause: z.enum(thinLeadCauses).optional(),
+  /**
+   * Сессия writer тонкого режима (alpha.73): `fresh` — новая, `resumed` —
+   * продолжена сессия прежней сдачи, `fallback` — продолжить не вышло
+   * (`reason`), начата новая.
+   */
+  writerSession: z
+    .strictObject({
+      runtime: runtimeNameSchema,
+      id: z.string().min(1).max(200),
+      mode: z.enum(['fresh', 'resumed', 'fallback']),
+      reason: z.string().max(500).optional(),
+    })
+    .optional(),
   failureKind: failureKindSchema.optional(),
   /** Предел окна контекста — только у отказа `context-exhausted`. */
   contextLimit: contextLimitSchema.optional(),

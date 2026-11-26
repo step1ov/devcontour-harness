@@ -620,6 +620,7 @@ export function activityInputOf(
         ...(interrupted ||
         a.blocked ||
         a.writerBlocked ||
+        a.leadCause ||
         a.status === 'expired' ||
         a.failureKind === 'environment' ||
         a.failureKind === 'provider-auth'

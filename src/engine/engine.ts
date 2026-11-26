@@ -5,6 +5,8 @@ import {
   contextDigestMatches,
   STAGE_NAME_LIMIT,
   noRetryEnvironmentCauses,
+  thinLeadCauses,
+  type ThinLeadCause,
   NO_RETRY_GATE_CODES,
   type NoRetryEnvironmentCause,
   codeReviewDecisionSchema,
@@ -337,8 +339,13 @@ const causeOf = (
   if (blocked && kind !== 'provider-auth' && kind !== 'environment') return 'preflight';
   if (kind === 'provider-auth')
     return cause === 'provider-limit' ? 'provider-limit' : 'provider-auth';
-  if (kind === 'needs-lead' && (cause === 'writer-environment' || cause === 'writer-split'))
-    return cause;
+  if (
+    kind === 'needs-lead' &&
+    (cause === 'writer-environment' ||
+      cause === 'writer-split' ||
+      (thinLeadCauses as readonly string[]).includes(cause ?? ''))
+  )
+    return cause!;
   if (kind !== 'environment') return 'none';
   return cause && cause !== 'none' && cause !== 'provider-auth' && cause !== 'provider-limit'
     ? cause
@@ -2578,6 +2585,28 @@ export class Engine {
   }
 
   /**
+   * Сессия writer тонкого режима (alpha.73): какую сессию CLI вела эта
+   * сдача — новую, продолженную или новую после неудачного продолжения.
+   */
+  recordWriterSession(
+    id: string,
+    token: string,
+    session: NonNullable<AttemptState['writerSession']>,
+  ) {
+    this.withAttempt(id, token, 'run.writer-session', (a, _w, tx) =>
+      tx.putAttempt({
+        ...a,
+        writerSession: {
+          runtime: session.runtime,
+          id: session.id.slice(0, 200),
+          mode: session.mode,
+          ...(session.reason ? { reason: session.reason.slice(0, 500) } : {}),
+        },
+      }),
+    );
+  }
+
+  /**
    * Решение по предложению исполнителя (alpha.70): принять в план или
    * отклонить — ведущий (`by: lead`) или оператор. Принятие граф не меняет:
    * принятое ведущий вносит в план обычным ревью плана (разделение —
@@ -3252,6 +3281,13 @@ export class Engine {
       kind === 'needs-lead' && options.cause === 'writer-split' ? options.proposal : undefined;
     const writerBlocked =
       kind === 'needs-lead' && (options.cause === 'writer-environment' || !!writerSplit);
+    // Тонкий режим (alpha.73): сбой среды проверки сдачи и конфликт слияния —
+    // ход ведущего, попытка не засчитана, без паузы и удержаний.
+    const leadCause =
+      kind === 'needs-lead' && (thinLeadCauses as readonly string[]).includes(options.cause ?? '')
+        ? (options.cause as ThinLeadCause)
+        : undefined;
+    const uncountedStop = writerBlocked || !!leadCause;
     // Отказ окружения, который повтор не снимет (gate зовёт ps в песочнице):
     // без автоматического повтора и без паузы выдачи — ход ведущего.
     const noRetry =
@@ -3289,6 +3325,7 @@ export class Engine {
         ...(blocked ? { blocked: true } : {}),
         ...(writerBlocked && !writerSplit ? { writerBlocked: true as const } : {}),
         ...(writerSplit ? { writerSplit } : {}),
+        ...(leadCause ? { leadCause } : {}),
         ...(options.writerSummary?.trim()
           ? { writerSummary: options.writerSummary.trim().slice(0, 500) }
           : {}),
@@ -3351,13 +3388,13 @@ export class Engine {
             }),
         activeRunId: undefined,
         attempt:
-          (interrupted || uncounted(kind, blocked, writerBlocked) || givesBack) && w.attempt > 0
+          (interrupted || uncounted(kind, blocked, uncountedStop) || givesBack) && w.attempt > 0
             ? w.attempt - 1
             : w.attempt,
         // Отказ до работы (blocked), штатная остановка и вопрос предел
         // незасчитанных отказов не тратят; вопрос сверх своего предела
         // засчитан как попытка.
-        ...(uncounted(kind, blocked, writerBlocked) && !blocked && !interrupted
+        ...(uncounted(kind, blocked, uncountedStop) && !blocked && !interrupted
           ? { neutralFailures: (w.neutralFailures ?? 0) + 1 }
           : {}),
       });
@@ -3378,7 +3415,7 @@ export class Engine {
         payload: {
           failureKind: kind,
           cause: interrupted ? 'shutdown' : causeOf(kind, options.cause, blocked),
-          counted: !interrupted && !uncounted(kind, blocked, writerBlocked) && !givesBack,
+          counted: !interrupted && !uncounted(kind, blocked, uncountedStop) && !givesBack,
         },
       });
       if (options.input && !interrupted)

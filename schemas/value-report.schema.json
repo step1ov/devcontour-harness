@@ -2284,7 +2284,7 @@
               "type": "object",
               "properties": {
                 "rows": {
-                  "maxItems": 24,
+                  "maxItems": 26,
                   "type": "array",
                   "items": {
                     "type": "object",
@@ -2313,6 +2313,8 @@
                           "resource-busy",
                           "writer-environment",
                           "writer-split",
+                          "gate-environment",
+                          "merge-conflict",
                           "toolchain",
                           "other",
                           "none"

@@ -17,7 +17,10 @@ type AttemptFacts = Pick<
   'id' | 'workId' | 'status' | 'failureKind' | 'blocked' | 'writerBlocked' | 'interrupted'
 > &
   Partial<
-    Pick<AttemptState, 'writerSplit' | 'failureFingerprint' | 'evidence' | 'environmentCause'>
+    Pick<
+      AttemptState,
+      'writerSplit' | 'leadCause' | 'failureFingerprint' | 'evidence' | 'environmentCause'
+    >
   >;
 type WorkFacts = Pick<
   WorkState,
@@ -37,6 +40,7 @@ export const countedFailure = (a: AttemptFacts) =>
   !a.blocked &&
   !a.writerBlocked &&
   !a.writerSplit &&
+  !a.leadCause &&
   !a.interrupted &&
   a.failureKind !== undefined &&
   a.failureKind !== 'environment' &&

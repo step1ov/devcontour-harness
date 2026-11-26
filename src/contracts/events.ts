@@ -82,6 +82,14 @@ export const environmentCauses = [
    */
   'writer-split',
   /**
+   * Тонкий режим (alpha.73): проверка сдачи упала до кода (нет инструмента,
+   * таймаут без упавшего теста) и после автоповтора — `needs-lead`, не
+   * засчитана, без паузы очереди и удержаний.
+   */
+  'gate-environment',
+  /** Тонкий режим (alpha.73): сдача не сливается с целью — `needs-lead`, не засчитана. */
+  'merge-conflict',
+  /**
    * Toolchain среды: закреплённый `policy.toolchain` не разрешился, либо
    * проверка упала под другим node, чем последний её успешный запуск на базе.
    * О коде это не говорит; попытка не засчитана.
@@ -690,6 +698,7 @@ export const transactionKinds = [
   'proposal.recorded',
   'proposal.decided',
   'run.research',
+  'run.writer-session',
   'run.continuation',
   'run.model',
   'run.timing.started',
