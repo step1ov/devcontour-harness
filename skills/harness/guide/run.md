@@ -75,8 +75,8 @@ summary shows the last `run --detach` log and its last lines); accepted
 works, failures harness retries by itself and
 events already resolved do not wake you. A new executor question you may
 not answer wakes you once (`HARNESS_LEAD_DRIVE_EVENT=owner-question`): do
-not answer it yourself — pass it to the owner's channel (a Relay open
-question, see `$H guide session`), keep independent works running and end
+not answer it yourself — pass it to the owner's channel (an open
+question in the task source, see `$H guide session`), keep independent works running and end
 your turn; the same question does not wake you again, the owner's answer
 does. When nothing is left for you but an owner's decision, say so:
 `$H lead end --state <state> --waiting owner --reason "<which decision>"` —
@@ -113,7 +113,7 @@ not answer (plus one `owner-question` session to pass it on), a step only a
 human takes for one work (budget, provider access) and the lead's
 `lead end --waiting owner`; the driver keeps waiting while other work can go
 on: failures of independent works still wake the lead, and the owner's
-answer (panel or `input-answer`) wakes it to apply the answer. While it
+answer (operator view or `input-answer`) wakes it to apply the answer. While it
 waits, the driver renews an open lead session, as `wait` does. Exit codes
 (`ok: true`, the JSON `outcome` decides): 0 release-done (release done
 recorded, all code accepted), 20 owner (no run going, nothing ready, and

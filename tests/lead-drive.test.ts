@@ -302,7 +302,7 @@ test('lead drive: новый вопрос владельца во время о�
   assert.equal(rec.env.HARNESS_LEAD_DRIVE_EVENT, 'owner-question');
   assert.match(
     rec.stdin,
-    /Это вопрос владельцу: не отвечайте сами, передайте его владельцу \(Relay\) и завершите ход/,
+    /Это вопрос владельцу: не отвечайте сами, передайте его владельцу \(открытый вопрос в источнике задач\) и завершите ход/,
   );
   assert.match(rec.stdin, /Какой формат приветствия/);
   assert.doesNotMatch(rec.stdin, /--actor lead/, 'команды ответа ведущего не предлагаются');
@@ -331,7 +331,10 @@ test('lead drive: вопрос владельца к первому ожидан
   // Вопрос уже ждёт к первому ожиданию: ведущий получает его один раз.
   const relay = await sessionRecord(dir, 1);
   assert.equal(relay.env.HARNESS_LEAD_DRIVE_EVENT, 'owner-question');
-  assert.match(relay.stdin, /не отвечайте сами, передайте его владельцу \(Relay\)/);
+  assert.match(
+    relay.stdin,
+    /не отвечайте сами, передайте его владельцу \(открытый вопрос в источнике задач\)/,
+  );
   go(dir, 1);
   await new Promise((r) => setTimeout(r, 600));
   assert.equal(sessionFiles(dir).length, 1, 'тот же вопрос ведущего больше не будит');
