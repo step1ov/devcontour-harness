@@ -10,7 +10,7 @@ import type {
   WorkState,
 } from '../contracts/execution.ts';
 import type { RecoveryPolicy } from './decisions.ts';
-import { MAX_NEUTRAL_FAILURES } from '../contracts/repair-policy.ts';
+import { MAX_NEUTRAL_FAILURES, uncountedStop } from '../contracts/repair-policy.ts';
 
 type AttemptFacts = Pick<
   AttemptState,
@@ -38,9 +38,7 @@ type WorkFacts = Pick<
 export const countedFailure = (a: AttemptFacts) =>
   a.status === 'failed' &&
   !a.blocked &&
-  !a.writerBlocked &&
-  !a.writerSplit &&
-  !a.leadCause &&
+  !uncountedStop(a) &&
   !a.interrupted &&
   a.failureKind !== undefined &&
   a.failureKind !== 'environment' &&

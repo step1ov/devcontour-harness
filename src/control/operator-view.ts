@@ -38,6 +38,7 @@ import {
   type AttemptState,
   type RunEvent,
   type WorkState,
+  uncountedStop,
 } from '../contracts/index.ts';
 import { HARNESS_VERSION, harnessDocsBase } from '../package.ts';
 import {
@@ -619,8 +620,7 @@ export function activityInputOf(
         // окружения и провайдера, истёкшее владение.
         ...(interrupted ||
         a.blocked ||
-        a.writerBlocked ||
-        a.leadCause ||
+        uncountedStop(a) ||
         a.status === 'expired' ||
         a.failureKind === 'environment' ||
         a.failureKind === 'provider-auth'

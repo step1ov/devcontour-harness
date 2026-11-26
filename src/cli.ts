@@ -42,6 +42,7 @@ import {
   type CliCommand,
   type CliEnvelope,
   type ExecutionPolicy,
+  harnessModeOf,
 } from './contracts/index.ts';
 import { HARNESS_VERSION } from './package.ts';
 import { validateInputs } from './validate.ts';
@@ -281,10 +282,12 @@ function adapters(policy: ExecutionPolicy) {
   return {
     codex: cliAdapter('codex', {
       toolProfiles: policy.toolProfiles,
+      sessionContinue: harnessModeOf(policy) === 'thin',
       ...(bin('codex') ? { executable: bin('codex')! } : {}),
     }),
     claude: cliAdapter('claude', {
       toolProfiles: policy.toolProfiles,
+      sessionContinue: harnessModeOf(policy) === 'thin',
       ...(bin('claude') ? { executable: bin('claude')! } : {}),
     }),
   };

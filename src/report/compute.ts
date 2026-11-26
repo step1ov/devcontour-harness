@@ -3,6 +3,7 @@
 // `valueReportSchema` (src/contracts/report.ts).
 
 import { failureRefOf } from '../contracts/failure-catalog.ts';
+import { uncountedStop } from '../contracts/repair-policy.ts';
 import { attemptLine, type AttemptLineFacts } from '../contracts/attempt-line.ts';
 import { HarnessError } from '../contracts/errors.ts';
 import type {
@@ -267,9 +268,7 @@ const counted = (a: AttemptState, givenBack: ReadonlySet<string>) =>
   a.status !== 'active' &&
   a.interrupted !== 'shutdown' &&
   !a.blocked &&
-  !a.writerBlocked &&
-  !a.writerSplit &&
-  !a.leadCause &&
+  !uncountedStop(a) &&
   a.status !== 'expired' &&
   a.failureKind !== 'environment' &&
   a.failureKind !== 'provider-auth' &&
@@ -413,15 +412,7 @@ export function attemptCounted(
   maxAttempts: number,
 ): boolean {
   if (a.status === 'active' || a.status === 'succeeded') return true;
-  if (
-    a.interrupted ||
-    a.status === 'expired' ||
-    a.blocked ||
-    a.writerBlocked ||
-    a.writerSplit ||
-    a.leadCause
-  )
-    return false;
+  if (a.interrupted || a.status === 'expired' || a.blocked || uncountedStop(a)) return false;
   if (a.failureKind === 'environment' || a.failureKind === 'provider-auth') return false;
   if (a.failureKind === 'needs-input') {
     const earlier = attempts

@@ -1,7 +1,15 @@
 #!/usr/bin/env node
 // FIXTURE ONLY. Подставной CLI codex/claude для тестов механики harness:
 // говорит по протоколу CLI, но ответы берёт из сценария, а не из модели.
-import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync, chmodSync } from 'node:fs';
+import {
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  rmSync,
+  existsSync,
+  realpathSync,
+  chmodSync,
+} from 'node:fs';
 import { dirname, join, basename } from 'node:path';
 import { execFileSync, spawnSync } from 'node:child_process';
 
@@ -37,18 +45,38 @@ const arg = (name) => {
   const i = args.indexOf(name);
   return i >= 0 ? args[i + 1] : undefined;
 };
-// Сессии (alpha.73): новая сессия оставляет метку в домашнем каталоге CLI
-// вызова; продолжение без метки — «session not found», как у настоящего CLI
-// после потери каталога. Шаг сценария при этом не расходуется.
+// Сессии (alpha.73), как у настоящих CLI: codex ищет сессию по ID в
+// CODEX_HOME, claude — в CLAUDE_CONFIG_DIR/projects/<настоящий путь cwd>.
+// Продолжение без метки — сообщение CLI «сессии нет»; шаг сценария не
+// расходуется. FIXTURE_RESUME_FAIL — другой отказ до начала (истёкший вход).
 const sessionHome = runtime === 'codex' ? process.env.CODEX_HOME : process.env.CLAUDE_CONFIG_DIR;
 const resumed =
   runtime === 'codex' ? (args[1] === 'resume' ? args[2] : undefined) : arg('--resume');
-const sessionMark = (id) => (sessionHome ? join(sessionHome, 'fixture-sessions', id) : undefined);
-if (resumed && !(sessionMark(resumed) && existsSync(sessionMark(resumed)))) {
-  console.error(`session not found: ${resumed}`);
+const sessionMark = (id) =>
+  !sessionHome
+    ? undefined
+    : runtime === 'codex'
+      ? join(sessionHome, 'fixture-sessions', id)
+      : join(
+          sessionHome,
+          'projects',
+          realpathSync(process.cwd()).replace(/[^a-zA-Z0-9]/g, '-'),
+          `${id}.jsonl`,
+        );
+if (resumed && process.env.FIXTURE_RESUME_FAIL) {
+  console.error(process.env.FIXTURE_RESUME_FAIL);
   process.exit(1);
 }
-const sessionId = resumed ?? `fixture-${process.pid}-${Date.now().toString(36)}`;
+if (resumed && !(sessionMark(resumed) && existsSync(sessionMark(resumed)))) {
+  console.error(
+    runtime === 'codex'
+      ? `Error: thread/resume failed: session not found: ${resumed}`
+      : `No conversation found with session ID: ${resumed}`,
+  );
+  process.exit(1);
+}
+const sessionId =
+  resumed ?? arg('--session-id') ?? `fixture-${process.pid}-${Date.now().toString(36)}`;
 if (!resumed && sessionMark(sessionId)) {
   mkdirSync(dirname(sessionMark(sessionId)), { recursive: true });
   writeFileSync(sessionMark(sessionId), '');

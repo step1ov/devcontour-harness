@@ -768,25 +768,39 @@ export const integrationReuseOn = (
   },
   host?: { capabilities?: { integrationReuse?: boolean | undefined } | undefined },
 ): boolean =>
-  policy.integrationReuse !== undefined
-    ? policy.integrationReuse === 'identical-tree'
-    : host === undefined
-      ? // Получатель, не знающий режим, перенос не включает (ревью B, L2).
-        policy.harnessMode === 'light'
-      : harnessModeOf(policy) === 'light' && host.capabilities?.integrationReuse === true;
+  // Тонкий режим (alpha.73): переноса кандидат→интеграция нет и явным полем.
+  policy.harnessMode === 'thin'
+    ? false
+    : policy.integrationReuse !== undefined
+      ? policy.integrationReuse === 'identical-tree'
+      : host === undefined
+        ? // Получатель, не знающий режим, перенос не включает (ревью B, L2).
+          policy.harnessMode === 'light'
+        : harnessModeOf(policy) === 'light' && host.capabilities?.integrationReuse === true;
 
 /** Действует ли применимость по умолчанию (alpha.71): явное поле, иначе облегчённый режим. */
 export const derivedApplicabilityOn = (policy: {
   derivedApplicability?: 'on' | 'off' | undefined;
   harnessMode?: HarnessMode | undefined;
 }): boolean =>
-  policy.derivedApplicability !== undefined
-    ? policy.derivedApplicability === 'on'
-    : harnessModeOf(policy) === 'light';
+  // Тонкий режим (alpha.73): применимость не выводится и явным полем.
+  policy.harnessMode === 'thin'
+    ? false
+    : policy.derivedApplicability !== undefined
+      ? policy.derivedApplicability === 'on'
+      : harnessModeOf(policy) === 'light';
 
 /** Действующий режим политики: нет поля — `light` (alpha.69). */
 export const harnessModeOf = (policy: { harnessMode?: HarnessMode | undefined }): HarnessMode =>
   policy.harnessMode ?? DEFAULT_HARNESS_MODE;
+/**
+ * Фазы, записи которых решают приёмку: в тонком режиме (alpha.73) фазы
+ * кандидата нет — gates и ревью идут один раз, на слиянии с целью.
+ */
+export const acceptancePhases = (policy: {
+  harnessMode?: HarnessMode | undefined;
+}): readonly ('candidate' | 'integration')[] =>
+  policy.harnessMode === 'thin' ? ['integration'] : ['candidate', 'integration'];
 /**
  * Окружение хоста как у разработчика (alpha.73): облегчённый и тонкий
  * режимы — граница записи, порты и файл окружения попытки, технические

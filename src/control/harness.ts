@@ -37,6 +37,7 @@ import {
   INPUT_SOURCE_KIND,
   latestAnswer,
   strictSandbox,
+  harnessModeOf,
 } from '../contracts/index.ts';
 import { inputContextSource, withInput, type InputMessageRef } from '../engine/input-requests.ts';
 import { cliAdapter } from '../agents/cli-adapter.ts';
@@ -169,8 +170,14 @@ export class Harness {
     });
     this.workflows = new WorkflowQueue(this.store, this.policy, () => this.engine.clock());
     this.adapters = options.adapters ?? {
-      codex: cliAdapter('codex', { toolProfiles: this.policy.toolProfiles }),
-      claude: cliAdapter('claude', { toolProfiles: this.policy.toolProfiles }),
+      codex: cliAdapter('codex', {
+        toolProfiles: this.policy.toolProfiles,
+        sessionContinue: harnessModeOf(this.policy) === 'thin',
+      }),
+      claude: cliAdapter('claude', {
+        toolProfiles: this.policy.toolProfiles,
+        sessionContinue: harnessModeOf(this.policy) === 'thin',
+      }),
     };
     this.runner = new Runner({
       engine: this.engine,

@@ -55,6 +55,28 @@ export function claudeContextLimit(
   return numTurns !== undefined && numTurns <= 1 ? 'prompt-too-long' : 'blocking-limit';
 }
 
+/**
+ * Признаки нехватки окна контекста codex (alpha.73): codex не сообщает
+ * признака полем, только текстом ошибки. Читаются только события ошибки
+ * (`error`, `turn.failed`) и хвост stderr неуспешного вызова — не ответы
+ * модели, где те же слова могут быть о задаче. Codex сам сжимает контекст
+ * (auto-compact): такая ошибка — только когда сжатие не помогло; другого
+ * механизма для codex нет.
+ */
+export const CODEX_CONTEXT_PATTERNS: readonly RegExp[] = [
+  /context[_ ]length[_ ]exceeded/i,
+  /ran out of room in the model'?s context window/i,
+  /exceeds? (?:the )?(?:model'?s )?context window/i,
+  /maximum context length/i,
+];
+export function codexContextExhausted(stdout: string, stderr: string): boolean {
+  const messages = runtimeEvents(stdout)
+    .events.filter((e) => e.type === 'error' || e.type === 'turn.failed')
+    .map((e) => JSON.stringify(e));
+  const tail = stderr.split('\n').slice(-20).join('\n');
+  return [...messages, tail].some((t) => CODEX_CONTEXT_PATTERNS.some((p) => p.test(t)));
+}
+
 type ToolProfile = z.infer<typeof toolProfileSchema>;
 
 /**
@@ -204,6 +226,8 @@ export interface CliAdapterOptions {
    * которого нет в снимке и в этом перечне, остался бы открытым.
    */
   controllerEntries?: string[];
+  /** Пробовать продолжение сессии writer (`capabilities().sessionContinue`): тонкий режим. */
+  sessionContinue?: boolean;
 }
 
 /**
@@ -236,6 +260,16 @@ export function sessionContinueSupport(
     );
   return resumeProbes.get(key)!;
 }
+
+/**
+ * Сообщения CLI о том, что продолжаемой сессии нет (alpha.73). Только по ним
+ * продолжение считается потерянным: прочий отказ до начала (вход истёк,
+ * лимит, нет CLI) — прежний путь недоступного runtime.
+ */
+export const SESSION_NOT_FOUND: Record<'codex' | 'claude', RegExp> = {
+  codex: /no saved session|session not found|no rollout found|thread not found/i,
+  claude: /no conversation found/i,
+};
 
 /**
  * Codex `exec resume` (0.165) не знает `--sandbox`: режим песочницы — той
@@ -271,7 +305,11 @@ export function cliAdapter(
     runtime,
     async capabilities(): Promise<RuntimeCapabilities> {
       const version = await runtimeVersion(executable);
-      const sessionContinue = version ? await sessionContinueSupport(runtime, executable) : false;
+      // Проба справки — только когда хост её просит (тонкий режим).
+      const sessionContinue =
+        version && options.sessionContinue
+          ? await sessionContinueSupport(runtime, executable)
+          : false;
       return {
         runtime,
         ...(version ? { version } : {}),
@@ -290,6 +328,7 @@ export function cliAdapter(
       if (r.session.kind === 'fork' || (r.session.kind === 'continue' && r.task !== 'implement'))
         throw new Error(`${runtime}: продолжение сессии не поддерживается`);
       const resume = r.session.kind === 'continue' ? r.session.id : undefined;
+      const freshId = randomUUID();
       const review = r.task !== 'implement';
       const dir = r.artifactDir ?? (await mkdtemp(join(controllerTemp.dir(), 'harness-call-')));
       await mkdir(dir, { recursive: true });
@@ -448,7 +487,8 @@ export function cliAdapter(
               // Сессия writer с постоянным домашним каталогом (тонкий режим)
               // сохраняется: её продолжит следующая сдача.
               ...(light?.home ? [] : ['--no-session-persistence']),
-              ...(resume ? ['--resume', resume] : []),
+              // ID новой сессии writer задаёт harness (`--session-id`), продолжение — `--resume`.
+              ...(resume ? ['--resume', resume] : light?.home ? ['--session-id', freshId] : []),
               ...(r.binding.model ? ['--model', r.binding.model] : []),
             ];
       const argv = runtime === 'codex' && resume ? codexResumeArgv(built, resume) : built;
@@ -609,7 +649,9 @@ export function cliAdapter(
         const contextExhausted =
           runtime === 'claude'
             ? claudeContextLimit(terminalReason, telemetry.numTurns())
-            : undefined;
+            : result.code !== 0 && codexContextExhausted(result.stdout, result.stderr)
+              ? ('blocking-limit' as const)
+              : undefined;
         const bookkeeping = ['system', 'result', 'error', 'session.created', 'thread.started'];
         const started =
           result.timedOut ||
@@ -629,7 +671,9 @@ export function cliAdapter(
             .at(-1);
           return text ? redact(text).slice(0, 300) : undefined;
         };
-        const sessionId = telemetry.sessionId();
+        const sessionId =
+          telemetry.sessionId() ??
+          (runtime === 'claude' && light?.home ? (resume ?? freshId) : undefined);
         const base = {
           text: redact(result.stdout).slice(-20000),
           ...(sessionId ? { sessionId } : {}),
@@ -657,7 +701,12 @@ export function cliAdapter(
         // Продолжение не началось: сессии нет (удалена, другой каталог) —
         // отказ этого продолжения, а не недоступный runtime: следующая сдача
         // начнёт новую сессию.
-        if (result.code !== 0 && resume && !started)
+        if (
+          result.code !== 0 &&
+          resume &&
+          !started &&
+          SESSION_NOT_FOUND[runtime].test(result.stderr + '\n' + result.stdout)
+        )
           return {
             ...base,
             status: 'failed',

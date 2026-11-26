@@ -89,6 +89,14 @@ export function failurePlainOf(a: AttemptState, bucket: FailureBucket): PlainTex
   let detail: PlainText;
   const port = busyPort(a.error);
   if (port) detail = { ru: `порт ${port} занят`, en: `port ${port} is busy` };
+  else if (a.leadCause)
+    detail =
+      a.leadCause === 'merge-conflict'
+        ? { ru: 'сдача не сливается с целью', en: 'the handover does not merge into the target' }
+        : {
+            ru: 'проверка сдачи дважды упала средой',
+            en: 'a handover check failed on the environment twice',
+          };
   else if (a.writerBlocked)
     detail = {
       ru: 'окружение закрыло исполнителю обязательный шаг',

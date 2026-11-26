@@ -37,6 +37,15 @@ test('thin: окружение облегчённого режима, B1/B2 вы
   assert.equal(integrationReuseOn(thin), false);
   assert.equal(integrationReuseOn(thin, { capabilities: { integrationReuse: true } }), false);
   assert.equal(derivedApplicabilityOn(thin), false);
+  // И явными полями: в тонком режиме B1/B2 нет.
+  const explicit = policyOf((p) => {
+    p.harnessMode = 'thin';
+    p.integrationReuse = 'identical-tree';
+    p.derivedApplicability = 'on';
+  });
+  assert.equal(integrationReuseOn(explicit), false);
+  assert.equal(integrationReuseOn(explicit, { capabilities: { integrationReuse: true } }), false);
+  assert.equal(derivedApplicabilityOn(explicit), false);
   assert.equal(leadAnswersSourceOf(thin), 'light-default');
   assert.equal(inputPolicyOf(thin).leadAnswers?.technical, true);
   // Облегчённый режим не изменился.

@@ -202,6 +202,8 @@ export type StopInput =
          * последней попытки): ID предложения и частей; решает ведущий.
          */
         writerSplit?: { proposal: string; parts: number; status?: string };
+        /** Причина `needs-lead` тонкого режима последней попытки (alpha.73). */
+        leadCause?: 'gate-environment' | 'merge-conflict';
         hold?: { operation: string; reason: string };
         budgetBlock?: { reason: string };
         /**
@@ -438,6 +440,18 @@ const writerBlockedText =
 const writerBlockedSteps = (summary: string | undefined) =>
   (summary ? `Итог исполнителя: «${clipText(summary, 300)}». ` : '') +
   'Попытка не засчитана, автоматического повтора нет: проверьте шаг (harness smoke --writer-probe), разрешите его в политике, положите источник в контекст или вынесите шаг в проверки harness, затем повторите работу.';
+
+/** Шаблоны `needs-lead` тонкого режима (alpha.73): попытка не засчитана, паузы нет. */
+const thinLeadTexts = {
+  'gate-environment': {
+    text: 'Проверка сдачи дважды упала средой (нет инструмента, таймаут без упавшего теста, подготовка окружения); решение ведущего.',
+    note: 'Попытка не засчитана, очередь не остановлена: разберите вывод проверки в причине отказа, почините окружение или команду gate, затем повторите работу (retry --by lead).',
+  },
+  'merge-conflict': {
+    text: 'Сдача не сливается с текущей целью: конфликт слияния; решение ведущего.',
+    note: 'Попытка не засчитана: повторите работу (retry --by lead) — исполнитель сольёт цель в дерево работы и разрешит конфликт, — или измените порядок работ.',
+  },
+} as const;
 
 /** Шаблон `needs-lead`: исполнитель предложил разделить работу (alpha.70). */
 const writerSplitText =
@@ -884,16 +898,18 @@ function workOutcome(input: Extract<StopInput, { kind: 'work' }>, retry: boolean
           phase,
           actor: 'lead',
           action: 'diagnose-failure',
-          ...(work.writerSplit
-            ? { text: writerSplitText, note: writerSplitSteps(work.writerSplit) }
-            : work.writerBlocked
-              ? {
-                  text: writerBlockedText,
-                  note: writerBlockedSteps(work.writerBlocked.summary),
-                }
-              : work.preflight
-                ? { text: preflightNeedsLeadText, note: preflightNeedsLeadSteps }
-                : {}),
+          ...(work.leadCause
+            ? thinLeadTexts[work.leadCause]
+            : work.writerSplit
+              ? { text: writerSplitText, note: writerSplitSteps(work.writerSplit) }
+              : work.writerBlocked
+                ? {
+                    text: writerBlockedText,
+                    note: writerBlockedSteps(work.writerBlocked.summary),
+                  }
+                : work.preflight
+                  ? { text: preflightNeedsLeadText, note: preflightNeedsLeadSteps }
+                  : {}),
         };
       case 'review-protocol':
       case 'unknown':
@@ -1232,11 +1248,12 @@ export function explainStop(input: StopInput): StopDiagnosis {
       input.work.status === 'failed' && input.work.failureKind
         ? failureRefOf(
             input.work.failureKind,
-            input.work.writerSplit
-              ? 'writer-split'
-              : input.work.writerBlocked
-                ? 'writer-environment'
-                : (input.work.environmentCause ?? input.work.gateHold?.cause),
+            input.work.leadCause ??
+              (input.work.writerSplit
+                ? 'writer-split'
+                : input.work.writerBlocked
+                  ? 'writer-environment'
+                  : (input.work.environmentCause ?? input.work.gateHold?.cause)),
           )
         : undefined,
     ),

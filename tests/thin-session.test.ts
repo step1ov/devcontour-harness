@@ -38,7 +38,11 @@ function setup(steps: unknown[]) {
   const call = (
     runtime: 'codex' | 'claude',
     session: RuntimeRequest['session'],
-    extra: { task?: RuntimeRequest['task']; home?: string | null } = {},
+    extra: {
+      task?: RuntimeRequest['task'];
+      home?: string | null;
+      env?: Record<string, string>;
+    } = {},
   ) =>
     cliAdapter(runtime, { executable: bin(`fake-${runtime}`) }).invoke(
       {
@@ -57,7 +61,12 @@ function setup(steps: unknown[]) {
           light: extra.home === null ? {} : { home: extra.home ?? home },
         },
         timeoutMs: 30_000,
-        env: { PATH: process.env.PATH!, HOME: userHome, FIXTURE_SCENARIO: scenario },
+        env: {
+          PATH: process.env.PATH!,
+          HOME: userHome,
+          FIXTURE_SCENARIO: scenario,
+          ...extra.env,
+        },
         artifactDir: join(root, 'calls', String(n)),
       },
       AbortSignal.timeout(40_000),
@@ -107,7 +116,9 @@ test('claude: сессия writer с каталогом работы сохра�
   const s = setup([ok, ok, ok]);
   const first = await s.call('claude', { kind: 'fresh' });
   assert.equal(first.status, 'ok', JSON.stringify(first.diagnostics));
-  assert.match(first.sessionId ?? '', /^fixture-/);
+  // ID новой сессии задаёт harness (`--session-id`).
+  assert.match(first.sessionId ?? '', /^[0-9a-f-]{36}$/);
+  assert.equal(s.args(0)[s.args(0).indexOf('--session-id') + 1], first.sessionId);
   assert.ok(!s.args(0).includes('--no-session-persistence'));
   assert.ok(!s.args(0).includes('--resume'));
   const second = await s.call('claude', { kind: 'continue', id: first.sessionId! });
@@ -128,7 +139,18 @@ test('продолжение потерянной сессии — отказ п
     const lost = await s.call(runtime, { kind: 'continue', id: 'gone' });
     assert.equal(lost.status, 'failed', runtime);
     assert.equal(lost.diagnostics.sessionLost, true, runtime);
-    assert.match(lost.diagnostics.reason ?? '', /сессия gone не продолжена.*session not found/);
+    assert.match(
+      lost.diagnostics.reason ?? '',
+      /сессия gone не продолжена.*(session not found|No conversation found)/,
+    );
+    // Прочий отказ до начала (истёкший вход) — недоступный runtime, а не потерянная сессия.
+    const auth = await s.call(
+      runtime,
+      { kind: 'continue', id: 'gone' },
+      { env: { FIXTURE_RESUME_FAIL: 'Not logged in' } },
+    );
+    assert.equal(auth.status, 'unavailable', runtime);
+    assert.equal(auth.diagnostics.sessionLost, undefined, runtime);
     // Другой каталог работы — той сессии нет.
     const fresh = await s.call(runtime, { kind: 'fresh' });
     const elsewhere = await s.call(
@@ -149,13 +171,24 @@ test('продолжение потерянной сессии — отказ п
 });
 
 test('переполнение контекста продолжения — отказ с признаком у claude; проба resume по справке CLI', async () => {
-  const s = setup([ok, { contextExhausted: true }]);
-  const first = await s.call('claude', { kind: 'fresh' });
-  const full = await s.call('claude', { kind: 'continue', id: first.sessionId! });
-  assert.equal(full.status, 'failed');
-  assert.equal(full.diagnostics.contextExhausted, 'blocking-limit');
-  assert.equal(full.diagnostics.sessionLost, undefined);
-  const caps = await cliAdapter('codex', { executable: bin('fake-codex') }).capabilities();
+  for (const runtime of ['claude', 'codex'] as const) {
+    const s = setup([ok, { contextExhausted: true }]);
+    const first = await s.call(runtime, { kind: 'fresh' });
+    const full = await s.call(runtime, { kind: 'continue', id: first.sessionId! });
+    assert.equal(full.status, 'failed', runtime);
+    assert.equal(full.diagnostics.contextExhausted, 'blocking-limit', runtime);
+    assert.equal(full.diagnostics.sessionLost, undefined, runtime);
+  }
+  const s = setup([ok]);
+  const caps = await cliAdapter('codex', {
+    executable: bin('fake-codex'),
+    sessionContinue: true,
+  }).capabilities();
+  // Без запроса хоста (не тонкий режим) справка не пробуется.
+  assert.equal(
+    (await cliAdapter('codex', { executable: bin('fake-codex') }).capabilities()).sessionContinue,
+    undefined,
+  );
   assert.equal(caps.sessionContinue, true);
   assert.equal(await sessionContinueSupport('claude', bin('fake-claude')), true);
   // CLI без нужных флагов в справке — продолжения нет.

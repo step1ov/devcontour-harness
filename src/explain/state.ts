@@ -543,6 +543,10 @@ export function stopInputsIn(
               : {};
           })(attempts.findLast((a) => a.status !== 'active')),
           ...((last) =>
+            work.status === 'failed' && kind === 'needs-lead' && last?.leadCause
+              ? { leadCause: last.leadCause }
+              : {})(attempts.findLast((a) => a.status !== 'active')),
+          ...((last) =>
             work.status === 'failed' && writerBlockedStop(kind, attempts)
               ? {
                   writerBlocked: {
