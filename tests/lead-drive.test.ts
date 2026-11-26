@@ -276,6 +276,27 @@ test('lead drive: каталога состояния ещё нет — веду
   assert.match((await sessionRecord(agentDir, 1)).stdin, /каталог состояния ещё не создан/);
 });
 
+test('lead drive: новое состояние (пауза первого запуска без причины) — сессия ведущего, не выход owner; пауза оператора — выход owner (20)', async () => {
+  const fresh = engineOf();
+  assert.equal(fresh.engine.read((v) => v.control().paused), true, 'новое состояние стоит на паузе первого запуска');
+  const { promise } = driveOf(fresh, {}, { idleSessions: 1 });
+  const data = await promise;
+  assert.notEqual(data.outcome, 'owner', data.message);
+  assert.equal(data.sessions.length, 1);
+  assert.equal(data.sessions[0]!.kind, 'stopped');
+  fresh.store.close();
+
+  const paused = engineOf();
+  ready(paused.engine, graphOf({ a: [] }));
+  paused.engine.pause('operator');
+  const { dir, promise: p2 } = driveOf(paused, {}, { idleSessions: 1 });
+  const owner = await p2;
+  assert.equal(owner.outcome, 'owner');
+  assert.match(owner.message, /паузе оператора/);
+  assert.equal(sessionFiles(dir).length, 0);
+  paused.store.close();
+});
+
 const ownerPolicy = () =>
   policyOf((p: Record<string, unknown>) => {
     p.inputPolicy = { threshold: 7 };

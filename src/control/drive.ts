@@ -300,10 +300,14 @@ const ownerQuestions = (view: ExecutionView, policy: ExecutionPolicy) =>
     .map((r) => r.value)
     .filter((r) => r.lifecycle === 'pending' && ownerOnly(r, policy));
 
-/** Пауза оператора: снять её решает человек. */
+/**
+ * Пауза оператора: снять её решает человек. Пауза без причины — состояние
+ * первого запуска (emptyDocument), её снимает run, как и в explain; это не
+ * решение человека.
+ */
 const operatorPause = (view: ExecutionView) => {
   const control = view.control();
-  return control.paused && (control.pauseReason ?? 'operator') === 'operator'
+  return control.paused && control.pauseReason === 'operator'
     ? 'очередь на паузе оператора: снять паузу решает человек (harness resume)'
     : undefined;
 };
