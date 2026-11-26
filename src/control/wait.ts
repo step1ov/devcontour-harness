@@ -128,7 +128,7 @@ export const releaseReady = (view: ExecutionView) => {
   );
 };
 
-export async function waitFor(input: {
+export interface WaitInput {
   stateDir: string;
   policy: ExecutionPolicy;
   baseDir: string;
@@ -142,14 +142,20 @@ export async function waitFor(input: {
   /** Раз в `tickMs` (по умолчанию минута): продление сессии ведущего (CLI). */
   onTick?: () => void;
   tickMs?: number;
-  /**
-   * Внутренний вызов (`lead drive`, alpha.72): событие, которое тоже кончает
-   * ожидание — исходом `question` с этим событием (ответ владельца на
-   * вопрос). CLI `wait` его не передаёт: договор wait прежний.
-   */
-  wakeOn?: (event: RunEvent) => boolean;
   now?: () => number;
-}): Promise<WaitData> {
+}
+
+/** `harness wait`: публичная операция (корень пакета, каталог). */
+export const waitFor = (input: WaitInput): Promise<WaitData> => waitForEvents(input);
+
+/**
+ * Ожидание с внутренним крючком `lead drive` (alpha.72): `wakeOn` — событие,
+ * которое тоже кончает ожидание исходом `question` с этим событием (ответ
+ * владельца на вопрос). Не экспортируется корнем пакета: договор wait прежний.
+ */
+export async function waitForEvents(
+  input: WaitInput & { wakeOn?: (event: RunEvent) => boolean },
+): Promise<WaitData> {
   const now = input.now ?? Date.now;
   const started = now();
   const file = join(resolve(input.stateDir), 'state.sqlite');

@@ -8,6 +8,8 @@ import {
 import { redactor } from './environment/redaction.ts';
 import { execFileSync } from 'node:child_process';
 import {
+  accessSync,
+  constants as fsConstants,
   existsSync,
   lstatSync,
   readFileSync,
@@ -564,6 +566,7 @@ const options = {
   'max-sessions': { type: 'string' },
   'idle-sessions': { type: 'string' },
   'session-timeout': { type: 'string' },
+  waiting: { type: 'string' },
   log: { type: 'string' },
 } as const;
 
@@ -597,6 +600,7 @@ const flagOwners = {
   'max-sessions': ['lead-drive'],
   'idle-sessions': ['lead-drive'],
   'session-timeout': ['lead-drive'],
+  waiting: ['lead-end'],
   log: ['lead-drive'],
   'as-of': ['report'],
   format: ['report', 'handoff'],
@@ -1581,7 +1585,7 @@ async function run(
           baseDir: b.baseDir,
           agent: parseAgentTemplate(need('agent')),
           goals,
-          harnessBin: process.env.HARNESS_BIN ?? process.argv[1] ?? 'harness',
+          harnessBin: harnessBinOf(),
           ...optional('maxSessions', maxSessions),
           ...optional('idleSessions', idleSessions),
           ...(v.timeout === undefined
@@ -1601,12 +1605,7 @@ async function run(
                 }),
               }),
           ...optional('logDir', v.log),
-          ...optional(
-            'graceMs',
-            process.env.HARNESS_LEAD_DRIVE_GRACE_MS
-              ? Number(process.env.HARNESS_LEAD_DRIVE_GRACE_MS)
-              : undefined,
-          ),
+          ...optional('graceMs', driveGraceMs()),
           signal: abort.signal,
           onLog: (line) => process.stderr.write(`harness lead drive: ${line}\n`),
           onTick: () => {
@@ -1808,10 +1807,20 @@ async function run(
                   ...optional('workId', typeof v.work === 'string' ? v.work : undefined),
                 })
               : command === 'lead-end'
-                ? leadEnd(
-                    h.engine,
-                    optional('text', typeof v.text === 'string' ? v.text : undefined),
-                  )
+                ? leadEnd(h.engine, {
+                    ...optional('text', typeof v.text === 'string' ? v.text : undefined),
+                    ...(v.waiting === undefined
+                      ? {}
+                      : v.waiting === 'owner'
+                        ? { waitingOwner: need('reason') }
+                        : (() => {
+                            throw new HarnessError(
+                              'INVALID_INPUT',
+                              '--waiting: ожидается owner (с --reason)',
+                              [{ path: ['--waiting'], message: v.waiting }],
+                            );
+                          })()),
+                  })
                 : releaseDone(h.engine, {
                     summary: need('summary'),
                     ...(await h.releaseCheck()),
@@ -3002,6 +3011,35 @@ if (envelope.command && isSharedOperation(envelope.command)) {
 }
 process.stdout.write(text ?? JSON.stringify(envelope) + '\n');
 process.exitCode = code;
+
+/**
+ * CLI harness для команд сводки `lead drive`: `HARNESS_BIN`, иначе сам этот
+ * файл, если он исполняемый, иначе `node <файл>`.
+ */
+function harnessBinOf(): string {
+  if (process.env.HARNESS_BIN) return process.env.HARNESS_BIN;
+  const self = process.argv[1];
+  if (!self) return 'harness';
+  try {
+    accessSync(self, fsConstants.X_OK);
+    return self;
+  } catch {
+    return `${process.execPath} ${self}`;
+  }
+}
+
+/** Пауза перепроверки `stopped` после сессии (HARNESS_LEAD_DRIVE_GRACE_MS, мс, 0–600000). */
+function driveGraceMs(): number | undefined {
+  const raw = process.env.HARNESS_LEAD_DRIVE_GRACE_MS;
+  if (raw === undefined || raw === '') return undefined;
+  if (!/^\d+$/.test(raw) || Number(raw) > 600_000)
+    throw new HarnessError(
+      'INVALID_INPUT',
+      'HARNESS_LEAD_DRIVE_GRACE_MS: целое число миллисекунд от 0 до 600000',
+      [{ path: ['HARNESS_LEAD_DRIVE_GRACE_MS'], message: raw }],
+    );
+  return Number(raw);
+}
 
 /**
  * Строка doctor о бюджете настройки (alpha.67): политика — в `.harness/`

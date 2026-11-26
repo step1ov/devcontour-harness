@@ -149,19 +149,42 @@ export function leadNote(engine: Engine, options: { text: string; workId?: strin
   });
 }
 
-/** `lead end`: закончить сессию (необязательная строка — чем закончил). */
-export function leadEnd(engine: Engine, options: { text?: string } = {}): LeadData {
+/** Код записи `lead end --waiting owner` (alpha.72): ведущий ждёт решения владельца. */
+export const LEAD_WAITING_OWNER = 'lead.waiting-owner';
+
+/**
+ * `lead end`: закончить сессию (необязательная строка — чем закончил).
+ * `waitingOwner` (alpha.72, `--waiting owner --reason`): ведущий остановился
+ * на решении, которое принимает только владелец; драйвер ведущего (`lead
+ * drive`) сообщает это владельцу и ждёт дальше, а не будит ведущего снова.
+ */
+export function leadEnd(
+  engine: Engine,
+  options: { text?: string; waitingOwner?: string } = {},
+): LeadData {
   const note = options.text
     ? cleanLeadText(options.text, LEAD_LIMITS.note, 'lead end --text')
     : undefined;
+  const waiting =
+    options.waitingOwner !== undefined
+      ? cleanLeadText(options.waitingOwner, LEAD_LIMITS.note - 40, 'lead end --reason')
+      : undefined;
   return engine.recordLead((log, now) => {
-    const entry: LeadEntry = {
-      at: iso(now),
-      kind: 'end',
-      action: 'lead.end',
-      plain: note ? `ведущий закончил работу: ${note}` : 'ведущий закончил работу',
-      plainEn: note ? `the lead stopped working: ${note}` : 'the lead stopped working',
-    };
+    const entry: LeadEntry = waiting
+      ? {
+          at: iso(now),
+          kind: 'end',
+          action: LEAD_WAITING_OWNER,
+          plain: `ведущий ждёт решения владельца: ${waiting}`,
+          plainEn: `the lead waits for the owner's decision: ${waiting}`,
+        }
+      : {
+          at: iso(now),
+          kind: 'end',
+          action: 'lead.end',
+          plain: note ? `ведущий закончил работу: ${note}` : 'ведущий закончил работу',
+          plainEn: note ? `the lead stopped working: ${note}` : 'the lead stopped working',
+        };
     const base = append(log, entry, now);
     const next: LeadLog = base.session
       ? { ...base, session: { ...base.session, endedAt: iso(now), until: iso(now) } }

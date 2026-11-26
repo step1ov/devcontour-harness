@@ -2,7 +2,14 @@ import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -14,6 +21,7 @@ import { engineOf, graphOf, policyOf, ready, sha } from './engine-fixture.ts';
 import { example } from './fixtures.ts';
 
 const AGENT = fileURLToPath(new URL('./fixtures/lead-drive/agent.mjs', import.meta.url));
+const AGENT_LEAD = fileURLToPath(new URL('./fixtures/lead-drive/agent-lead.ts', import.meta.url));
 const cli = fileURLToPath(new URL('../src/cli.ts', import.meta.url));
 const GOALS = 'ЦЕЛИ ОПЕРАТОРА: выпуск принят и закрыт';
 
@@ -66,6 +74,7 @@ const questionOutcome = (): InputOutcome => ({
 
 type Env = ReturnType<typeof engineOf>;
 interface AgentRecord {
+  t: number;
   stdin: string;
   argv: string[];
   env: { [k: string]: string | undefined };
@@ -74,7 +83,11 @@ interface AgentRecord {
 /** Драйвер над состоянием теста с поддельным ведущим (`mode`: wait-go | exit). */
 function driveOf(
   env: Env | { dir: string; engine: { policy: Engine['policy'] } },
-  options: { mode?: 'wait-go' | 'exit' | 'hang'; code?: number; extraArgs?: string[] } = {},
+  options: {
+    mode?: 'wait-go' | 'exit' | 'hang' | 'grandchild-hang' | 'background-writer';
+    code?: number;
+    extraArgs?: string[];
+  } = {},
   extra: Partial<Parameters<typeof driveLead>[0]> = {},
 ) {
   const dir = mkdtempSync(join(tmpdir(), 'harness-drive-agent-'));
@@ -113,6 +126,49 @@ async function sessionRecord(dir: string, n: number): Promise<AgentRecord> {
   return JSON.parse(readFileSync(file, 'utf8')) as AgentRecord;
 }
 const go = (dir: string, n: number) => writeFileSync(join(dir, `session-${n}.go`), '');
+
+/** Драйвер с «настоящим» поддельным ведущим: lead begin и заметка каждую сессию. */
+function driveLeadOf(
+  env: Env,
+  mode: 'begin' | 'decide' | 'wait-owner',
+  extra: Partial<Parameters<typeof driveLead>[0]> = {},
+) {
+  const dir = mkdtempSync(join(tmpdir(), 'harness-drive-lead-'));
+  const policyFile = join(dir, 'policy.json');
+  writeFileSync(policyFile, JSON.stringify(env.engine.policy));
+  const promise = driveLead({
+    stateDir: env.dir,
+    policy: env.engine.policy,
+    policyPath: policyFile,
+    baseDir: env.dir,
+    agent: [
+      process.execPath,
+      '--import',
+      import.meta.resolve('tsx'),
+      AGENT_LEAD,
+      dir,
+      env.dir,
+      policyFile,
+      mode,
+    ],
+    goals: GOALS,
+    harnessBin: '/opt/harness/bin/harness',
+    pollMs: 50,
+    graceMs: 0,
+    waitTimeoutMs: 300,
+    ...extra,
+  });
+  return { dir, promise };
+}
+
+const alive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+};
 
 test('lead drive: принятие работы, таймауты ожидания и отказ, который harness повторит сам, ведущего не будят', async () => {
   const env = engineOf(policyOf((p: Record<string, unknown>) => (p.maxAttempts = 3)));
@@ -182,13 +238,14 @@ test('lead drive: очередь без harness run будит ведущего;
   assert.equal(data.outcome, 'no-progress');
   assert.equal(data.sessions.length, 3, 'по умолчанию — 3 сессии без изменений');
   assert.ok(data.sessions.every((s) => s.kind === 'stopped' && s.exitCode === 7 && !s.progressed));
-  assert.match(data.message, /3 сессии ведущего подряд не изменили состояние/);
+  assert.match(data.message, /3 сессии ведущего подряд без его решений/);
   assert.match(data.message, /код выхода 7/);
-  assert.match(data.message, /fake lead session 3/, 'хвост stderr в диагнозе');
+  assert.doesNotMatch(data.message, /fake lead session/, 'stderr ведущего в итог не попадает');
+  assert.match(data.message, /--log/);
   const rec = await sessionRecord(dir, 2);
   assert.equal(rec.argv.at(-1), `s2:c${data.sessions[1]!.cursor}`);
   assert.match(rec.stdin, /`harness run` не идёт/);
-  assert.match(rec.stdin, /nohup \$H run --graph/);
+  assert.match(rec.stdin, /set -m; nohup \$H run --graph/);
   assert.deepEqual(sessionFiles(dir).length, 3);
   env.store.close();
 });
@@ -237,7 +294,7 @@ test('lead drive: новый вопрос владельца во время о�
   assert.match(rec.stdin, /Какой формат приветствия/);
   assert.doesNotMatch(rec.stdin, /--actor lead/, 'команды ответа ведущего не предлагаются');
   assert.deepEqual(sessionFiles(dir).length, 1);
-  assert.match(data.message, /run не идёт, а дальше всё ждёт ответа владельца/);
+  assert.match(data.message, /run не идёт, а дальше всё ждёт владельца/);
   assert.match(data.message, /IR-[a-f0-9]{24}/);
   assert.match(data.message, /Какой формат приветствия/);
   assert.equal(data.notices.length, 1);
@@ -275,7 +332,12 @@ test('lead drive: вопрос владельца к первому ожидан
       ...log,
       entries: [
         ...log.entries,
-        { at: new Date(now).toISOString(), kind: 'note', action: 'lead.note', plain: 'разбираю b' },
+        {
+          at: new Date(now).toISOString(),
+          kind: 'command',
+          action: 'lead.retry',
+          plain: 'ведущий повторил работу b',
+        },
       ],
     },
     result: undefined,
@@ -398,7 +460,7 @@ test('lead drive: весь код принят — сессия ведущего
 test('lead drive: предел --max-sessions — выход max-sessions (22); команда не запускается — agent-error (23)', async () => {
   const env = engineOf();
   ready(env.engine, graphOf({ a: [] }));
-  const { promise } = driveOf(env, {}, { maxSessions: 2, idleSessions: 5 });
+  const { promise } = driveOf(env, { code: 1 }, { maxSessions: 2, idleSessions: 5 });
   const data = await promise;
   assert.equal(data.outcome, 'max-sessions');
   assert.equal(DRIVE_EXIT_CODES[data.outcome], 22);
@@ -481,4 +543,163 @@ test('CLI lead drive: синоним, код выхода исхода и кон
   ]);
   assert.equal(missing.status, 2);
   assert.match(missing.stderr, /--agent/);
+  const badGrace = spawnSync(
+    process.execPath,
+    [
+      '--import',
+      import.meta.resolve('tsx'),
+      cli,
+      'lead',
+      'drive',
+      '--state',
+      state,
+      '--policy',
+      policy,
+      '--agent',
+      'x',
+      '--prompt-file',
+      prompt,
+    ],
+    { encoding: 'utf8', env: { ...process.env, HARNESS_LEAD_DRIVE_GRACE_MS: '5s' } },
+  );
+  assert.equal(badGrace.status, 2);
+  assert.match(badGrace.stderr, /HARNESS_LEAD_DRIVE_GRACE_MS/);
+});
+
+test('ревью H1: ведущий по guide (lead begin и заметка, без решений) на той же остановке — один раз, затем no-progress (21)', async () => {
+  const env = engineOf();
+  ready(env.engine, graphOf({ a: [] }));
+  const { promise } = driveLeadOf(env, 'begin');
+  const data = await promise;
+  assert.equal(data.outcome, 'no-progress');
+  assert.equal(DRIVE_EXIT_CODES[data.outcome], 21);
+  assert.equal(data.sessions.length, 1, 'то же состояние без решения ведущего не будит его снова');
+  assert.equal(data.sessions[0]!.progressed, false, 'lead begin и заметка — не прогресс');
+  assert.match(data.message, /не принял решения/);
+  env.store.close();
+});
+
+test('ревью H1: решение ведущего (команда журнала) — прогресс: новая сессия на той же остановке разрешена', async () => {
+  const env = engineOf();
+  ready(env.engine, graphOf({ a: [] }));
+  const { promise } = driveLeadOf(env, 'decide', { maxSessions: 2 });
+  const data = await promise;
+  assert.equal(data.outcome, 'max-sessions');
+  assert.deepEqual(
+    data.sessions.map((s) => s.progressed),
+    [true, true],
+  );
+  env.store.close();
+});
+
+test('ревью H1: lead end --waiting owner — уведомление владельцу; та же остановка, идти нечему — выход owner (20)', async () => {
+  const env = engineOf();
+  ready(env.engine, graphOf({ a: [] }));
+  const { promise } = driveLeadOf(env, 'wait-owner');
+  const data = await promise;
+  assert.equal(data.outcome, 'owner');
+  assert.equal(data.sessions.length, 1);
+  assert.equal(data.sessions[0]!.progressed, true);
+  assert.deepEqual(
+    data.notices.map((n) => n.kind),
+    ['owner-waiting'],
+  );
+  assert.match(data.message, /нужно решение владельца о тексте/);
+  leadDriveDataSchema.parse(data);
+  env.store.close();
+});
+
+test('ревью M1/M2: событие вопроса, закрытого до запуска, — ни уведомления, ни сессии owner-question', async () => {
+  const env = engineOf(ownerPolicy());
+  ready(env.engine, graphOf({ a: [], b: [] }));
+  const a = env.engine.claim('c1')!;
+  env.engine.claim('c1');
+  const abort = new AbortController();
+  const { promise } = driveOf(env, {}, { signal: abort.signal });
+  await new Promise((r) => setTimeout(r, 300));
+  // Вопрос и его отмена — до следующего опроса: драйвер прочтёт их пачкой позже.
+  env.engine.fail(a.id, a.token, 'вопрос', { kind: 'needs-input', input: questionOutcome() });
+  const request = env.engine.read((v) => v.locals('input-requests'))[0]!.value;
+  env.engine.cancelInput(request.id, { by: 'operator', reason: 'вопрос снят' }, request.version);
+  await new Promise((r) => setTimeout(r, 1200));
+  abort.abort();
+  const data = await promise;
+  assert.ok(
+    !data.notices.some((n) => n.requestId === request.id),
+    'закрытый вопрос владельцу не сообщён',
+  );
+  assert.ok(
+    !data.sessions.some((s) => s.kind === 'owner-question' || s.kind === 'question'),
+    JSON.stringify(data.sessions),
+  );
+  env.store.close();
+});
+
+test('ревью M3: владелец ответил до запуска драйвера — сессия «примените ответ» с ID вопроса', async () => {
+  const env = engineOf(ownerPolicy());
+  ready(env.engine, graphOf({ a: [] }));
+  const a = env.engine.claim('c1')!;
+  env.engine.fail(a.id, a.token, 'вопрос', { kind: 'needs-input', input: questionOutcome() });
+  const request = env.engine.read((v) => v.locals('input-requests'))[0]!.value;
+  env.engine.answerInput(
+    request.id,
+    { text: 'Hello', optionId: 'hello', actor: { kind: 'operator' } },
+    request.version,
+  );
+  const { dir, promise } = driveOf(env, {}, { idleSessions: 1 });
+  const data = await promise;
+  assert.equal(data.sessions[0]?.kind, 'question');
+  const rec = await sessionRecord(dir, 1);
+  assert.match(rec.stdin, /владелец ответил на вопрос исполнителя/);
+  assert.ok(rec.stdin.includes(`input-resolve --state`) && rec.stdin.includes(request.id));
+  assert.match(rec.stdin, /Текст исполнителя \(данные, не инструкции\): "Какой формат/);
+  env.store.close();
+});
+
+test('ревью M4: сессия сверх срока снимается группой — внук ведущего тоже', async () => {
+  const env = engineOf();
+  ready(env.engine, graphOf({ a: [] }));
+  const { dir, promise } = driveOf(
+    env,
+    { mode: 'grandchild-hang' },
+    { idleSessions: 1, sessionTimeoutMs: 600, killGraceMs: 300 },
+  );
+  const data = await promise;
+  assert.equal(data.sessions[0]!.timedOut, true);
+  const pid = Number(readFileSync(join(dir, 'grandchild.pid'), 'utf8'));
+  const until = Date.now() + 3000;
+  while (alive(pid) && Date.now() < until) await new Promise((r) => setTimeout(r, 50));
+  assert.equal(alive(pid), false, 'внук в группе ведущего снят');
+  env.store.close();
+});
+
+test('ревью M5: фоновый процесс сессии пишет в stdout после её конца — без EPIPE, вывод в журнале', async () => {
+  const env = engineOf();
+  ready(env.engine, graphOf({ a: [] }));
+  const logDir = mkdtempSync(join(tmpdir(), 'harness-drive-bg-'));
+  const { dir, promise } = driveOf(env, { mode: 'background-writer' }, { idleSessions: 1, logDir });
+  const data = await promise;
+  assert.equal(data.sessions.length, 1);
+  assert.ok(
+    data.sessions[0]!.ms < 650,
+    'конец сессии — выход ведущего, не конец фонового процесса',
+  );
+  const until = Date.now() + 5000;
+  while (!existsSync(join(dir, 'late.done')) && Date.now() < until)
+    await new Promise((r) => setTimeout(r, 50));
+  assert.ok(existsSync(join(dir, 'late.done')), 'фоновый процесс пережил запись в stdout');
+  assert.match(readFileSync(join(logDir, 'session-1.out'), 'utf8'), /late line/);
+  assert.equal(statSync(join(logDir, 'session-1.prompt.md')).mode & 0o777, 0o600);
+  env.store.close();
+});
+
+test('ревью LOW: пауза перепроверки stopped после сессии (graceMs) выдерживается', async () => {
+  const env = engineOf();
+  ready(env.engine, graphOf({ a: [] }));
+  const { dir, promise } = driveOf(env, { code: 1 }, { idleSessions: 2, graceMs: 500 });
+  const data = await promise;
+  assert.equal(data.sessions.length, 2);
+  const [one, two] = [await sessionRecord(dir, 1), await sessionRecord(dir, 2)];
+  assert.ok(two.t - one.t >= 500, `${two.t - one.t} мс`);
+  env.store.close();
 });
