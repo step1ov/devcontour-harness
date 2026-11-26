@@ -270,6 +270,8 @@ import { selfCheckNote, writeSelfCheck, type SelfCheckPlan } from '../verificati
 import { measuredInvoke } from './measured.ts';
 import { continuableDraft, implementationBasis } from './reuse.ts';
 import { requestsOf } from './input-requests.ts';
+import { thinFlow } from '../thin/flow.ts';
+import type { ThinKit } from '../thin/kit.ts';
 import { evaluateInput, normalizeImplementation, type InputEvaluation } from './input-policy.ts';
 
 type Repo = ExecutionPolicy['repositories'][number];
@@ -938,8 +940,13 @@ export class Runner {
       outputSchema?: Record<string, unknown>;
       /** Стадия учёта вызова вместо обычной (второй проход ревью — своя). */
       stage?: string;
-      /** Сессия writer: ответвление от сессии исследования (alpha.70); reviewer — всегда новая. */
-      session?: Extract<RuntimeRequest['session'], { kind: 'fork' }>;
+      /**
+       * Сессия writer: ответвление от сессии исследования (alpha.70) или
+       * продолжение сессии работы (тонкий режим, alpha.73); reviewer — всегда новая.
+       */
+      session?: Extract<RuntimeRequest['session'], { kind: 'fork' | 'continue' }>;
+      /** Постоянный домашний каталог CLI writer работы (тонкий режим): в нём сессия. */
+      home?: string;
     },
     signal: AbortSignal,
   ): Promise<RuntimeResponse & { redact: Redactor; unreadable?: string; callId: string }> {
@@ -1044,9 +1051,12 @@ export class Runner {
                       return {
                         guard: pick('subpath'),
                         ...(denyRead.length ? { guardDenyRead: denyRead } : {}),
+                        ...(input.home ? { home: input.home } : {}),
                       };
                     })()
-                  : {},
+                  : input.home
+                    ? { home: input.home }
+                    : {},
               }
             : {}),
         },
@@ -1615,6 +1625,8 @@ export class Runner {
      */
     record = true,
   ): Promise<string | undefined> {
+    // Тонкий режим: дерево работы переживает попытку — черновик не нужен.
+    if (harnessModeOf(this.policy) === 'thin') return;
     if (attempt.candidateSha || !attempt.worktree || !attempt.baseSha || !work.approvedDigest)
       return;
     // Метаданные git дерева изменены (ссылка вместо index, переключённый
@@ -1686,6 +1698,7 @@ export class Runner {
     cwd: string,
     redact: Redactor,
   ): Promise<AttemptState> {
+    if (harnessModeOf(this.policy) === 'thin') return attempt;
     const draft = this.engine.read((v) => continuableDraft(v, work, attempt.id));
     if (!draft) return attempt;
     const dir = join(this.dirOf(attempt.repositoryId), 'artifacts', attempt.id, 'implementation');
@@ -1751,6 +1764,28 @@ export class Runner {
       if (feedback) this.gateFeedback.set(attempt.id, feedback);
     }
     return { ...attempt, continuedFrom };
+  }
+
+  /** Возможности прогона для потока сдачи тонкого режима (`src/thin/`). */
+  private thinKit(): ThinKit {
+    return {
+      engine: this.engine,
+      policy: this.policy,
+      call: this.call.bind(this),
+      gate: this.gate.bind(this),
+      review: this.review.bind(this),
+      environment: this.environment.bind(this),
+      dependencyStore: this.dependencyStore.bind(this),
+      prepareSteps: this.prepareSteps.bind(this),
+      timed: this.timed.bind(this),
+      consumers: this.consumers.bind(this),
+      requirements: this.requirements.bind(this),
+      notes: this.notes.bind(this),
+      history: this.history.bind(this),
+      adapter: this.adapter.bind(this),
+      checkout: this.checkout.bind(this),
+      promote: this.promote.bind(this),
+    };
   }
 
   private async execute(claimed: AttemptState, controller: AbortController) {
@@ -1947,6 +1982,23 @@ export class Runner {
           }
           const base = await git(repoPath, 'rev-parse', repo.targetRef);
           await this.options.hooks?.prepared?.({ work, attempt, baseSha: base });
+          // Тонкий режим (alpha.73): дальше — поток сдачи `src/thin/`; без
+          // переиспользования кандидата, черновика и фазы кандидата.
+          if (harnessModeOf(this.policy) === 'thin') {
+            await thinFlow.handover(this.thinKit(), {
+              attempt,
+              work,
+              repo,
+              repoPath,
+              base,
+              artifacts,
+              worktrees,
+              signal,
+              ...(context ? { context } : {}),
+              rearm,
+            });
+            return;
+          }
           // Основания записываются до реализации; в той же транзакции решается,
           // берётся ли кандидат предыдущей попытки вместо нового кода.
           const reuse = this.engine.implementationBasis(
@@ -2889,8 +2941,18 @@ export class Runner {
           ...(item.attempt.worktree
             ? [item.attempt.worktree, item.attempt.worktree + '-integration']
             : []),
-        ])
-          owners.set(worktreeKey(path), item);
+        ]) {
+          // Дерево работы тонкого режима — общее у её попыток: владелец —
+          // последняя попытка работы, а не последняя в порядке обхода.
+          const key = worktreeKey(path);
+          const prior = owners.get(key);
+          if (
+            prior?.attempt.workId === item.attempt.workId &&
+            prior.attempt.attempt > item.attempt.attempt
+          )
+            continue;
+          owners.set(key, item);
+        }
       }
       const roots = [
         this.checkout(repo.id, 'worktrees'),
@@ -5328,9 +5390,24 @@ export class Runner {
         await dependencyFreshness(this.repositories(), attempt.dependencies),
       );
     signal.throwIfAborted();
+    await this.promote(attempt, work, repo, sha, base);
+  }
+
+  /**
+   * Продвинуть target на проверенный `sha` от `base`: fencing, CAS
+   * (`update-ref <ref> <sha> <base>`) и приёмка — одна транзакция. Если
+   * процесс упадёт после update-ref, recovery сверит сохранённые evidence до
+   * приёмки. Цель сдвинулась — `stale-base`.
+   */
+  private async promote(
+    attempt: AttemptState,
+    work: WorkState,
+    repo: Repo,
+    sha: string,
+    base: string,
+  ) {
+    const repoPath = this.repoPath(repo);
     await this.assertTargetDetached(repo);
-    // Fencing, CAS продвижения и приёмка — одна транзакция. Если процесс упадёт
-    // после update-ref, recovery сверит сохранённые evidence до приёмки.
     try {
       this.engine.finish(attempt.id, attempt.token, sha, () => {
         // Источник требований мог измениться, пока шли проверки и ревью:
