@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { workProposalSchema } from './proposals.ts';
+import { harnessModeSchema } from './light.ts';
 import { API_VERSION, STATE_VERSION } from './version.ts';
 import {
   digestSchema,
@@ -802,7 +803,7 @@ export const cliCommands = {
         value: 'text',
         required: false,
         description:
-          'Режим harness новой политики (alpha.69): light — по умолчанию (исполнитель и gates на хосте с Docker, браузером и сетью; одна граница — запись только в своё дерево попытки, временный каталог и кеши); strict — прежняя песочница ОС, заморожен, выбор владельца для чужого кода или секретов production (harnessMode: strict)',
+          'Режим harness новой политики (alpha.69): light — по умолчанию (исполнитель и gates на хосте с Docker, браузером и сетью; одна граница — запись только в своё дерево попытки, временный каталог и кеши); strict — прежняя песочница ОС, заморожен, выбор владельца для чужого кода или секретов production (harnessMode: strict); thin (alpha.73) — окружение light, одна сессия исполнителя на работу, сдача на чистом checkout и одно ревью (harnessMode: thin, review.passes.code: off)',
       },
       {
         name: '--recovery',
@@ -3102,10 +3103,11 @@ export const doctorDataSchema = z.strictObject({
    * Режим harness (alpha.69): `light` по умолчанию или `strict` (явный выбор
    * владельца, заморожен); строка для человека и граница записи облегчённого
    * режима — механизм и открытые на запись кеши. Есть, когда задана политика.
+   * `thin` (alpha.73) — тонкий режим в окружении облегчённого.
    */
   mode: z
     .strictObject({
-      mode: z.enum(['light', 'strict']),
+      mode: harnessModeSchema,
       default: z.boolean(),
       line: z.string(),
       lineEn: z.string(),

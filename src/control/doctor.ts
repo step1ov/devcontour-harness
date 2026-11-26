@@ -6,6 +6,7 @@ import {
   codeReview,
   HarnessError,
   harnessModeOf,
+  hostEnvironment,
   STATE_VERSION,
   inputPolicyOf,
   leadAnswersRule,
@@ -19,6 +20,8 @@ import {
   type ExecutionPolicy,
   type RuntimeAdapter,
   type RuntimeBinding,
+  type RuntimeCapabilities,
+  reviewPassModeOf,
   type RuntimeName,
   strictSandbox,
   writeGuardActive,
@@ -126,10 +129,12 @@ export async function doctor(
   // вендора или fixture не требует второго CLI.
   const assigned = policy ? runtimeAssignments(policy) : undefined;
   const required = new Set<string>(assigned ? assigned.keys() : ['codex', 'claude']);
+  const capsOf: Partial<Record<RuntimeName, RuntimeCapabilities>> = {};
   for (const runtime of ['codex', 'claude'] as const) {
     const caps = required.has(runtime)
       ? await adapters[runtime]?.capabilities().catch(() => undefined)
       : undefined;
+    if (caps) capsOf[runtime] = caps;
     const what = assigned?.get(runtime);
     if (!caps?.version && required.has(runtime))
       problems.push(
@@ -362,7 +367,7 @@ export async function doctor(
     const copy = policy ? loginCopyNote(policy) : undefined;
     if (copy) notes.push(copy);
     // Облегчённый режим без границы записи — предупреждение, не заметка.
-    if (mode.mode === 'light' && !mode.writeGuard?.active)
+    if (mode.mode !== 'strict' && !mode.writeGuard?.active)
       warnings.push(
         'LIGHT_NO_WRITE_BOUNDARY: облегчённый режим с isolation.mode: none или writeGuard.off — границы записи нет: исполнитель и gates пишут куда угодно',
       );
@@ -378,7 +383,7 @@ export async function doctor(
     // gates ни одного репозитория не ходят через шлюз — маршрут production
     // тестами не проверяется.
     if (
-      mode.mode === 'light' &&
+      mode.mode !== 'strict' &&
       policy?.release?.topology?.length &&
       !policy.repositories.some((r) => r.gateway)
     )
@@ -398,7 +403,8 @@ export async function doctor(
   const contractBudget = policy ? lightContractBudgetNote(policy) : undefined;
   if (contractBudget) notes.push(contractBudget);
   if (noBudget) warnings.push(noBudget);
-  if (policy) {
+  if (policy) warnings.push(...thinModeWarnings(policy, capsOf));
+  if (policy && harnessModeOf(policy) !== 'thin') {
     const r = recoveryPolicyOf(policy);
     if (r.enabled && r.diagnoseAfter >= policy.maxAttempts)
       notes.push(
@@ -503,6 +509,36 @@ function questionRule(policy: ExecutionPolicy) {
   };
 }
 
+/**
+ * Тонкий режим (alpha.73): замечания возвращаются в ту же сессию
+ * исполнителя — CLI исполнителя должен уметь её продолжить
+ * (`RuntimeCapabilities.sessionContinue`); второй проход ревью работ
+ * удваивает ревью, которое в тонком режиме одно.
+ */
+export function thinModeWarnings(
+  policy: ExecutionPolicy,
+  caps: Partial<Record<RuntimeName, Pick<RuntimeCapabilities, 'sessionContinue'>>>,
+): string[] {
+  if (harnessModeOf(policy) !== 'thin') return [];
+  const writers = new Set(
+    [
+      ...Object.values(policy.roles),
+      ...policy.repositories.flatMap((r) => Object.values(r.roles ?? {})),
+    ].map((b) => b.writer.runtime),
+  );
+  const out: string[] = [];
+  for (const runtime of writers)
+    if ((runtime === 'codex' || runtime === 'claude') && caps[runtime]?.sessionContinue !== true)
+      out.push(
+        `THIN_NO_RESUME: ${runtime} исполнителя не умеет продолжить сессию (${runtime === 'codex' ? '`codex exec resume --help` без --json, --output-schema или -o' : '`claude --help` без --resume'}): каждая сдача — новая сессия; обновите ${runtime}`,
+      );
+  if (reviewPassModeOf(policy.review.passes, { kind: 'code' }).mode !== 'off')
+    out.push(
+      'THIN_REVIEW_PASSES: в тонком режиме ревью работы одно — второй проход ревью кода удваивает вызовы; задайте review.passes: { code: off }',
+    );
+  return out;
+}
+
 /** Назначение политики: кто (writer роли, reviewer вида ревью), каким runtime, моделью и effort. */
 /**
  * Облегчённый режим без бюджета выпуска (0.1.0-alpha.69): раунды ревью плана
@@ -513,8 +549,7 @@ function questionRule(policy: ExecutionPolicy) {
 export function lightBudgetWarning(
   policy: Pick<ExecutionPolicy, 'harnessMode' | 'budgets'>,
 ): string | undefined {
-  if (harnessModeOf(policy) !== 'light' || policy.budgets?.group || policy.budgets?.total)
-    return undefined;
+  if (!hostEnvironment(policy) || policy.budgets?.group || policy.budgets?.total) return undefined;
   return 'light-no-budget: облегчённый режим без бюджета выпуска — раунды ревью плана не ограничены, время и стоимость тоже; задайте budgets.group (timeMs и/или usd): исчерпание остановит работу решением владельца (BUDGET_EXHAUSTED)';
 }
 
@@ -685,20 +720,28 @@ export interface DoctorToolchainPin {
 export function modeReport(policy: ExecutionPolicy) {
   const mode = harnessModeOf(policy);
   const byDefault = policy.harnessMode === undefined;
+  const guardLine = writeGuardActive(policy)
+    ? 'Защита записи — от случайных ошибок, не граница безопасности; Docker и выбранные кеши её обходят'
+    : 'Границы записи нет (isolation.mode: none или writeGuard.off): исполнитель и gates пишут куда угодно';
+  const guardLineEn = writeGuardActive(policy)
+    ? 'The write guard protects against accidents, it is not a security boundary; Docker and the chosen caches bypass it'
+    : 'There is no write boundary (isolation.mode: none or writeGuard.off): the writer and gates can write anywhere';
   const line =
-    mode === 'light'
-      ? `режим: облегчённый${byDefault ? ' (по умолчанию)' : ''}; строгий — \`harnessMode: strict\` (решение владельца: чужой код или секреты production). ` +
-        (writeGuardActive(policy)
-          ? 'Защита записи — от случайных ошибок, не граница безопасности; Docker и выбранные кеши её обходят'
-          : 'Границы записи нет (isolation.mode: none или writeGuard.off): исполнитель и gates пишут куда угодно')
-      : 'режим: строгий (harnessMode: strict, заморожен — может быть убран после следующих пилотов); облегчённый — убрать поле harnessMode';
+    mode === 'thin'
+      ? 'режим: тонкий (harnessMode: thin, alpha.73) — окружение облегчённого, одна сессия исполнителя на работу, сдача на чистом checkout цели и одно ревью; облегчённый — убрать поле harnessMode. ' +
+        guardLine
+      : mode === 'light'
+        ? `режим: облегчённый${byDefault ? ' (по умолчанию)' : ''}; строгий — \`harnessMode: strict\` (решение владельца: чужой код или секреты production). ` +
+          guardLine
+        : 'режим: строгий (harnessMode: strict, заморожен — может быть убран после следующих пилотов); облегчённый — убрать поле harnessMode';
   const lineEn =
-    mode === 'light'
-      ? `mode: light${byDefault ? ' (default)' : ''}; strict — \`harnessMode: strict\` (owner's decision: untrusted code or production secrets). ` +
-        (writeGuardActive(policy)
-          ? 'The write guard protects against accidents, it is not a security boundary; Docker and the chosen caches bypass it'
-          : 'There is no write boundary (isolation.mode: none or writeGuard.off): the writer and gates can write anywhere')
-      : 'mode: strict (harnessMode: strict, frozen — may be removed after the next pilots); light — remove the harnessMode field';
+    mode === 'thin'
+      ? 'mode: thin (harnessMode: thin, alpha.73) — light environment, one writer session per work, handover verified on a clean checkout of the target and one review; light — remove the harnessMode field. ' +
+        guardLineEn
+      : mode === 'light'
+        ? `mode: light${byDefault ? ' (default)' : ''}; strict — \`harnessMode: strict\` (owner's decision: untrusted code or production secrets). ` +
+          guardLineEn
+        : 'mode: strict (harnessMode: strict, frozen — may be removed after the next pilots); light — remove the harnessMode field';
   // Уровень безопасности (alpha.70): определяется, выбирает владелец.
   const tier = securityTierOf(
     { strict: mode === 'strict', guard: writeGuardActive(policy) },
@@ -743,7 +786,7 @@ export function claudeLoginWarning(
   policy: ExecutionPolicy,
   platform: NodeJS.Platform = process.platform,
 ): string | undefined {
-  if (harnessModeOf(policy) !== 'light' || platform !== 'darwin') return undefined;
+  if (!hostEnvironment(policy) || platform !== 'darwin') return undefined;
   const bindings = [
     ...Object.values(policy.roles),
     ...policy.repositories.flatMap((r) => Object.values(r.roles ?? {})),
@@ -779,8 +822,7 @@ export function claudeLoginWarning(
 export function lightContractBudgetNote(
   policy: Pick<ExecutionPolicy, 'harnessMode' | 'budgets'>,
 ): string | undefined {
-  if (harnessModeOf(policy) !== 'light' || !policy.budgets?.group || policy.budgets.total)
-    return undefined;
+  if (!hostEnvironment(policy) || !policy.budgets?.group || policy.budgets.total) return undefined;
   return 'light-contract-budget: ревью контрактов бюджет группы (budgets.group) не ограничивает — их держат защита от круга ревью (6 раундов — ведущий, 12 — владелец) и budgets.total; задайте budgets.total, чтобы ограничить и их';
 }
 
@@ -790,7 +832,7 @@ export function lightContractBudgetNote(
  * Заметка, если исполнителям не передан ключ API.
  */
 export function loginCopyNote(policy: ExecutionPolicy): string | undefined {
-  if (harnessModeOf(policy) !== 'light') return undefined;
+  if (!hostEnvironment(policy)) return undefined;
   const keys = new Set([
     'OPENAI_API_KEY',
     'CODEX_API_KEY',

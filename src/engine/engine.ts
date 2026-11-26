@@ -86,7 +86,7 @@ import {
   type WorkGraph,
   type WorkOrder,
   type WorkState,
-  harnessModeOf,
+  hostEnvironment,
   strictSandbox,
   PROPOSAL_LIMITS,
   RESEARCH_LIMIT,
@@ -6802,7 +6802,7 @@ export function budgetLimitsOf(policy: ExecutionPolicy): Record<string, number |
   const out: Record<string, number | null> = {
     maxAttempts: policy.maxAttempts,
     // Облегчённый режим (0.1.0-alpha.69): раундов ревью не считают — без предела.
-    reviewRounds: harnessModeOf(policy) === 'light' ? null : policy.maxAttempts * 2,
+    reviewRounds: hostEnvironment(policy) ? null : policy.maxAttempts * 2,
     repairBudget: policy.repairBudget,
     leadResets: recoveryPolicyOf(policy).leadResets,
   };

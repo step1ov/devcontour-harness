@@ -23,7 +23,7 @@ import {
   type ExecutionPolicy,
   type RuntimeName,
   strictSandbox,
-  harnessModeOf,
+  hostEnvironment,
 } from '../contracts/index.ts';
 import { writerRunsChecks } from '../agents/cli-adapter.ts';
 import {
@@ -477,7 +477,7 @@ export async function probeWriter(input: WriterProbeInput): Promise<WriterProbeR
     );
   if (!strictSandbox(policy))
     notes.push(
-      harnessModeOf(policy) === 'light'
+      hostEnvironment(policy)
         ? 'Облегчённый режим: исполнитель работает на хосте с границей записи (своё дерево, TMPDIR, кеши); проба идёт без песочницы.'
         : 'isolation.mode не os: исполнитель работает без песочницы, проба тоже.',
     );

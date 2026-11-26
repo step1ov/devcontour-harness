@@ -173,7 +173,7 @@ export interface InitOptions {
    */
   recovery?: { mode: 'lead' | 'user'; diagnoseAfter?: number; leadResets?: number };
   /** Режим harness новой политики (`--harness-mode`, alpha.69); нет — облегчённый. */
-  harnessMode?: 'light' | 'strict';
+  harnessMode?: 'light' | 'strict' | 'thin';
   env?: NodeJS.ProcessEnv;
   probe?: ToolProbe;
 }

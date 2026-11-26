@@ -10,7 +10,7 @@ import {
   type ExecutionPolicy,
   type RunEventPayload,
   strictSandbox,
-  harnessModeOf,
+  hostEnvironment,
 } from '../contracts/index.ts';
 import { livenessPayload, superviseStalls } from '../engine/stall-sweep.ts';
 import { TaskFailure } from '../engine/failure.ts';
@@ -346,7 +346,7 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
         added = true;
         // Облегчённый режим (alpha.69): свои порты, имя проекта compose и
         // шлюз — как у попытки, чтобы прогон не столкнулся с идущими.
-        const light = harnessModeOf(ctx.policy) === 'light';
+        const light = hostEnvironment(ctx.policy);
         if (light && ctx.policy.attemptEnv?.ports?.length)
           ports = await allocateAttemptPorts(
             ctx.policy.attemptEnv,

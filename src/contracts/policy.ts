@@ -788,6 +788,16 @@ export const derivedApplicabilityOn = (policy: {
 export const harnessModeOf = (policy: { harnessMode?: HarnessMode | undefined }): HarnessMode =>
   policy.harnessMode ?? DEFAULT_HARNESS_MODE;
 /**
+ * Окружение хоста как у разработчика (alpha.73): облегчённый и тонкий
+ * режимы — граница записи, порты и файл окружения попытки, технические
+ * ответы ведущего, раунды ревью без счёта. Выводы ускорения (B1, B2) — только
+ * `light`.
+ */
+export const hostEnvironment = (policy: { harnessMode?: HarnessMode | undefined }): boolean => {
+  const mode = harnessModeOf(policy);
+  return mode === 'light' || mode === 'thin';
+};
+/**
  * Прежняя песочница ОС проверок и исполнителя действует: строгий режим с
  * `isolation.mode: os`. В облегчённом режиме её место занимает граница
  * записи (`writeGuardActive`).
@@ -804,8 +814,7 @@ export const writeGuardActive = (
     harnessMode?: HarnessMode | undefined;
     writeGuard?: { off?: true | undefined } | undefined;
   },
-) =>
-  harnessModeOf(policy) === 'light' && policy.isolation.mode !== 'none' && !policy.writeGuard?.off;
+) => hostEnvironment(policy) && policy.isolation.mode !== 'none' && !policy.writeGuard?.off;
 
 /** Пути `toolProfile` и `runtime` назначений в ролях и правилах ревью: какой профиль у кого. */
 function profileSelections(value: unknown, path: string, out: [string, unknown][]) {
@@ -865,7 +874,7 @@ export const inputPolicyOf = (
   policy: Pick<ExecutionPolicy, 'inputPolicy'> & { harnessMode?: HarnessMode | undefined },
 ): InputPolicy => {
   const input = policy.inputPolicy ?? DEFAULT_INPUT_POLICY;
-  if (harnessModeOf(policy) !== 'light') return input;
+  if (!hostEnvironment(policy)) return input;
   // Облегчённый режим (alpha.72, P9-1): без явного правила технические
   // вопросы исполнителя решает ведущий с причиной; явное правило главнее,
   // `technical: false` — отказ. Технический вопрос о внутреннем договоре или
@@ -894,7 +903,7 @@ export const leadAnswersSourceOf = (
 ): 'policy' | 'light-default' | 'default' =>
   policy.inputPolicy?.leadAnswers !== undefined
     ? 'policy'
-    : harnessModeOf(policy) === 'light'
+    : hostEnvironment(policy)
       ? 'light-default'
       : 'default';
 
@@ -1223,7 +1232,7 @@ export function policyIssues(policy: ExecutionPolicy): Issue[] {
   // Облегчённый режим (alpha.69, ревью): сеть исполнителя не ограничивается
   // (сам CLI ходит к модели), поэтому явное `network: none|loopback` профиля
   // исполнителя не выполняется — отказ, а не молчаливое игнорирование.
-  if (harnessModeOf(policy) === 'light') {
+  if (hostEnvironment(policy)) {
     const writerProfiles = new Set(
       [
         ...Object.values(policy.roles),

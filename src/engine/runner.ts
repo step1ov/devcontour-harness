@@ -71,6 +71,7 @@ import {
   derivedApplicabilityOn,
   gateApplicabilityLimits,
   harnessModeOf,
+  hostEnvironment,
   integrationReuseOn,
   writeGuardActive,
   blockingOf,
@@ -897,7 +898,7 @@ export class Runner {
         }),
         // Облегчённый режим (alpha.69): своё имя проекта compose, свои порты
         // и шлюз gates — исполнителю и gates одинаково.
-        ...(harnessModeOf(this.policy) === 'light'
+        ...(hostEnvironment(this.policy)
           ? attemptVariables(
               attempt.id,
               this.attemptPorts.get(attempt.id)?.get(repo.id) ?? {},
@@ -987,7 +988,7 @@ export class Runner {
     // Исполнитель облегчённого режима под границей: каталог git своего
     // дерева (P8-1; ревью 2 — только он).
     const gitGuard =
-      !review && harnessModeOf(this.policy) === 'light' && writeGuardActive(this.policy)
+      !review && hostEnvironment(this.policy) && writeGuardActive(this.policy)
         ? gitWorktreeGuard(input.cwd)
         : undefined;
     // Вызов под учётом: бюджет проверяется до вызова, расход закрепляется за попыткой.
@@ -1027,7 +1028,7 @@ export class Runner {
           network: { domains: this.policy.isolation.domains },
           // Облегчённый режим (alpha.69): исполнитель как обычный разработчик,
           // одна граница — запись в своё дерево, свой TMPDIR и кеши.
-          ...(!review && harnessModeOf(this.policy) === 'light'
+          ...(!review && hostEnvironment(this.policy)
             ? {
                 light: writeGuardActive(this.policy)
                   ? (() => {
@@ -1797,7 +1798,7 @@ export class Runner {
       // поставщика и потребителя не делят порты. Постоянные ресурсы-порты
       // политики не выделяются. Нет свободного — отказ среды, попытка не
       // засчитывается.
-      if (harnessModeOf(this.policy) === 'light' && this.policy.attemptEnv?.ports?.length) {
+      if (hostEnvironment(this.policy) && this.policy.attemptEnv?.ports?.length) {
         const byRepo = new Map<string, Record<string, number>>();
         const exclude = this.policy.resources
           .filter((r) => r.kind === 'port')
@@ -1827,7 +1828,7 @@ export class Runner {
       // проверяемых потребителей) — свой файл. Секретов политики в нём нет;
       // тестовые секреты попытки (alpha.72, `attemptEnv.secrets`) — свои
       // случайные значения этой попытки, файл всегда только для владельца (0600).
-      if (harnessModeOf(this.policy) === 'light') {
+      if (hostEnvironment(this.policy)) {
         await mkdir(artifacts, { recursive: true });
         const secretsByRepo = new Map<string, Record<string, string>>();
         for (const repositoryId of new Set([

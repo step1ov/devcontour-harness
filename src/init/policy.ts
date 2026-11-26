@@ -168,9 +168,10 @@ export function generatePolicy(input: {
   recovery?: { mode: 'lead' | 'user'; diagnoseAfter?: number; leadResets?: number };
   /**
    * Режим harness (`init --harness-mode`, alpha.69): `strict` записывается
-   * полем `harnessMode`; облегчённый — умолчание, поля нет.
+   * полем `harnessMode`; облегчённый — умолчание, поля нет. `thin`
+   * (alpha.73) — полем и с одним проходом ревью работ (`review.passes.code: off`).
    */
-  harnessMode?: 'light' | 'strict';
+  harnessMode?: 'light' | 'strict' | 'thin';
   /** Закреплённый node (`policy.toolchain`): предложение init. */
   toolchainPin?: { node: string };
 }): GeneratedPolicy {
@@ -245,12 +246,19 @@ export function generatePolicy(input: {
     policyVersion: POLICY_VERSION,
     repositories: [repository],
     roles,
-    review: { code: rule(writer), plan: rule(lead), contract: rule(lead) },
+    review: {
+      code: rule(writer),
+      plan: rule(lead),
+      contract: rule(lead),
+      ...(input.harnessMode === 'thin' ? { passes: { code: 'off' as const } } : {}),
+    },
     ...profileExecution(profile),
     ...(input.leadTechnicalAnswers
       ? { inputPolicy: { threshold: 7, criticalPaths: [], leadAnswers: { technical: true } } }
       : {}),
-    ...(input.harnessMode === 'strict' ? { harnessMode: 'strict' as const } : {}),
+    ...(input.harnessMode === 'strict' || input.harnessMode === 'thin'
+      ? { harnessMode: input.harnessMode }
+      : {}),
     ...(input.recovery
       ? {
           recovery: {

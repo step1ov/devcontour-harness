@@ -242,6 +242,12 @@ export interface SandboxSpec {
     guard?: string[];
     /** Закрыто на чтение (ревью 3: общий stash владельца). */
     guardDenyRead?: string[];
+    /**
+     * Постоянный домашний каталог CLI работы (тонкий режим, alpha.73):
+     * в нём сессия, которую продолжит следующая сдача; адаптер его не
+     * удаляет, копию входа обновляет. Нет — свой каталог на вызов.
+     */
+    home?: string;
   };
 }
 
@@ -261,7 +267,8 @@ export interface RuntimeRequest {
   outputSchema?: Record<string, unknown>;
   /**
    * Сессия всегда новая для reviewer и planner. `continue` разрешён только
-   * writer той же попытки; reviewer не получает ID сессии writer.
+   * writer той же работы (тонкий режим, адаптер с `sessionContinue`);
+   * reviewer не получает ID сессии writer.
    */
   session:
     | { kind: 'fresh' }
@@ -381,6 +388,11 @@ export interface RuntimeCapabilities {
    * исследование передаётся только текстом в стабильном префиксе запроса.
    */
   sessionFork?: boolean;
+  /**
+   * Адаптер продолжает сессию writer (`session.kind: continue`, alpha.73,
+   * тонкий режим): CLI умеет resume со структурированным ответом. Нет поля — нет.
+   */
+  sessionContinue?: boolean;
 }
 
 export interface RuntimeAdapter {

@@ -1950,7 +1950,7 @@ function settingsOf(i: OperatorViewInput, truncated: Record<string, number>): Vi
       maxNeutralFailures: MAX_NEUTRAL_FAILURES,
       reviewRoundCap: i.effective.reviewRoundCap,
       reviewEscalationRounds: REVIEW_ESCALATION_ROUNDS,
-      ...((p.harnessMode ?? 'light') === 'light' ? { reviewRoundsUnlimited: true } : {}),
+      ...(p.harnessMode !== 'strict' ? { reviewRoundsUnlimited: true } : {}),
     },
     budgets,
     ...(p.budgets ? { budgetOnUnknown: p.budgets.onUnknown } : {}),
@@ -1970,12 +1970,11 @@ function settingsOf(i: OperatorViewInput, truncated: Record<string, number>): Vi
     },
     defaulted: [...new Set(i.defaulted)].sort(),
     harnessMode: {
-      mode: p.harnessMode ?? 'light',
+      // Тонкий режим (alpha.73) представление называет облегчённым до
+      // ревизии 11: окружение у них одно, перечисление UI прежнее.
+      mode: p.harnessMode === 'strict' ? 'strict' : 'light',
       default: p.harnessMode === undefined,
-      writeGuard:
-        (p.harnessMode ?? 'light') === 'light' &&
-        p.isolation?.mode !== 'none' &&
-        !p.writeGuard?.off,
+      writeGuard: p.harnessMode !== 'strict' && p.isolation?.mode !== 'none' && !p.writeGuard?.off,
     },
     decisions: decisionSettingsView(
       p,

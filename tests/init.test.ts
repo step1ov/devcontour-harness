@@ -960,3 +960,14 @@ test('alpha.66: --recovery/--diagnose-after/--lead-resets — правило в�
   const error = await refusal(initProject(p.opts({ recovery: { mode: 'user' } })), 'PATH_CONFLICT');
   assert.match(error.message, /правило восстановления/);
 });
+
+test('alpha.73: --harness-mode thin — поле режима и один проход ревью работ в новой политике', async () => {
+  const p = project();
+  const applied = await initProject(p.opts({ harnessMode: 'thin' }));
+  assert.equal(applied.conflicts, 0);
+  const policy = executionPolicySchema.parse(
+    JSON.parse(readFileSync(join(p.root, '.harness/policy.json'), 'utf8')),
+  );
+  assert.equal(policy.harnessMode, 'thin');
+  assert.deepEqual(policy.review.passes, { code: 'off' });
+});

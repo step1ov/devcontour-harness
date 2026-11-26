@@ -1170,11 +1170,13 @@ async function runUpdate(
   return { data: r.data, code: r.code };
 }
 
-/** `init --harness-mode light|strict` (alpha.69): режим новой политики. */
-function harnessModeFlag(value: string | undefined): { harnessMode?: 'light' | 'strict' } {
+/** `init --harness-mode light|strict|thin` (alpha.69, thin — alpha.73): режим новой политики. */
+function harnessModeFlag(value: string | undefined): {
+  harnessMode?: 'light' | 'strict' | 'thin';
+} {
   if (value === undefined) return {};
-  if (value !== 'light' && value !== 'strict')
-    throw new HarnessError('INVALID_INPUT', '--harness-mode: ожидается light или strict', [
+  if (value !== 'light' && value !== 'strict' && value !== 'thin')
+    throw new HarnessError('INVALID_INPUT', '--harness-mode: ожидается light, strict или thin', [
       { path: ['--harness-mode'], message: value },
     ]);
   return { harnessMode: value };

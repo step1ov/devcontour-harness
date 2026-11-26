@@ -34,7 +34,9 @@ export interface RecoveryPolicyFields {
   recovery?: { mode: 'lead' | 'user'; diagnoseAfter: number; leadResets: number } | undefined;
   inputPolicy?: { leadAnswers?: { technical?: boolean } | undefined } | undefined;
   /** Режим harness: в облегчённом (нет поля) технические вопросы по умолчанию у ведущего. */
-  harnessMode?: 'light' | 'strict' | undefined;
+  harnessMode?: 'light' | 'strict' | 'thin' | undefined;
+  /** Засчитанных попыток на задачу: в тонком режиме разбор ведущего — по их исчерпании. */
+  maxAttempts?: number | undefined;
 }
 
 /**
@@ -68,6 +70,9 @@ export function recoveryPolicyOf(policy: RecoveryPolicyFields): RecoveryPolicy {
     mode: lead ? 'lead' : 'user',
     enabled: lead,
     ...DEFAULT_RECOVERY,
+    // Тонкий режим (alpha.73): отказы возвращаются в ту же сессию
+    // исполнителя, ведущий разбирает только исчерпание сдач.
+    ...(policy.harnessMode === 'thin' ? { diagnoseAfter: policy.maxAttempts ?? 3 } : {}),
     source: lead ? 'derived' : 'default',
   };
 }
