@@ -2,6 +2,7 @@ import type { z } from 'zod';
 import {
   HarnessError,
   digestOf,
+  harnessModeOf,
   idSchema,
   relativePathSchema,
   workGraphDigest,
@@ -23,7 +24,7 @@ import { requirementSnapshot } from '../verification/requirements.ts';
 import { planningFactsOf } from './facts.ts';
 import { draftToGraph } from './graph.ts';
 import { checkGaps, draftIssues } from './issues.ts';
-import { planningBasis, planningRequest } from './request.ts';
+import { planningBasis, planningRequest, THIN_TASKS } from './request.ts';
 import { standaloneInstructions, type RequirementFact } from './standalone.ts';
 
 export type PlanRequestData = z.infer<typeof planRequestDataSchema>;
@@ -79,6 +80,7 @@ export function planRequestOf(
     brief: input.brief,
     facts,
     hostInstructions: standaloneInstructions({ requirements }),
+    ...(harnessModeOf(input.policy) === 'thin' ? { thin: true } : {}),
   });
   return {
     prompt: request.prompt,
@@ -174,13 +176,24 @@ export function planCheck(
   if (invalid.length) return refused(invalid, checkPlan, basis);
 
   // 8. Граф без согласования: дальше review-plan/approve/run.
+  const advice = thinAdvice(input.policy, graph.orders.length);
   return {
     issues: [],
     checkPlan: [],
     graph,
     graphDigest: workGraphDigest(graph),
     ...(basis === undefined ? {} : { basis }),
+    ...(advice ? { advice: [advice] } : {}),
   };
+}
+
+/** Совет тонкого режима: работ на фичу 3–5 (`THIN_TASK_SIZE_SECTION`). */
+export function thinAdvice(policy: ExecutionPolicy, works: number): string | undefined {
+  if (harnessModeOf(policy) !== 'thin') return undefined;
+  if (works >= THIN_TASKS.min && works <= THIN_TASKS.max) return undefined;
+  return works < THIN_TASKS.min
+    ? `THIN_PLAN_SIZE: работ ${works} — меньше ${THIN_TASKS.min}: крупная работа даёт большой diff для одного ревью; разделите по репозиториям или независимым сценариям`
+    : `THIN_PLAN_SIZE: работ ${works} — больше ${THIN_TASKS.max}: в тонком режиме работа — сценарий целиком через слои; объедините работы одного сценария`;
 }
 
 /** Ответ с проблемами: графа нет; checkPlan — только рядом с issues. */

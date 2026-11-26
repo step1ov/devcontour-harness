@@ -8,6 +8,8 @@ export interface PlanningInput {
   hostInstructions?: string[];
   /** По умолчанию 15. */
   recommendedTasks?: number;
+  /** Тонкий режим (alpha.73): 3–5 работ, `THIN_TASK_SIZE_SECTION` вместо обычного размера. */
+  thin?: boolean;
 }
 export interface PlanningRequest {
   prompt: string;
@@ -25,6 +27,16 @@ export interface PlanningRequest {
 export const TASK_SIZE_SECTION =
   'Size tasks by user scenario: one task per coherent user scenario, through every layer it needs (API, UI, data, tests). Split a scenario only by repository, or when its parts are truly independent and can be accepted separately. In light mode, shared test infrastructure (an acceptance launcher, fixtures, a test harness) that only the first product task needs belongs inside that task, not in a separate one; in strict mode, acceptance code under protected infra paths stays a separate infra task that the product tasks depend on.';
 
+/** Сколько работ на фичу советует тонкий режим (alpha.73). */
+export const THIN_TASKS = { min: 3, max: 5 } as const;
+
+/**
+ * Размер работы тонкого режима (alpha.73): работа — одна длинная сессия
+ * исполнителя со своими проверками, поэтому работ мало и они крупные. Совет,
+ * не проверка; plan-check советует при числе вне 3–5.
+ */
+export const THIN_TASK_SIZE_SECTION = `Thin mode: plan ${THIN_TASKS.min}–${THIN_TASKS.max} tasks for the feature. Each task is one long writer session that runs its own gates until they pass, so make each task one coherent user scenario through every layer it needs (API, UI, data, tests), including the shared test infrastructure it needs. Split only by repository or into parts that are truly independent and can be accepted separately. Each task lists its exact gates (the checks that prove its acceptance criteria); the writer runs exactly these commands, and the harness reruns them on a clean checkout.`;
+
 /**
  * Область gates задачи (alpha.71): только gates, покрывающие её критерии и
  * затронутые пакеты, — совет, не проверка.
@@ -37,10 +49,10 @@ export const GATE_SCOPE_SECTION =
  * продуктовых строк хоста. Host-инструкции идут отдельным блоком перед brief,
  * brief — последним.
  */
-function sharedSections(facts: PlanningFacts, recommendedTasks: number): string[] {
+function sharedSections(facts: PlanningFacts, recommendedTasks: number, thin = false): string[] {
   return [
     `Inspect the repository read-only. Propose a small first vertical slice, at most ${recommendedTasks} tasks. Do not edit files, run implementation agents, commit, or mark tasks done. Independent plan review follows; the coordinator handles approval according to project policy.`,
-    TASK_SIZE_SECTION,
+    thin ? THIN_TASK_SIZE_SECTION : TASK_SIZE_SECTION,
     "Declared roles, by repository. A task may only use a role declared for its own repository; no other role exists. Where a role has writePaths, the task's writePaths must lie inside them, or the executor can change nothing. A role marked requiresContract needs an approved contract bound to its task: " +
       JSON.stringify(facts.roles),
     'Configured checks, by repository. A task proves itself with gates: a subset of these that must include a test gate; a named group is referenced as "@name" instead of listing its members, and nothing is inherited implicitly. A task in a library proves its consumers only when it declares them: consumers lists dependent components and their gates or groups, run against the integrated result of the task. Requirements link to a test gate from that same subset: ' +
@@ -67,7 +79,7 @@ function sharedSections(facts: PlanningFacts, recommendedTasks: number): string[
 /** Read-only запрос планирования (OP-PLAN-01): чистая функция, модель не вызывает. */
 export function planningRequest(input: PlanningInput): PlanningRequest {
   const { brief, facts } = input;
-  const recommendedTasks = input.recommendedTasks ?? 5;
+  const recommendedTasks = input.recommendedTasks ?? (input.thin ? THIN_TASKS.max : 5);
   if (!facts.roles.some((r) => r.roles.length > 0))
     throw new HarnessError(
       'INVALID_INPUT',
@@ -79,7 +91,7 @@ export function planningRequest(input: PlanningInput): PlanningRequest {
     throw new HarnessError('INVALID_INPUT', 'recommendedTasks: ожидается целое 1–30');
   const host = (input.hostInstructions ?? []).filter((line) => line.trim() !== '');
   const prompt = [
-    ...sharedSections(facts, recommendedTasks),
+    ...sharedSections(facts, recommendedTasks, input.thin),
     ...(host.length ? ['Host instructions:\n' + host.join('\n\n')] : []),
     'User brief:\n' + brief,
   ].join('\n\n');
