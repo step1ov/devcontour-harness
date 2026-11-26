@@ -1897,7 +1897,7 @@ export const cliCommands = {
   },
   guide: {
     description:
-      'Раздел инструкции ведущего по теме (alpha.71): session (читается первой в каждой сессии), setup, plan, review, run, recovery, release, relay; печатает текст раздела без конверта, `--json` — конверт с текстом и заголовками; только чтение файлов пакета',
+      'Раздел инструкции ведущего по теме (alpha.71): session (читается первой в каждой сессии), setup, plan, review, run, recovery, release, relay, thin (тонкий режим, alpha.73); печатает текст раздела без конверта, `--json` — конверт с текстом и заголовками; только чтение файлов пакета',
     writes: false,
     idempotency: 'Только чтение. Та же версия пакета и тема дают тот же текст',
     args: [
@@ -1906,7 +1906,7 @@ export const cliCommands = {
         value: 'text',
         required: true,
         description:
-          'Тема: session, setup, plan, review, run, recovery, release, relay; можно позиционно: `harness guide run`',
+          'Тема: session, setup, plan, review, run, recovery, release, relay, thin; можно позиционно: `harness guide run`',
       },
       { name: '--json', value: 'flag', required: false, description: 'JSON-конверт вместо текста' },
     ],
@@ -2682,7 +2682,17 @@ export const statusDataSchema = z.strictObject({
 
 /** Раздел `harness guide` (alpha.71, E3). */
 export const guideDataSchema = z.strictObject({
-  topic: z.enum(['session', 'setup', 'plan', 'review', 'run', 'recovery', 'release', 'relay']),
+  topic: z.enum([
+    'session',
+    'setup',
+    'plan',
+    'review',
+    'run',
+    'recovery',
+    'release',
+    'relay',
+    'thin',
+  ]),
   title: z.string().min(1).max(300),
   headings: z.array(z.string().max(300)).max(100),
   text: z.string().min(1).max(100_000),
