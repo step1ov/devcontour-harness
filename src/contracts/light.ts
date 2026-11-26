@@ -167,11 +167,21 @@ const portEnvName = z
  * выделяет свободный порт на каждое имя (проба занятости — та же, что у
  * ресурсов-портов, аренда — в базе ресурсов машины) и передаёт его
  * исполнителю и gates в переменной с этим именем. Имя проекта compose
- * (`COMPOSE_PROJECT_NAME`) и `HARNESS_ATTEMPT_ID` задаются всегда.
+ * (`COMPOSE_PROJECT_NAME`) и `HARNESS_ATTEMPT_ID` задаются всегда; тестовые
+ * секреты (`secrets`) — случайные значения на попытку.
  */
 export const attemptEnvSchema = z
   .strictObject({
     ports: z.array(portEnvName).max(20).optional(),
+    /**
+     * Тестовые секреты попытки (alpha.72, P9-1): имена переменных, которым
+     * harness на каждую попытку даёт случайное значение, если окружение
+     * политики его не задаёт (пароли базы, ключи подписи тестового стека).
+     * Только для секретов тестового окружения: значение есть в окружении
+     * шагов, gates и исполнителя и в файле окружения попытки, в журналах
+     * маскируется; секрет production сюда не объявляется.
+     */
+    secrets: z.array(portEnvName).max(20).optional(),
     portRange: z
       .strictObject({
         from: z.number().int().min(1024).max(65535),
@@ -183,6 +193,13 @@ export const attemptEnvSchema = z
   .refine(
     (v) => !v.ports || new Set(v.ports).size === v.ports.length,
     'Имена портов попытки не повторяются',
+  )
+  .refine(
+    (v) =>
+      !v.secrets ||
+      (new Set(v.secrets).size === v.secrets.length &&
+        !v.secrets.some((s) => v.ports?.includes(s))),
+    'Имена тестовых секретов попытки не повторяются и не совпадают с именами портов',
   );
 export type AttemptEnvPolicy = z.infer<typeof attemptEnvSchema>;
 export const DEFAULT_PORT_RANGE = { from: 20000, to: 29999 } as const;

@@ -1,4 +1,4 @@
-import { createHash, randomInt, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomInt, randomUUID } from 'node:crypto';
 import {
   DEFAULT_PORT_RANGE,
   type AttemptEnvPolicy,
@@ -137,9 +137,45 @@ export function expandPorts(template: string, ports: Record<string, number>) {
 }
 
 /**
+ * Тестовые секреты попытки (alpha.72, P9-1): каждое имя из
+ * `attemptEnv.secrets`, которому окружение политики (`values`, `secrets`,
+ * `inherit` общего окружения и окружения репозитория) значения не даёт,
+ * получает случайное значение на эту попытку и этот репозиторий — 24
+ * случайных байта в hex (годится и для паролей, и для ключей в hex). Значения
+ * живут только в окружении попытки и её файле: в политику и состояние не
+ * пишутся, в журналах маскируются (`ATTEMPT_SECRETS_KEY`).
+ */
+export function attemptSecrets(
+  policy: AttemptEnvPolicy | undefined,
+  environments: readonly (
+    | {
+        inherit: readonly string[];
+        values: Record<string, string>;
+        secrets: Record<string, string>;
+      }
+    | undefined
+  )[] = [],
+): Record<string, string> {
+  const provided = new Set(
+    environments.flatMap((e) =>
+      e ? [...e.inherit, ...Object.keys(e.values), ...Object.keys(e.secrets)] : [],
+    ),
+  );
+  return Object.fromEntries(
+    (policy?.secrets ?? [])
+      .filter((name) => !provided.has(name))
+      .map((name) => [name, randomBytes(24).toString('hex')]),
+  );
+}
+
+/** Переменная со списком имён тестовых секретов попытки (маска журналов, receipt). */
+export const ATTEMPT_SECRETS_KEY = 'HARNESS_ATTEMPT_SECRETS';
+
+/**
  * Переменные окружения попытки облегчённого режима: `HARNESS_ATTEMPT_ID`,
- * `COMPOSE_PROJECT_NAME`, порты и шлюз (`HARNESS_GATEWAY_URL` и переменные
- * приложения с адресом шлюза).
+ * `COMPOSE_PROJECT_NAME`, порты, шлюз (`HARNESS_GATEWAY_URL` и переменные
+ * приложения с адресом шлюза) и тестовые секреты попытки (alpha.72) со
+ * списком их имён в `HARNESS_ATTEMPT_SECRETS`.
  */
 export function attemptVariables(
   attemptId: string,
@@ -148,12 +184,18 @@ export function attemptVariables(
   repositoryId = '',
   /** Путь файла окружения этого репозитория попытки (`HARNESS_ATTEMPT_ENV_FILE`). */
   envFile?: string,
+  /** Тестовые секреты этой попытки и репозитория (`attemptSecrets`). */
+  secrets: Record<string, string> = {},
 ): Record<string, string> {
   const env: Record<string, string> = {
     HARNESS_ATTEMPT_ID: attemptId,
     ...(envFile ? { HARNESS_ATTEMPT_ENV_FILE: envFile } : {}),
     COMPOSE_PROJECT_NAME: composeProjectName(attemptId, repositoryId),
     ...Object.fromEntries(Object.entries(ports).map(([k, v]) => [k, String(v)])),
+    ...secrets,
+    ...(Object.keys(secrets).length
+      ? { [ATTEMPT_SECRETS_KEY]: Object.keys(secrets).sort().join(',') }
+      : {}),
   };
   if (gateway) {
     const url = expandPorts(gateway.url, ports).replace(/\/+$/, '');

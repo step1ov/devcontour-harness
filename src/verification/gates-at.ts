@@ -17,6 +17,7 @@ import { TaskFailure } from '../engine/failure.ts';
 import { git } from '../environment/process.ts';
 import {
   allocateAttemptPorts,
+  attemptSecrets,
   attemptVariables,
   type AttemptPorts,
 } from '../environment/attempt-ports.ts';
@@ -369,7 +370,16 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
               ...Object.fromEntries(snapshots.map((d) => [d.repositoryId, d.path])),
               [repo.id]: cwd,
             }),
-            ...(light ? attemptVariables(id, ports?.ports ?? {}, repo.gateway, repo.id) : {}),
+            ...(light
+              ? attemptVariables(
+                  id,
+                  ports?.ports ?? {},
+                  repo.gateway,
+                  repo.id,
+                  undefined,
+                  attemptSecrets(ctx.policy.attemptEnv, [ctx.policy.environment, repo.environment]),
+                )
+              : {}),
           },
           source,
           ctx.policy.toolchain,

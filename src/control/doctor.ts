@@ -9,6 +9,7 @@ import {
   STATE_VERSION,
   inputPolicyOf,
   leadAnswersRule,
+  type LeadAnswersRule,
   NO_RETRY_GATE_CODES,
   reviewVendorConflictMessage,
   reviewVendorConflicts,
@@ -488,11 +489,10 @@ async function portStatus(policy: ExecutionPolicy, database: string) {
 function questionRule(policy: ExecutionPolicy) {
   const input = inputPolicyOf(policy);
   const rule = leadAnswersRule(input);
+  const lead: LeadAnswersRule | undefined = input.leadAnswers;
   return {
-    leadTechnical: input.leadAnswers?.technical === true,
-    ...(input.leadAnswers?.maxSeverity !== undefined
-      ? { maxSeverity: input.leadAnswers.maxSeverity }
-      : {}),
+    leadTechnical: lead?.technical === true,
+    ...(lead?.maxSeverity !== undefined ? { maxSeverity: lead.maxSeverity } : {}),
     line: rule.ru,
     lineEn: rule.en,
   };

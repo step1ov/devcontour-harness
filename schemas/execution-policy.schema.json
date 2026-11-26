@@ -2924,6 +2924,31 @@
                 "technical": {
                   "type": "boolean",
                   "const": true
+                },
+                "technicalAreas": {
+                  "maxItems": 3,
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "enum": [
+                      "contract",
+                      "api",
+                      "migration"
+                    ]
+                  }
+                }
+              },
+              "required": [
+                "technical"
+              ],
+              "additionalProperties": false
+            },
+            {
+              "type": "object",
+              "properties": {
+                "technical": {
+                  "type": "boolean",
+                  "const": false
                 }
               },
               "required": [
@@ -3005,6 +3030,14 @@
       "type": "object",
       "properties": {
         "ports": {
+          "maxItems": 20,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^(?!HARNESS_|DEVCONTOUR_|DYLD_)[A-Z_][A-Z0-9_]*$"
+          }
+        },
+        "secrets": {
           "maxItems": 20,
           "type": "array",
           "items": {

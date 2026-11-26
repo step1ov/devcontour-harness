@@ -17,6 +17,7 @@ import {
   inputPolicyOf,
   recoveryPolicyOf,
   leadAnswersRule,
+  type LeadAnswersRule,
   projectManifestSchema,
   runtimeAssignments,
   reviewVendorConflictMessage,
@@ -534,7 +535,7 @@ function questionsOf(
   policy: ExecutionPolicy,
   source: NonNullable<InitData['questions']>['source'],
 ): NonNullable<InitData['questions']> {
-  const lead = inputPolicyOf(policy).leadAnswers;
+  const lead: LeadAnswersRule | undefined = inputPolicyOf(policy).leadAnswers;
   const rule = leadAnswersRule(inputPolicyOf(policy));
   return {
     leadTechnical: lead?.technical === true,

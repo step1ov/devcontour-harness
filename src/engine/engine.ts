@@ -71,6 +71,7 @@ import {
   inputSourceId,
   latestAnswer,
   leadAnswerBasis,
+  type LeadAnswersRule,
   impactOf,
   pinnedInputPolicy,
   targetDigest,
@@ -3619,20 +3620,25 @@ export class Engine {
     return this.tx('input.answered', (tx) => {
       this.assertNoUpdate(tx);
       const { owner, request } = this.requestIn(tx, id);
-      // Блокирующий вопрос адресован человеку: ведущий отвечает только с явного
-      // разрешения политики — технический вопрос без минимумов
-      // (`leadAnswers.technical`, с причиной) или до порога серьёзности
-      // (`leadAnswers.maxSeverity`). Проверка — до повтора: прежний ответ
-      // ведущего не подтверждается после отзыва разрешения.
+      // Блокирующий вопрос адресован человеку: ведущий отвечает только с
+      // разрешения политики — технический вопрос без минимумов или, в
+      // облегчённом режиме, о внутреннем договоре и программном интерфейсе
+      // (`leadAnswers.technical`, с причиной; умолчание облегчённого режима)
+      // или до порога серьёзности (`leadAnswers.maxSeverity`). Проверка — до
+      // повтора: прежний ответ ведущего не подтверждается после отзыва
+      // разрешения.
       const inputPolicy = inputPolicyOf(this.policy);
       const basis =
         answer.actor.kind === 'lead' ? leadAnswerBasis(request, inputPolicy) : undefined;
       if (basis === null) {
-        const lead = inputPolicy.leadAnswers;
+        const lead: LeadAnswersRule | undefined = inputPolicy.leadAnswers;
         const impact = impactOf(request.question);
+        const areas = lead?.technicalAreas ?? [];
         const why =
           lead?.technical === true
-            ? 'политика разрешает ведущему только технические вопросы без критических областей и путей' +
+            ? (areas.length
+                ? `политика разрешает ведущему только технические вопросы без критических путей и без критических областей, кроме ${areas.join(', ')}`
+                : 'политика разрешает ведущему только технические вопросы без критических областей и путей') +
               (lead.maxSeverity !== undefined ? ` до серьёзности ${lead.maxSeverity}` : '') +
               (impact !== 'technical'
                 ? ', а этот меняет результат для пользователя'

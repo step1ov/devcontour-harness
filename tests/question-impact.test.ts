@@ -197,7 +197,12 @@ test('alpha.55: ответ вне схемы — impact вне перечня с
 
 test('alpha.55: политика — leadAnswers нужен maxSeverity или technical: true; правило словами', () => {
   assert.equal(inputPolicySchema.safeParse({ leadAnswers: {} }).success, false);
-  assert.equal(inputPolicySchema.safeParse({ leadAnswers: { technical: false } }).success, false);
+  // alpha.72: `technical: false` — явный отказ от умолчания облегчённого режима.
+  assert.equal(inputPolicySchema.safeParse({ leadAnswers: { technical: false } }).success, true);
+  assert.equal(
+    inputPolicySchema.safeParse({ leadAnswers: { technical: false, maxSeverity: 4 } }).success,
+    true,
+  );
   assert.equal(inputPolicySchema.safeParse({ leadAnswers: { technical: true } }).success, true);
   assert.equal(
     inputPolicySchema.safeParse({ leadAnswers: { technical: true, maxSeverity: 4 } }).success,
@@ -251,9 +256,11 @@ test('alpha.55: политика — leadAnswers нужен maxSeverity или t
   ).anyOf;
   assert.deepEqual(
     variants.map((v) => v.required),
-    [['maxSeverity'], ['technical']],
+    [['maxSeverity'], ['technical'], ['technical']],
   );
   assert.deepEqual(variants[1]!.properties.technical, { type: 'boolean', const: true });
+  // alpha.72: третий вариант — явный отказ `{technical: false}`.
+  assert.deepEqual(variants[2]!.properties.technical, { type: 'boolean', const: false });
   // Неблокирующий — всегда.
   assert.equal(
     leadAnswerBasis({ ...r(undefined, []), kind: 'follow-up', blocking: false }, {}),

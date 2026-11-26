@@ -129,13 +129,22 @@ export function executionEnvironment(
       secretNames.add(key);
     }
   }
-  if (secretNames.size) env.HARNESS_SECRET_NAMES = [...secretNames].sort().join(',');
   // Переменные контура: исторические DEVCONTOUR_* — часть договора проверок
   // пользователей — и их псевдонимы HARNESS_* с теми же значениями.
   for (const [key, value] of Object.entries(devcontour)) {
     env[key] = value;
     if (key.startsWith('DEVCONTOUR_')) env['HARNESS_' + key.slice('DEVCONTOUR_'.length)] = value;
   }
+  // Тестовые секреты попытки (alpha.72, `attemptEnv.secrets`) маскируются как
+  // объявленные: список имён приходит с переменными попытки и в receipt, так
+  // что и очистка в новом процессе маскирует те же значения.
+  for (const key of (env.HARNESS_ATTEMPT_SECRETS ?? '').split(',').filter(Boolean)) {
+    const value = env[key];
+    if (!value) continue;
+    secretValues.push(value);
+    secretNames.add(key);
+  }
+  if (secretNames.size) env.HARNESS_SECRET_NAMES = [...secretNames].sort().join(',');
   const result: {
     env: NodeJS.ProcessEnv;
     redact: Redactor;

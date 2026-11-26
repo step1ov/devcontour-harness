@@ -247,8 +247,22 @@ stash владельца, запись кандидата не через HEAD).
   попытки; аренда процесса, который умер, снимается при следующем
   выделении.
 
+- свои тестовые секреты (0.1.0-alpha.72): каждое имя из
+  `attemptEnv.secrets`, которому окружение политики (`environment` общее и
+  репозитория: `values`, `secrets`, `inherit`) значения не даёт, получает на
+  попытку и репозиторий случайное значение (24 байта в hex). Это пароли и
+  ключи тестового стека (база, брокер, подпись токенов), а не секреты
+  production. Значения есть в окружении исполнителя, шагов, gates и
+  `harness env-up`, в `attempt-env.json` (файл тогда с правами 0600) и в
+  receipt окружения для очистки; в журналах они маскируются, как
+  объявленные секреты (`HARNESS_SECRET_NAMES`, список — `HARNESS_ATTEMPT_SECRETS`).
+  Исполнитель получает их имена в запросе и не спрашивает, откуда их взять.
+
 ```json
-"attemptEnv": { "ports": ["API_PORT", "WEB_PORT", "GATEWAY_PORT"] }
+"attemptEnv": {
+  "ports": ["API_PORT", "WEB_PORT", "GATEWAY_PORT"],
+  "secrets": ["POSTGRES_PASSWORD", "ADMIN_JWT_SECRET"]
+}
 ```
 
 Переменные получают исполнитель, gates, lifecycle и `harness gates --sha`.

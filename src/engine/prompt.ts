@@ -212,6 +212,13 @@ export const WRITER_SELF_CHECK_TEXT =
 export const ATTEMPT_ENV_WRITER_TEXT =
   'The attempt environment file (HARNESS_ATTEMPT_ENV_FILE, attempt-env.json) is read-only: read it, never write it — writing it fails with EPERM. A test that needs a modified version copies it to its own temporary file and points HARNESS_ATTEMPT_ENV_FILE at the copy for that test.';
 
+/**
+ * Тестовые секреты попытки (alpha.72, P9-1): их значения даёт harness —
+ * исполнитель не спрашивает, откуда их взять, и не придумывает постоянных.
+ */
+export const attemptSecretsNote = (names: readonly string[]) =>
+  `Test-only secrets of this attempt: ${names.join(', ')}. The harness generates a random value for each per attempt and passes it as an environment variable to the writer, lifecycle steps (including harness env-up) and gates, and in the attempt environment file. Use them instead of fixed or default passwords and do not ask how to provide them. Never print their values. A secret that is not on this list is the lead's to declare (policy attemptEnv.secrets): name it in the summary.`;
+
 export function prompt(input: {
   work: WorkState;
   attempt: AttemptState;

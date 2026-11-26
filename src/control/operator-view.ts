@@ -13,7 +13,7 @@ import { homedir } from 'node:os';
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import type { z } from 'zod';
 import {
-  DEFAULT_INPUT_POLICY,
+  inputPolicyOf,
   DEFAULT_STALL_SWEEP,
   HarnessError,
   STATE_VERSION,
@@ -1340,7 +1340,8 @@ export function collectOperatorViewInput(
     const closed = new Set(
       works.filter((w) => w.status === 'done' || w.status === 'cancelled').map((w) => w.id),
     );
-    const inputPolicy = policy.inputPolicy ?? DEFAULT_INPUT_POLICY;
+    // Действующая политика: в облегчённом режиме — с умолчанием ответов ведущего.
+    const inputPolicy = inputPolicyOf(policy);
     // Вопросы закрытых работ — только для деталей работы (`closed`): обзор их
     // не показывает, детали называют, кто и почему ответил. Отмена работы
     // переводит её запросы в `cancelled`, замена — в `superseded`: у закрытой
@@ -2058,7 +2059,7 @@ function emptyInput(policy: ViewPolicy, now: number, stateDir: string): Operator
     policy: policy.policy,
     policyDigest: policyDigest(policy.policy),
     effective: {
-      inputPolicy: policy.policy.inputPolicy ?? DEFAULT_INPUT_POLICY,
+      inputPolicy: inputPolicyOf(policy.policy),
       stall: policy.policy.stallSweep ?? DEFAULT_STALL_SWEEP,
       reviewRoundCap: strictReviewRoundCap(policy.policy),
     },

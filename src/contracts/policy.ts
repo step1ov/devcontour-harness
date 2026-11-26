@@ -13,7 +13,12 @@ import {
   trimmedText,
 } from './primitives.ts';
 import { digestOf } from './digest.ts';
-import { DEFAULT_INPUT_POLICY, inputPolicySchema, type InputPolicy } from './input.ts';
+import {
+  DEFAULT_INPUT_POLICY,
+  inputPolicySchema,
+  LIGHT_LEAD_TECHNICAL_AREAS,
+  type InputPolicy,
+} from './input.ts';
 import type { CodedIssue, ErrorCode } from './errors.ts';
 import { toolchainPinSchema, toolchainSchema } from './toolchain.ts';
 import { gateArtifactLimits } from './result.ts';
@@ -856,8 +861,42 @@ export const isolationDigest = (policy: ExecutionPolicy) =>
  * правило исполнителя, а не условие исполнения кода: как и `stallSweep`, он
  * не входит в `executionDigest`, а попытка закрепляет его при выдаче.
  */
-export const inputPolicyOf = (policy: Pick<ExecutionPolicy, 'inputPolicy'>): InputPolicy =>
-  policy.inputPolicy ?? DEFAULT_INPUT_POLICY;
+export const inputPolicyOf = (
+  policy: Pick<ExecutionPolicy, 'inputPolicy'> & { harnessMode?: HarnessMode | undefined },
+): InputPolicy => {
+  const input = policy.inputPolicy ?? DEFAULT_INPUT_POLICY;
+  if (harnessModeOf(policy) !== 'light') return input;
+  // Облегчённый режим (alpha.72, P9-1): без явного правила технические
+  // вопросы исполнителя решает ведущий с причиной; явное правило главнее,
+  // `technical: false` — отказ. Технический вопрос о внутреннем договоре или
+  // программном интерфейсе остаётся у ведущего и с самооценкой 10.
+  const lead = input.leadAnswers;
+  if (lead === undefined)
+    return {
+      ...input,
+      leadAnswers: { technical: true, technicalAreas: [...LIGHT_LEAD_TECHNICAL_AREAS] },
+    };
+  if (lead.technical === true && !('technicalAreas' in lead && lead.technicalAreas))
+    return {
+      ...input,
+      leadAnswers: { ...lead, technical: true, technicalAreas: [...LIGHT_LEAD_TECHNICAL_AREAS] },
+    };
+  return input;
+};
+
+/**
+ * Откуда правило ответов ведущего: `policy` — поле `inputPolicy.leadAnswers`;
+ * `light-default` — умолчание облегчённого режима (alpha.72); `default` —
+ * поля нет, строгий режим: блокирующие вопросы — человеку.
+ */
+export const leadAnswersSourceOf = (
+  policy: Pick<ExecutionPolicy, 'inputPolicy'> & { harnessMode?: HarnessMode | undefined },
+): 'policy' | 'light-default' | 'default' =>
+  policy.inputPolicy?.leadAnswers !== undefined
+    ? 'policy'
+    : harnessModeOf(policy) === 'light'
+      ? 'light-default'
+      : 'default';
 
 export { DEFAULT_RECOVERY, recoveryPolicyOf, type RecoveryPolicy } from './decision-rules.ts';
 

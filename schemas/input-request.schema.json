@@ -336,6 +336,31 @@
                     "technical": {
                       "type": "boolean",
                       "const": true
+                    },
+                    "technicalAreas": {
+                      "maxItems": 3,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "enum": [
+                          "contract",
+                          "api",
+                          "migration"
+                        ]
+                      }
+                    }
+                  },
+                  "required": [
+                    "technical"
+                  ],
+                  "additionalProperties": false
+                },
+                {
+                  "type": "object",
+                  "properties": {
+                    "technical": {
+                      "type": "boolean",
+                      "const": false
                     }
                   },
                   "required": [
