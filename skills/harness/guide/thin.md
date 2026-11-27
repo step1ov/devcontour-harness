@@ -48,7 +48,8 @@ a UI work needs the API or SDK contract, not another UI work. Shared test
 infrastructure (browser config, fixtures, env helpers) belongs to the
 earliest contract work or one small work of its own. A check across two
 surfaces is the release's job. `plan-check` advises `THIN_CHAIN` (3+ works in
-one chain although some write scopes are disjoint) and `THIN_SCOPE_OVERLAP`
+one chain where some `dependsOn` link shares neither a write scope nor a
+declared contract: check whether that work really depends on the other) and `THIN_SCOPE_OVERLAP`
 (works that can run in parallel own overlapping write scopes). Give heavy
 gates timeout headroom. Plan review and approval work as in
 `guide review`.
