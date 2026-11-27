@@ -10,7 +10,9 @@ import {
   type ContextSnapshot,
   type ContractDocument,
   type ExecutionPolicy,
+  type WorkOrder,
 } from '../contracts/index.ts';
+import { pathsOverlap } from '../contracts/policy.ts';
 import {
   planDraftSchema,
   type CheckGap,
@@ -176,24 +178,76 @@ export function planCheck(
   if (invalid.length) return refused(invalid, checkPlan, basis);
 
   // 8. Граф без согласования: дальше review-plan/approve/run.
-  const advice = thinAdvice(input.policy, graph.orders.length);
+  const advice = thinAdvice(input.policy, graph.orders);
   return {
     issues: [],
     checkPlan: [],
     graph,
     graphDigest: workGraphDigest(graph),
     ...(basis === undefined ? {} : { basis }),
-    ...(advice ? { advice: [advice] } : {}),
+    ...(advice.length ? { advice } : {}),
   };
 }
 
-/** Совет тонкого режима: работ на фичу 3–5 (`THIN_TASK_SIZE_SECTION`). */
-export function thinAdvice(policy: ExecutionPolicy, works: number): string | undefined {
-  if (harnessModeOf(policy) !== 'thin') return undefined;
-  if (works >= THIN_TASKS.min && works <= THIN_TASKS.max) return undefined;
-  return works < THIN_TASKS.min
-    ? `THIN_PLAN_SIZE: работ ${works} — меньше ${THIN_TASKS.min}: крупная работа даёт большой diff для одного ревью; разделите по репозиториям или независимым сценариям`
-    : `THIN_PLAN_SIZE: работ ${works} — больше ${THIN_TASKS.max}: в тонком режиме работа — сценарий целиком через слои; объедините работы одного сценария`;
+/**
+ * Советы тонкого режима (не отказ): работ на фичу 3–5 (`THIN_TASK_SIZE_SECTION`);
+ * цепочка из 3+ работ, хотя у некоторых области записи не пересекаются
+ * (`THIN_CHAIN`: параллельно не идёт ничего); работы без пути между ними
+ * (идут одновременно) пишут в пересекающиеся области (`THIN_SCOPE_OVERLAP`).
+ */
+export function thinAdvice(
+  policy: ExecutionPolicy,
+  orders: readonly Pick<WorkOrder, 'id' | 'repositoryId' | 'writeScope' | 'dependsOn'>[],
+): string[] {
+  if (harnessModeOf(policy) !== 'thin') return [];
+  const out: string[] = [];
+  const works = orders.length;
+  if (works < THIN_TASKS.min)
+    out.push(
+      `THIN_PLAN_SIZE: работ ${works} — меньше ${THIN_TASKS.min}: крупная работа даёт большой diff для одного ревью; разделите по репозиториям или независимым сценариям`,
+    );
+  if (works > THIN_TASKS.max)
+    out.push(
+      `THIN_PLAN_SIZE: работ ${works} — больше ${THIN_TASKS.max}: в тонком режиме работа — сценарий целиком через слои; объедините работы одного сценария`,
+    );
+  // Достижимость по dependsOn (граф уже проверен: ацикличен, ссылки целы).
+  const byId = new Map(orders.map((o) => [o.id, o]));
+  const above = new Map<string, Set<string>>();
+  const ancestors = (id: string): Set<string> => {
+    const known = above.get(id);
+    if (known) return known;
+    const set = new Set<string>();
+    above.set(id, set);
+    for (const dep of byId.get(id)?.dependsOn ?? []) {
+      set.add(dep);
+      ancestors(dep).forEach((x) => set.add(x));
+    }
+    return set;
+  };
+  const related = (a: string, b: string) => ancestors(a).has(b) || ancestors(b).has(a);
+  const overlap = (a: (typeof orders)[number], b: (typeof orders)[number]) =>
+    a.repositoryId === b.repositoryId &&
+    a.writeScope.some((x) =>
+      b.writeScope.some((y) => x === '.' || y === '.' || pathsOverlap(x, y)),
+    );
+  const pairs = orders.flatMap((a, i) => orders.slice(i + 1).map((b) => [a, b] as const));
+  // Цепочка: каждая пара работ связана путём — порядок единственный.
+  if (works >= 3 && pairs.every(([a, b]) => related(a.id, b.id))) {
+    const disjoint = pairs.find(([a, b]) => !overlap(a, b));
+    if (disjoint) {
+      const chain = [...orders].sort((a, b) => ancestors(a.id).size - ancestors(b.id).size);
+      out.push(
+        `THIN_CHAIN: работы идут одной цепочкой (${chain.map((o) => o.id).join(' → ')}), параллельно не выполнится ничего, хотя области записи ${disjoint[0].id} и ${disjoint[1].id} не пересекаются. Оставьте dependsOn только там, где работа использует интерфейс сборки или исполнения другой (UI — контракт API или SDK, а не другой UI); общую тестовую инфраструктуру отдайте ранней работе контракта, сквозную проверку двух поверхностей — выпуску`,
+      );
+    }
+  }
+  for (const [a, b] of pairs)
+    if (!related(a.id, b.id) && overlap(a, b))
+      out.push(
+        `THIN_SCOPE_OVERLAP: работы ${a.id} и ${b.id} могут идти одновременно (пути между ними в dependsOn нет), но их области записи пересекаются: ${a.writeScope.join(', ')} и ${b.writeScope.join(', ')}. Общие файлы отдайте одной работе (ранней работе контракта или отдельной маленькой работе, от которой зависят обе) либо свяжите работы, если одна правда использует другую`,
+      );
+  // Предел схемы ответа: 10 советов по 1000 символов.
+  return out.slice(0, 10).map((t) => t.slice(0, 1000));
 }
 
 /** Ответ с проблемами: графа нет; checkPlan — только рядом с issues. */
