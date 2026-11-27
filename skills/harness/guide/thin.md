@@ -95,10 +95,12 @@ not counted.
 As in `guide release`: `$H review-release --state <state>` runs the full
 gates on a clean checkout of the target head and the release review against
 the brief, the owner's answers and the failure paths. The review lists every
-blocker in one round and checks the documentation against the target.
+blocker in one round and checks the documentation against the target
+(blocking with `release.docs: required`, a note with the default `advisory`).
 Findings become one fixes work that goes through the same thin flow. When
 the release has a docs step, that fixes work updates the docs too and you
-name it the docs work (`--docs-work <fix-id>`); no separate docs work. Then
+name it the docs work (`--docs-work <fix-id>`, the label alone is not
+enough); no separate docs work for the roots of its repository. Then
 `release done`.
 
 ### What thin mode does NOT have

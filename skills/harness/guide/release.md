@@ -119,10 +119,13 @@ The lead session rules (`lead begin`, roles of your commands, notes) are in
   `review-release` again on the new target.
   With a release docs step (`release.docs`), let that fix work also update
   the documentation its changes affect, and name it the docs work
-  (`--docs-work <fix-id>` on `review-release` and `release done`, or the
-  `docs` label). A work started after the other works were accepted counts
-  as after them, so no separate docs work is needed. In thin mode the release
-  review itself checks the documentation against the target.
+  (`--docs-work <fix-id>` on `review-release` and `release done`). A work
+  named this way and started after the other works of its repository were
+  accepted counts as after them, so no separate docs work is needed; the
+  `docs` label alone does not do this, and a root in another repository
+  still needs its own docs work. In thin mode the release
+  review itself checks the documentation against the target (stale docs
+  block the round with `release.docs: required`, a note with `advisory`).
   If `review-release` prints `BRIEF_MISSING`, the release has no brief.
   There is no `.harness/work/<graph-id>.brief.md` next to a registered
   graph, and no brief document (a required task-source document, or one
