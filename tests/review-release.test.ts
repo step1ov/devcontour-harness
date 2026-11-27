@@ -44,6 +44,7 @@ import { cliAdapter } from '../src/agents/cli-adapter.ts';
 import { releaseDone } from '../src/control/lead.ts';
 import {
   FAILURE_PATHS_RELEASE_TEXT,
+  PLAIN_CHECKOUT_RELEASE_TEXT,
   RELEASE_REVIEW_COMPLETENESS_TEXT,
 } from '../src/engine/prompt.ts';
 import {
@@ -269,6 +270,10 @@ test('P7-6: review-release — договор выпуска в запросе: 
   assert.ok(prompt.includes(RELEASE_REVIEW_COMPLETENESS_TEXT), 'полнота раунда выпуска');
   assert.match(RELEASE_REVIEW_COMPLETENESS_TEXT, /ALL blocking findings/);
   assert.match(RELEASE_REVIEW_COMPLETENESS_TEXT, /do not stop at the first blocker/);
+  // alpha.75 (P11-6): документированные проверки проекта — в обычном checkout.
+  assert.ok(prompt.includes(PLAIN_CHECKOUT_RELEASE_TEXT), 'обычный checkout без harness');
+  assert.match(PLAIN_CHECKOUT_RELEASE_TEXT, /plain checkout without harness variables/);
+  assert.match(PLAIN_CHECKOUT_RELEASE_TEXT, /is a blocking finding/);
   // (a) постановки и критерии приёмки
   assert.match(prompt, /Add a greeting function/);
   assert.match(prompt, /greet\('Ada'\) returns 'Hello, Ada!'/);

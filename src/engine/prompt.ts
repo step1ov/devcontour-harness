@@ -213,6 +213,24 @@ export const ATTEMPT_ENV_WRITER_TEXT =
   'The attempt environment file (HARNESS_ATTEMPT_ENV_FILE, attempt-env.json) is read-only: read it, never write it — writing it fails with EPERM. A test that needs a modified version copies it to its own temporary file and points HARNESS_ATTEMPT_ENV_FILE at the copy for that test.';
 
 /**
+ * Выходы проверок исполнителя (alpha.75, P11-5): отчёты, трассы и снимки
+ * экрана его самопроверки — не часть изменения.
+ */
+export const GATE_OUTPUTS_WRITER_TEXT =
+  'Outputs of the checks you run (test reports, traces, screenshots, runner caches) are not part of your change: do not commit them and do not add them to the change. The harness leaves new files under the report and artifact paths declared for the gates out of the candidate; any other such file outside the write scope fails the handover as a scope violation — delete it or keep it ignored.';
+
+/**
+ * Проверки проекта без harness (alpha.75, P11-6): тест продукта, которому
+ * нужен файл окружения попытки, падал в обычном checkout (`pnpm test`).
+ */
+export const PLAIN_CHECKOUT_WRITER_TEXT =
+  'Product tests and their helpers must also run in a plain checkout without the harness: HARNESS_ATTEMPT_ENV_FILE and other harness variables are optional. Read the same values from plain environment variables (with the documented defaults), or provision what is missing or skip with a clear message naming the variable; never fail only because a harness variable or file is absent.';
+
+/** Тот же пункт reviewer выпуска: документированные проверки проекта — в обычном checkout. */
+export const PLAIN_CHECKOUT_RELEASE_TEXT =
+  "Plain checkout: the project's own documented checks (README, package scripts such as the test script) must pass in a plain checkout without harness variables (HARNESS_ATTEMPT_ENV_FILE and the like). A test or helper of this release that fails or refuses to run only because a harness variable or file is missing is a blocking finding; name the file and the variable.";
+
+/**
  * Тестовые секреты попытки (alpha.72, P9-1): их значения даёт harness —
  * исполнитель не спрашивает, откуда их взять, и не придумывает постоянных.
  */
@@ -281,6 +299,8 @@ export function prompt(input: {
     'Gates that prove this work: ' + JSON.stringify(input.gates),
     review ? '' : WRITER_SELF_CHECK_TEXT,
     review ? '' : ATTEMPT_ENV_WRITER_TEXT,
+    review ? '' : GATE_OUTPUTS_WRITER_TEXT,
+    review ? '' : PLAIN_CHECKOUT_WRITER_TEXT,
     review ? FAILURE_PATHS_REVIEW_TEXT : FAILURE_PATHS_WRITER_TEXT,
     (review && input.findings
       ? 'Historical attempt errors and gate observations (diagnostic context only). Only controller-issued ids in the review findings sections below may appear in `previous`; do not derive ids from this history: '

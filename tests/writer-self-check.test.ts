@@ -7,6 +7,8 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
   ATTEMPT_ENV_WRITER_TEXT,
+  GATE_OUTPUTS_WRITER_TEXT,
+  PLAIN_CHECKOUT_WRITER_TEXT,
   FAILURE_PATHS_RELEASE_TEXT,
   FAILURE_PATHS_REVIEW_TEXT,
   FAILURE_PATHS_WRITER_TEXT,
@@ -69,6 +71,19 @@ test('writer: подсказка называет команды и cwd gates о
   assert.match(ATTEMPT_ENV_WRITER_TEXT, /attempt-env\.json\) is read-only/);
   assert.match(ATTEMPT_ENV_WRITER_TEXT, /copies it to its own temporary file/);
   assert.ok(!reviewer.includes(ATTEMPT_ENV_WRITER_TEXT));
+  // alpha.75 (P11-5, P11-6): выходы проверок не коммитятся; тесты продукта —
+  // и в обычном checkout без переменных harness.
+  assert.ok(head.includes(GATE_OUTPUTS_WRITER_TEXT), 'выходы проверок не в изменении');
+  assert.match(GATE_OUTPUTS_WRITER_TEXT, /do not commit them/);
+  assert.match(GATE_OUTPUTS_WRITER_TEXT, /declared for the gates out of the candidate/);
+  assert.ok(head.includes(PLAIN_CHECKOUT_WRITER_TEXT), 'тесты продукта без harness');
+  assert.match(PLAIN_CHECKOUT_WRITER_TEXT, /plain checkout without the harness/);
+  assert.match(
+    PLAIN_CHECKOUT_WRITER_TEXT,
+    /HARNESS_ATTEMPT_ENV_FILE and other harness variables are optional/,
+  );
+  assert.ok(!reviewer.includes(GATE_OUTPUTS_WRITER_TEXT));
+  assert.ok(!reviewer.includes(PLAIN_CHECKOUT_WRITER_TEXT));
   ctx.store.close();
 });
 
