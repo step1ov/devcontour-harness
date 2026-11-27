@@ -544,3 +544,26 @@ test('договор CLI: нарушение схемы — INTERNAL с путя
   })();
   assert.ok(thrown instanceof z.ZodError, 'то, что бросает .parse, распознаёт CLI');
 });
+
+test('alpha.76: tasks[].regressionGates коннектора переносятся в поручение; без поля поручение прежнее', async () => {
+  const s = await scenario(fakeSuiteBackend());
+  try {
+    const open = (cfg: Record<string, unknown>) =>
+      openConnector(parseConfig(structuredClone(cfg), s.root), {
+        stateDir: s.state,
+        transport: s.project.transport(),
+      });
+    const plain = await open(s.config);
+    const before = await plain.source.snapshot();
+    plain.close();
+    assert.ok(!('regressionGates' in before.graph.orders[0]!), 'без поля — прежнее поручение');
+    const cfg = structuredClone(s.config) as Record<string, unknown>;
+    (cfg.tasks as Record<string, unknown>[])[0]!.regressionGates = ['unit'];
+    const withRegression = await open(cfg);
+    const after = await withRegression.source.snapshot();
+    withRegression.close();
+    assert.deepEqual(after.graph.orders[0]!.regressionGates, ['unit']);
+  } finally {
+    await s.cleanup();
+  }
+});
