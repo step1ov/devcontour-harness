@@ -287,7 +287,7 @@ test('L5: gate свойства — своя проверка поручения
   const order = { id: 'w', properties: ['p-legacy'], gates: ['install', 'unit'], requirements: [] };
   const configured = policy().repositories[0]!.gates;
   const problems = (regression?: string[]) =>
-    orderPropertyProblems(order as never, contracts as never, {
+    orderPropertyProblems(order, contracts as never, {
       configured,
       ...(regression ? { regression } : {}),
     });
