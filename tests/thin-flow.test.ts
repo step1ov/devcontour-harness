@@ -17,6 +17,7 @@ import { Engine } from '../src/engine/engine.ts';
 import { Runner } from '../src/engine/runner.ts';
 import { standaloneHost } from '../src/engine/standalone.ts';
 import { SqliteExecutionStore } from '../src/storage/sqlite.ts';
+import { resumePrompt } from '../src/thin/prompt.ts';
 import { hsetup } from './harness-fixture.ts';
 import { approve, bin, greet, implement, runAll, setup } from './runner-fixture.ts';
 
@@ -557,6 +558,34 @@ test('P11-5: убранные выходы gates названы в продол�
     reviews.find((r) => r.includes('Base commit')) ?? reviews.join('\n'),
     /kept these new files out of the candidate as outputs of the writer's own gate runs, so they are not in the diff: "test-results\/junit\.xml"\./,
   );
+});
+
+test('ревью M3: отказ областью при открытых находках или провале gates — продолжение требует исправить всё и прогнать gates', () => {
+  const scope = { paths: ['docs/notes.md'], base: 'a'.repeat(40) };
+  const finding = {
+    id: 'F-1',
+    severity: 'high',
+    message: 'greet ignores the name',
+    path: 'src/greet.js',
+    line: 1,
+    status: 'open',
+    origin: { runId: 'r1', phase: 'integration', sha: 'b'.repeat(40), round: 1 },
+  };
+  const findings = { scope: 'app/add-greeting', round: 1, findings: [finding] } as any;
+  const fixAll = /Fix every point above, rerun your gates in this worktree until they pass/;
+  assert.match(
+    resumePrompt({ scope }),
+    /rerun them if code inside the write scope uses any removed path/,
+  );
+  assert.doesNotMatch(resumePrompt({ scope }), fixAll);
+  for (const extra of [{ findings }, { feedback: 'Gate unit failed: 1 test' }]) {
+    const text = resumePrompt({ scope, ...extra });
+    assert.match(text, fixAll);
+    assert.doesNotMatch(text, /You do not need to rerun the gates/);
+  }
+  // Закрытые находки — не повод гонять gates заново.
+  const closed = { ...findings, findings: [{ ...finding, status: 'closed' }] };
+  assert.doesNotMatch(resumePrompt({ scope, findings: closed }), fixAll);
 });
 
 test('R1: отказ только областью — продолжение называет пути и не требует гонять gates заново', async () => {

@@ -79,11 +79,21 @@ export function scopeText(s: { paths: string[]; base: string }): string {
 
 /** Последняя строка продолжения после отказа только областью: gates заново не нужны. */
 export const SCOPE_ONLY_TEXT =
-  'You do not need to rerun the gates for this: rerun them only if you change code inside the write scope. Then hand back with the same JSON response format (completed=true).';
+  'You do not need to rerun the gates for this: rerun them if code inside the write scope uses any removed path. Then hand back with the same JSON response format (completed=true).';
 
-/** Отказ только областью, и других поводов гонять gates заново нет. */
+/**
+ * Отказ только областью, и других поводов гонять gates заново нет: ни
+ * открытых находок, ни провала gates, ни ответа, слияния, отказа подготовки
+ * или разбора ведущего.
+ */
 const scopeOnly = (d: ThinDelta) =>
-  d.scope && !d.merged && !d.setupError && !d.answer && !d.diagnosis;
+  d.scope &&
+  !d.merged &&
+  !d.setupError &&
+  !d.answer &&
+  !d.diagnosis &&
+  !d.feedback &&
+  !d.findings?.findings.some((f) => f.status === 'open');
 
 const deltaParts = (d: ThinDelta) => [
   d.reason
