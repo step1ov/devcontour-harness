@@ -254,6 +254,7 @@ import {
   type GateFeedback,
 } from './gate-feedback.ts';
 import { scopeViolations } from './scope.ts';
+import { dropGateOutputs, gateOutputPaths } from '../verification/gate-outputs.ts';
 import { generatorNote, runGenerators, selectGenerators } from '../verification/generators.ts';
 import {
   contractDocuments,
@@ -2385,6 +2386,11 @@ export class Runner {
                     // Index — заново от базы: флаги index исполнителя не прячут изменения.
                     await resetIndex(meta, base);
                     await git(cwd, 'add', '-A');
+                    // Выходы gates, которые исполнитель гонял сам (P11-5):
+                    // новые файлы под объявленными путями отчётов и
+                    // артефактов в кандидата не идут.
+                    const outputs = gateOutputPaths(repo.gates);
+                    const left = new Set(await dropGateOutputs(cwd, outputs, base));
                     const changed = (
                       await git(cwd, 'diff', '--cached', '--no-renames', '--name-only', '-z')
                     )
@@ -2444,7 +2450,13 @@ export class Runner {
                         signal,
                         artifacts,
                       });
+                      for (const p of await dropGateOutputs(cwd, outputs, base)) left.add(p);
                     }
+                    if (left.size)
+                      await writeFile(
+                        join(dir, 'gate-outputs.json'),
+                        JSON.stringify({ outputs, dropped: [...left].sort() }, null, 2),
+                      );
                     // Пустой результат — не отказ сразу: приёмку могла уже
                     // выполнить зависимость. Кандидат — сама база (без
                     // коммита); gates задачи на ней и подтверждение reviewer

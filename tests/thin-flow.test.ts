@@ -9,6 +9,7 @@
 import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { cliAdapter } from '../src/agents/cli-adapter.ts';
@@ -485,4 +486,38 @@ test('P11-3: CLI ревьюера упал без ревью (таймаут п�
   const [first, second] = ctx.attempts();
   assert.equal(first!.failureKind, 'environment', first!.error);
   assert.equal(second!.status, 'succeeded', second!.error);
+});
+
+test('P11-5: отчёты и артефакты gates, которые исполнитель гонял сам, не идут в кандидата и не нарушают область', async () => {
+  const ctx = thin({
+    maxAttempts: 1,
+    policy: (p: any) => {
+      p.repositories[0].gates[0].artifacts = ['playwright-report'];
+    },
+    scenario: {
+      writer: rec(
+        implement({
+          'src/greet.js': greet,
+          'test-results/junit.xml': '<testsuite/>\n',
+          'playwright-report/data/trace.zip': 'zip\n',
+        }),
+      ),
+      reviewer: approve(),
+    },
+  });
+  await ctx.run();
+  const [a] = ctx.attempts();
+  assert.equal(a!.status, 'succeeded', a!.error);
+  const files = ctx.repo.git('ls-tree', '-r', '--name-only', a!.integrationSha!).split('\n');
+  assert.ok(files.includes('src/greet.js'));
+  assert.ok(
+    !files.some((f) => f.startsWith('test-results/') || f.startsWith('playwright-report/')),
+  );
+  const log = execFileSync('find', [ctx.state, '-name', 'gate-outputs.json'], { encoding: 'utf8' })
+    .trim()
+    .split('\n')[0]!;
+  assert.deepEqual(JSON.parse(readFileSync(log, 'utf8')).dropped, [
+    'playwright-report/data/trace.zip',
+    'test-results/junit.xml',
+  ]);
 });
