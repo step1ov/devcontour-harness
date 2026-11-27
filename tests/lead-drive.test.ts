@@ -1087,13 +1087,12 @@ test('ревью P10-8: метка ревью появилась после ко
   ready(env.engine, graphOf({ a: [] }));
   const a = env.engine.claim('c1')!;
   accept(env.engine, a.id, a.token);
-  let unmark: (() => void) | undefined;
   const { dir, promise } = driveOf(env, { mode: 'wait-go' }, { idleSessions: 2, graceMs: 600 });
   await sessionRecord(dir, 1);
   go(dir, 1);
   // Сессия закончилась; метку ревью фоновый процесс ставит чуть позже.
   await new Promise((r) => setTimeout(r, 200));
-  unmark = markReleaseReview(env.dir);
+  const unmark = markReleaseReview(env.dir);
   await new Promise((r) => setTimeout(r, 1200));
   assert.deepEqual(sessionFiles(dir).length, 1, 'пока ревью идёт — второй сессии нет');
   unmark();
