@@ -102,6 +102,8 @@ test('Изменение каждого поля поручения меняет
     // alpha.70: метки работы и источники критериев ведущего.
     labels: (o) => (o.labels = ['security']),
     criteriaSources: (o) => (o.criteriaSources = [{ criterion: 0, kind: 'brief', ref: '§1' }]),
+    // alpha.76 (R3): регрессионные gates — проверки цели после ревью.
+    regressionGates: (o) => (o.regressionGates = ['e2e']),
   };
   const fields = Object.keys(workGraphSchema.shape.orders.element.shape).filter(
     (k) => k !== 'apiVersion',

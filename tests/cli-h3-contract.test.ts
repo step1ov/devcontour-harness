@@ -585,6 +585,15 @@ test('H3-01: прежние команды и схемы их данных не 
       if ('retryPlanned' in o && 'evidence' in o && 'phase' in o) delete o.reference;
       if (Object.keys(o).length !== before) v = o;
     }
+    // alpha.76 (R3): необязательные регрессионные gates поручения. Аддитивно:
+    // без поля поручение и digest его области прежние, старые данные читаются
+    // как раньше; новое поле объявляет проверка ниже.
+    if (k === 'properties' && v && typeof v === 'object') {
+      const o = { ...(v as Record<string, unknown>) };
+      const before = Object.keys(o).length;
+      if ('writeScope' in o && 'context' in o && 'contracts' in o) delete o.regressionGates;
+      if (Object.keys(o).length !== before) v = o;
+    }
     // alpha.72 (P9-3): кто поставил паузу — `control.pausedBy` и `by` события
     // `control.paused`.
     if (k === 'properties' && v && typeof v === 'object') {
@@ -1017,6 +1026,8 @@ test('H3-01: прежние команды и схемы их данных не 
   );
   // Хеш H2 вырезает поля переноса evidence кандидата: объявление держит эта проверка.
   assert.ok(JSON.stringify(data).includes('"reused"'), 'gates.reused попытки');
+  // Хеш H2 вырезает регрессионные gates поручения (alpha.76): объявление держит эта проверка.
+  assert.ok(JSON.stringify(data).includes('"regressionGates"'), 'поручение: regressionGates');
   assert.ok(JSON.stringify(data).includes('"reusedFrom"'), 'attempt.gate.reusedFrom');
   assert.ok(JSON.stringify(data).includes('"reusedEvidence"'), 'evidence.reusedEvidence');
   // Хеш H2 вырезает target status и result (0.1.0-alpha.54): объявление держит эта проверка.
