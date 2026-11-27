@@ -107,8 +107,15 @@ the driver appends the event summary. The driver keeps a digest of the goals
 in the state (`lead-drive-goals.json`). When you restart it with changed
 goals (owner answers, new instructions), or with no record on a state that
 already has works, the first session gets them at once: if nothing else
-waits for the lead, the driver starts one `goals-changed` session before
-waiting for events. The same goals start no extra session. Each session is new, so the context
+waits for the lead (or the waiting event turns out to need no session: the
+question is already answered or closed, the stop is gone, the step is the
+owner's), the driver starts one `goals-changed` session before waiting for
+events. The goals count as delivered only after a session that exits 0 (or
+records a lead decision); a session that fails or is stopped by
+`--session-timeout` leaves them new for the next start. The same goals start
+no extra session. New goals are not delivered when the driver exits first:
+after `release done` (exit at once) and on an operator pause (`owner`
+exit) — resume the run or start the next release, then restart the driver. Each session is new, so the context
 stays small; the agent gets `HARNESS_LEAD_DRIVE=1`,
 `HARNESS_LEAD_DRIVE_CURSOR`, `HARNESS_LEAD_DRIVE_SESSION` and
 `HARNESS_LEAD_DRIVE_EVENT`, runs in its own process group, and its stdout

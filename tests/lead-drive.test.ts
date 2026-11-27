@@ -1189,3 +1189,83 @@ test('P10-3: новые цели при отказе, который ждёт в
   );
   env.store.close();
 });
+
+test('ревью a74 M1: сессия goals-changed упала или снята по --session-timeout — цели не записаны, следующий запуск снова их передаёт', async () => {
+  const env = engineOf(policyOf((p: Record<string, unknown>) => (p.maxAttempts = 3)));
+  ready(env.engine, graphOf({ a: [], b: [] }));
+  env.engine.claim('c1');
+  env.engine.claim('c1');
+  const goalsFile = join(env.dir, 'lead-drive-goals.json');
+  const run = async (options: Parameters<typeof driveOf>[1], extra = {}) => {
+    const abort = new AbortController();
+    const { promise } = driveOf(
+      env,
+      { goalsRecord: false, ...options },
+      { signal: abort.signal, ...extra },
+    );
+    setTimeout(() => abort.abort(), 1500);
+    return promise;
+  };
+  const failed = await run({ code: 1 });
+  assert.deepEqual(
+    failed.sessions.map((x) => [x.kind, x.exitCode]),
+    [['goals-changed', 1]],
+  );
+  assert.ok(!existsSync(goalsFile), 'сессия с кодом 1 — цели не считаются доставленными');
+  const killed = await run({ mode: 'hang' }, { sessionTimeoutMs: 300, killGraceMs: 200 });
+  assert.equal(killed.sessions[0]?.kind, 'goals-changed');
+  assert.equal(killed.sessions[0]?.timedOut, true);
+  assert.ok(!existsSync(goalsFile), 'снятая сессия — цели не считаются доставленными');
+  const ok = await run({});
+  assert.deepEqual(
+    ok.sessions.map((x) => x.kind),
+    ['goals-changed'],
+  );
+  assert.ok(existsSync(goalsFile), 'сессия с кодом 0 — цели записаны');
+  env.store.close();
+});
+
+test('ревью a74 M2: событие первого ожидания пропущено (ответ ведущего уже записан) — новые цели всё равно доходят сессией goals-changed', async () => {
+  const env = engineOf(
+    policyOf(
+      (p: Record<string, unknown>) =>
+        (p.inputPolicy = { threshold: 7, leadAnswers: { maxSeverity: 10 } }),
+    ),
+  );
+  ready(env.engine, graphOf({ a: [], b: [] }));
+  const x = env.engine.claim('c1')!;
+  env.engine.claim('c1');
+  env.engine.fail(x.id, x.token, 'вопрос', { kind: 'needs-input', input: questionOutcome() });
+  const request = env.engine.read((v) => v.locals('input-requests'))[0]!.value;
+  // Ведущий уже ответил сам: применить ответ — его шаг, но драйвер такой вопрос пропускает.
+  env.engine.answerInput(
+    request.id,
+    { text: 'Hello', optionId: 'hello', actor: { kind: 'lead' }, reason: 'технический выбор' },
+    request.version,
+  );
+  const abort = new AbortController();
+  const { dir, promise } = driveOf(env, { goalsRecord: false }, { signal: abort.signal });
+  setTimeout(() => abort.abort(), 1500);
+  const data = await promise;
+  assert.deepEqual(
+    data.sessions.map((s) => s.kind),
+    ['goals-changed'],
+  );
+  assert.equal((await sessionRecord(dir, 1)).env.HARNESS_LEAD_DRIVE_EVENT, 'goals-changed');
+  env.store.close();
+});
+
+test('ревью a74 L2: запись целей атомарна — без временных файлов, права 0600 и при замене прежней записи', () => {
+  const env = engineOf();
+  const file = join(env.dir, 'lead-drive-goals.json');
+  writeFileSync(file, JSON.stringify({ digest: 'old' }) + '\n', { mode: 0o644 });
+  chmodSync(file, 0o644);
+  rememberDriveGoals(env.dir, GOALS);
+  assert.equal(statSync(file).mode & 0o777, 0o600);
+  assert.notEqual((JSON.parse(readFileSync(file, 'utf8')) as { digest: string }).digest, 'old');
+  assert.deepEqual(
+    readdirSync(env.dir).filter((f) => f.startsWith('lead-drive-goals') && f.endsWith('.tmp')),
+    [],
+  );
+  env.store.close();
+});

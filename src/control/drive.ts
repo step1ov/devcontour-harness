@@ -35,7 +35,7 @@
 // владельца в целях не ждут следующего отказа. Те же цели — сессии нет.
 
 import { spawn } from 'node:child_process';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   chmodSync,
   closeSync,
@@ -44,6 +44,7 @@ import {
   mkdtempSync,
   openSync,
   readFileSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -115,11 +116,19 @@ export function rememberDriveGoals(stateDir: string, goals: string) {
   if (!existsSync(stateFile(stateDir))) return;
   const digest = goalsDigest(goals);
   if (recordedGoals(stateDir) === digest) return;
-  writeFileSync(
-    goalsFile(stateDir),
-    JSON.stringify({ digest, at: new Date().toISOString() }) + '\n',
-    { mode: 0o600 },
-  );
+  // Атомарно: прерванная запись не оставит половину файла (её прочли бы как «целей нет»).
+  const file = goalsFile(stateDir);
+  const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(temp, JSON.stringify({ digest, at: new Date().toISOString() }) + '\n', {
+      mode: 0o600,
+    });
+    chmodSync(temp, 0o600);
+    renameSync(temp, file);
+  } catch (error) {
+    rmSync(temp, { force: true });
+    throw error;
+  }
 }
 
 /**
@@ -887,6 +896,8 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
       let w: DriveWait;
       /** Событие выведено из состояния (очередь стоит, выпуск готов, ждущее), а не из нового события. */
       let level = false;
+      /** Первое ожидание: пропущенное событие уступает место сессии goals-changed. */
+      let firstPass = false;
       if (!existsSync(stateFile(input.stateDir))) {
         // Каталога состояния ещё нет: ведущий должен настроить и запустить run.
         w = {
@@ -900,6 +911,7 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
         // Первое ожидание: всё, что уже ждёт, — разом (вопрос владельца не
         // должен заслонить отказ, которого ждёт ведущий); дальше — по курсору.
         cursor = await startCursor();
+        firstPass = true;
         const pending = await scanPending(input, cursor);
         noticeOwner(pending.owner);
         pending.steps.forEach(noticeStep);
@@ -936,9 +948,20 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
         level = !w.event;
       }
       if (w.kind === 'aborted') return result('aborted', 'драйвер остановлен сигналом');
+      // Новые цели и пропуск события первого ожидания (вопрос уже закрыт,
+      // шаг только человека, остановка снята): сессия goals-changed сейчас,
+      // а не на следующем, постороннем событии.
+      const goalsInstead = () => firstPass && goalsNew;
+      const goalsWait = (at: number): DriveWait => ({
+        kind: 'goals-changed',
+        status: status(),
+        cursor: at,
+        waitedMs: 0,
+      });
       if (!WAKING.has(w.kind)) {
         if (w.kind === 'accepted') log(`принята ${w.workId ?? ''}; ${w.status}`);
-        continue;
+        if (!goalsInstead()) continue;
+        w = goalsWait(w.cursor);
       }
       // Шаг только человека у этой работы: уведомление, ждём дальше.
       const step = ownerStep(w.next);
@@ -948,7 +971,8 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
           action: w.next!.action,
           message: step,
         });
-        continue;
+        if (!goalsInstead()) continue;
+        w = goalsWait(w.cursor);
       }
       // Только что закончившаяся сессия могла запустить run или review-release
       // в фоне: их метка появится не сразу — `stopped` и `release-ready`
@@ -1018,8 +1042,9 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
       let mode: QuestionMode | undefined;
       if (w.kind === 'question') {
         const q = resolveQuestion(w);
-        if (q.skip) continue;
-        ({ request, mode } = q);
+        if (!q.skip) ({ request, mode } = q);
+        else if (goalsInstead()) w = goalsWait(w.cursor);
+        else continue;
       } else if ((w.kind === 'failed' || w.kind === 'held') && w.workId && w.event) {
         const fresh = await diagnoseState({
           stateDir: input.stateDir,
@@ -1031,7 +1056,8 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
         const now = d ? readState(input.stateDir, (view) => pendingKind(d, view)) : undefined;
         if (!now) {
           log(`${w.kind} ${w.workId}: остановка уже снята — ведущего не будим`);
-          continue;
+          if (!goalsInstead()) continue;
+          w = goalsWait(w.cursor);
         }
       }
       last = {
@@ -1126,11 +1152,6 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
         killGraceMs: input.killGraceMs ?? 10_000,
       });
       lastAgentEnd = Date.now();
-      // Цели дошли до ведущего с этой сессией (prompt начинается с них).
-      if (!run.error) {
-        goalsNew = false;
-        rememberDriveGoals(input.stateDir, input.goals);
-      }
       const waiting = readState(input.stateDir, waitingOwnerOf);
       if (waiting?.at && waiting.at !== waitingBefore) {
         ownerWait = waiting.plain ?? 'ведущий ждёт решения владельца';
@@ -1139,6 +1160,13 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
       const decided = decisions() !== before;
       const progressed = decided || ownerWait !== undefined;
       const failed = run.exitCode !== 0 || !!run.timedOut || !!run.error;
+      // Цели дошли до ведущего (prompt начинается с них), только если сессия
+      // закончилась сама с кодом 0 или ведущий принял решение: снятая по
+      // --session-timeout или упавшая сессия могла их не применить.
+      if (!failed || progressed) {
+        goalsNew = false;
+        rememberDriveGoals(input.stateDir, input.goals);
+      }
       // Ключ — на момент пробуждения: решение или событие за сессию его меняют.
       previous = { key, failed };
       sessions.push({
