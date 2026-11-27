@@ -21,7 +21,8 @@ import { draftToGraph } from '../src/index.ts';
 import { THIN_TASK_SIZE_SECTION } from '../src/planning/request.ts';
 import { validationIssues } from '../src/validate.ts';
 import { standaloneHost } from '../src/engine/standalone.ts';
-import { engineOf } from './engine-fixture.ts';
+import { engineOf, ready } from './engine-fixture.ts';
+import { orderPropertyProblems } from '../src/verification/checks.ts';
 import { example } from './fixtures.ts';
 
 /** Политика примера с gates install → unit, install → legacy и проверкой lint. */
@@ -48,19 +49,21 @@ const issues = (order: Record<string, unknown>) =>
 test('orderGateScope: без regressionGates — прежняя область; свои и регрессионные без повторов', () => {
   const repo = policy().repositories[0]!;
   const all = ['install', 'unit', 'legacy', 'lint'];
-  assert.deepEqual(orderGateScope(repo, {}), { own: all, regression: [] });
+  assert.deepEqual(orderGateScope(repo, {}), { required: all, own: all, regression: [] });
   assert.deepEqual(orderGateScope(repo, { gates: ['install', 'unit'] }), {
+    required: ['install', 'unit'],
     own: ['install', 'unit'],
     regression: [],
   });
-  // Без gates: своя область — все gates, кроме регрессионных.
+  // Без gates: своя область — все gates, кроме регрессионных; порядок — профиля.
   assert.deepEqual(orderGateScope(repo, { regressionGates: ['legacy'] }), {
+    required: all,
     own: ['install', 'unit', 'lint'],
     regression: ['legacy'],
   });
   assert.deepEqual(
     orderGateScope(repo, { gates: ['install', 'unit'], regressionGates: ['legacy', 'unit'] }),
-    { own: ['install', 'unit'], regression: ['legacy'] },
+    { required: ['install', 'unit', 'legacy'], own: ['install', 'unit'], regression: ['legacy'] },
   );
 });
 
@@ -180,4 +183,117 @@ test('удержание gate: регрессионный gate — тоже gate
     1,
   );
   store.close();
+});
+
+/**
+ * Профиль в режиме порядка массива (без `dependsOn`): install → build → e2e →
+ * unit. Неявные предпосылки (`gatePrerequisites`): каждый gate требует более
+ * ранних check gates.
+ */
+const arrayPolicy = () => {
+  const raw = structuredClone(example('policy')) as Record<string, any>;
+  const unit = raw.repositories[0].gates[0];
+  raw.repositories[0].gates = [
+    { id: 'install', kind: 'check', command: ['npm', 'ci'] },
+    { id: 'build', kind: 'check', command: ['npm', 'run', 'build'] },
+    { ...unit, id: 'e2e', report: { type: 'junit', path: 'e2e.xml' } },
+    unit,
+  ];
+  return executionPolicySchema.parse(raw);
+};
+
+test('M2: порядок области с regressionGates — порядок профиля; без gates ровно прежний', () => {
+  const repo = arrayPolicy().repositories[0]!;
+  // Регрессионный e2e стоит в профиле до unit: свои и регрессионные не склеиваются.
+  assert.deepEqual(orderGateScope(repo, { regressionGates: ['e2e'] }), {
+    required: ['install', 'build', 'e2e', 'unit'],
+    own: ['install', 'build', 'unit'],
+    regression: ['e2e'],
+  });
+  // Явные gates не в порядке профиля: вместе с регрессионными — порядок профиля.
+  assert.deepEqual(
+    orderGateScope(repo, { gates: ['unit', 'build', 'install'], regressionGates: ['e2e'] })
+      .required,
+    ['install', 'build', 'e2e', 'unit'],
+  );
+});
+
+test('M2: облегчённый и строгий режимы исполняют requiredGates попытки в прежнем порядке профиля', () => {
+  const p = arrayPolicy();
+  const { engine, store } = engineOf(p);
+  const raw = structuredClone(example('graph')) as Record<string, any>;
+  delete raw.orders[0].gates;
+  const before = (() => {
+    const { engine: e, store: s } = engineOf(p);
+    ready(e, workGraphSchema.parse(raw));
+    const gates = e.claim('c1')!.requiredGates;
+    s.close();
+    return gates;
+  })();
+  assert.deepEqual(before, ['install', 'build', 'e2e', 'unit']);
+  raw.orders[0].regressionGates = ['e2e'];
+  ready(engine, workGraphSchema.parse(raw));
+  const a = engine.claim('c1')!;
+  assert.deepEqual(a.requiredGates, before, 'тот же порядок, что без regressionGates');
+  assert.deepEqual(a.regressionGates, ['e2e']);
+  store.close();
+});
+
+test('M2: предпосылки своих gates — явные и неявные — не регрессионные; установка — не регрессионная', () => {
+  const arrayIssues = (order: Record<string, unknown>, p = arrayPolicy()) =>
+    validationIssues(graph(order), p).map((i) => `${i.path.join('.')}: ${i.message}`);
+  // install → build → unit → e2e: e2e — регрессионный, свои gates его не требуют.
+  const ordered = arrayPolicy();
+  const g = ordered.repositories[0]!.gates;
+  ordered.repositories[0]!.gates = [g[0]!, g[1]!, g[3]!, g[2]!];
+  assert.deepEqual(arrayIssues({ gates: undefined, regressionGates: ['e2e'] }, ordered), []);
+  // build — неявная предпосылка unit (более ранний check gate): отказ.
+  assert.match(
+    arrayIssues({ gates: undefined, regressionGates: ['build'] }, ordered).join('\n'),
+    /orders\.0\.regressionGates: Gate unit своей области требует регрессионный build/,
+  );
+  // То же при явной своей области.
+  assert.match(
+    arrayIssues({ gates: ['install', 'unit'], regressionGates: ['build'] }, ordered).join('\n'),
+    /Gate unit своей области требует регрессионный build/,
+  );
+  // Режим графа: install никому не предпосылка, но установка — у своей области.
+  const graphMode = policy();
+  for (const gate of graphMode.repositories[0]!.gates) gate.dependsOn = [];
+  assert.deepEqual(
+    validationIssues(graph({ gates: undefined, regressionGates: ['install', 'legacy'] }), graphMode)
+      .map((i) => i.message)
+      .filter((m) => !/Установка зависимостей install не может быть регрессионным gate/.test(m)),
+    [],
+  );
+  assert.match(
+    validationIssues(graph({ gates: undefined, regressionGates: ['install', 'legacy'] }), graphMode)
+      .map((i) => i.message)
+      .join('\n'),
+    /Установка зависимостей install не может быть регрессионным gate/,
+  );
+});
+
+test('L5: gate свойства — своя проверка поручения, не регрессионная', () => {
+  const contracts = [
+    {
+      id: 'api',
+      checks: {
+        gate: 'legacy',
+        obligations: [{ property: 'p-legacy', verification: 'reference' }],
+      },
+    },
+  ];
+  const order = { id: 'w', properties: ['p-legacy'], gates: ['install', 'unit'], requirements: [] };
+  const configured = policy().repositories[0]!.gates;
+  const problems = (regression?: string[]) =>
+    orderPropertyProblems(order as never, contracts as never, {
+      configured,
+      ...(regression ? { regression } : {}),
+    });
+  assert.doesNotMatch(problems().join('; '), /регрессионный/);
+  assert.match(
+    problems(['legacy']).join('; '),
+    /w: свойство p-legacy проверяет регрессионный gate legacy — свойство доказывает своя проверка поручения/,
+  );
 });

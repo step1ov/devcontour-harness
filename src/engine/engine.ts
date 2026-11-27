@@ -1147,6 +1147,9 @@ export class Engine {
       return orderPropertyProblems(w.order, contractDocuments(w.order, tx), {
         configured: repo.gates,
         ...(w.order.gates ? { scope: expandGateRefs(repo, w.order.gates) } : {}),
+        ...(w.order.regressionGates
+          ? { regression: orderGateScope(repo, w.order).regression }
+          : {}),
       });
     });
     if (problems.length)
@@ -2116,8 +2119,7 @@ export class Engine {
         leaseUntil: at + this.policy.leaseMs,
         ...((scope) => ({
           requiredGates: [
-            ...scope.own,
-            ...scope.regression,
+            ...scope.required,
             ...(work.order.requirements.length ? [REQUIREMENT_GATE] : []),
           ],
           ...(scope.regression.length ? { regressionGates: scope.regression } : {}),
@@ -6172,8 +6174,7 @@ export class Engine {
     if (!repo) return [];
     let gates: string[];
     try {
-      const scope = orderGateScope(repo, work.order);
-      gates = [...scope.own, ...scope.regression];
+      gates = orderGateScope(repo, work.order).required;
     } catch {
       return [];
     }

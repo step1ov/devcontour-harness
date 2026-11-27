@@ -20,6 +20,8 @@ import {
   type ExecutionPolicy,
   type WorkGraph,
 } from './contracts/index.ts';
+import { isDependencyInstall } from './environment/dependency-network.ts';
+import { gatePrerequisites } from './verification/gate-scope.ts';
 
 const parse = <S extends z.ZodType>(schema: S, value: unknown, root: string): z.infer<S> => {
   const parsed = schema.safeParse(value);
@@ -161,22 +163,41 @@ export function crossIssues(graph: WorkGraph, policy: ExecutionPolicy): CodedIss
               at('regressionGates'),
               `Регрессионный gate ${id} требует ${parent} — добавьте ${parent} в gates или regressionGates`,
             );
-      if (!explicit) {
-        for (const id of mine)
-          for (const parent of parents(id))
-            if (regression.includes(parent))
-              add(
-                'INVALID_INPUT',
-                at('regressionGates'),
-                `Gate ${id} своей области требует регрессионный ${parent}: предпосылка своего gate исполняется до ревью`,
-              );
-        if (!mine.some((id) => repo.gates.some((g) => g.id === id && g.kind === 'test')))
+      // Предпосылки своего gate — явные `dependsOn` и неявные (без поля —
+      // более ранние check gates профиля, `gatePrerequisites`): регрессионный
+      // gate исполняется после ревью и не может им быть.
+      for (const id of mine) {
+        let needs: string[];
+        try {
+          needs = gatePrerequisites(repo.gates, id).filter((p) => regression.includes(p));
+        } catch {
+          // Неизвестную предпосылку называет проверка политики.
+          continue;
+        }
+        if (needs.length)
           add(
             'INVALID_INPUT',
             at('regressionGates'),
-            'Своя область поручения (все gates, кроме регрессионных) должна включать test gate',
+            `Gate ${id} своей области требует регрессионный ${needs.join(', ')}: предпосылка своего gate исполняется до ревью — оставьте ${needs.join(', ')} в своей области`,
           );
       }
+      // Установка зависимостей — у своей области: после неё сверяются
+      // генераторы и исполняются остальные gates (`verifyGenerated`).
+      const installs = repo.gates.filter(
+        (g) => regression.includes(g.id) && isDependencyInstall(g.command),
+      );
+      if (installs.length)
+        add(
+          'INVALID_INPUT',
+          at('regressionGates'),
+          `Установка зависимостей ${installs.map((g) => g.id).join(', ')} не может быть регрессионным gate: она готовит дерево до своих gates и генераторов`,
+        );
+      if (!explicit && !mine.some((id) => repo.gates.some((g) => g.id === id && g.kind === 'test')))
+        add(
+          'INVALID_INPUT',
+          at('regressionGates'),
+          'Своя область поручения (все gates, кроме регрессионных) должна включать test gate',
+        );
     }
     const keys = new Set<string>();
     order.requirements.forEach((req, k) => {

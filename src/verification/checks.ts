@@ -403,8 +403,11 @@ export function referenceNote(declaration: CheckDeclaration | undefined) {
 export function orderPropertyProblems(
   order: Pick<WorkOrder, 'id' | 'properties' | 'gates' | 'requirements'>,
   contracts: ContractDocument[],
-  /** Gates репозитория поручения и раскрытая область поручения. */
-  gates: { configured: GatePolicy[]; scope?: string[] },
+  /**
+   * Gates репозитория поручения, раскрытая область поручения и его
+   * регрессионные gates (alpha.76): свойство доказывает своя проверка.
+   */
+  gates: { configured: GatePolicy[]; scope?: string[]; regression?: string[] },
 ) {
   if (!order.properties?.length) return [];
   const problems: string[] = [];
@@ -424,6 +427,10 @@ export function orderPropertyProblems(
       if (gates.scope && !gates.scope.includes(gate))
         problems.push(
           `${order.id}: свойство ${id} проверяет gate ${gate}, которого нет в поручении`,
+        );
+      else if (gates.regression?.includes(gate))
+        problems.push(
+          `${order.id}: свойство ${id} проверяет регрессионный gate ${gate} — свойство доказывает своя проверка поручения`,
         );
       // Селектор свойств передаёт controller, а исполняет harness генеративного
       // gate: без него область поручения в общем файле проверок не выбрать.
