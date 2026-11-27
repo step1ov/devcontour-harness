@@ -68,7 +68,7 @@ export const taskMappingSchema = z.strictObject({
   writeScope: writeScopeSchema,
   gates: gateScopeSchema(gateRefSchema).optional(),
   /** Регрессионные gates поручения (alpha.76, тонкий режим): после ревью, до CAS. */
-  regressionGates: gateScopeSchema(gateRefSchema).optional(),
+  regressionGates: gateScopeSchema(gateRefSchema).min(1).optional(),
   criteria: z.array(criterionMappingSchema).max(100).default([]),
   /** Документы, без которых запуск блокируется (ID, ключ или имя). Остальные — дополнительные. */
   requiredDocuments: z.array(z.string().min(1).max(200)).max(30).default([]),

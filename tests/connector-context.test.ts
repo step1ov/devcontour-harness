@@ -563,6 +563,13 @@ test('alpha.76: tasks[].regressionGates коннектора переносят�
     const after = await withRegression.source.snapshot();
     withRegression.close();
     assert.deepEqual(after.graph.orders[0]!.regressionGates, ['unit']);
+    // Пустой список — ошибка конфигурации, как у поручения, а не поле без gates.
+    (cfg.tasks as Record<string, unknown>[])[0]!.regressionGates = [];
+    assert.throws(
+      () => parseConfig(structuredClone(cfg), s.root),
+      (e: { issues?: { path: unknown[] }[] }) =>
+        !!e.issues?.some((d) => d.path.includes('regressionGates')),
+    );
   } finally {
     await s.cleanup();
   }
