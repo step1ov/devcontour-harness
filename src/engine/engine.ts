@@ -26,6 +26,7 @@ import {
   type ReproductionRecord,
   digestOf,
   expandGateRefs,
+  orderGateScope,
   gateDigest,
   policyDigest,
   graphIssues,
@@ -1146,6 +1147,9 @@ export class Engine {
       return orderPropertyProblems(w.order, contractDocuments(w.order, tx), {
         configured: repo.gates,
         ...(w.order.gates ? { scope: expandGateRefs(repo, w.order.gates) } : {}),
+        ...(w.order.regressionGates
+          ? { regression: orderGateScope(repo, w.order).regression }
+          : {}),
       });
     });
     if (problems.length)
@@ -2113,10 +2117,13 @@ export class Engine {
         phase: 'running',
         startedAt: iso(at),
         leaseUntil: at + this.policy.leaseMs,
-        requiredGates: [
-          ...expandGateRefs(repo, work.order.gates),
-          ...(work.order.requirements.length ? [REQUIREMENT_GATE] : []),
-        ],
+        ...((scope) => ({
+          requiredGates: [
+            ...scope.required,
+            ...(work.order.requirements.length ? [REQUIREMENT_GATE] : []),
+          ],
+          ...(scope.regression.length ? { regressionGates: scope.regression } : {}),
+        }))(orderGateScope(repo, work.order)),
         // Проверки потребителей закрепляются раскрытыми: смена групп
         // потребителя после выдачи не меняет состав, который доказывает попытка.
         ...(work.order.consumers?.length
@@ -6167,7 +6174,7 @@ export class Engine {
     if (!repo) return [];
     let gates: string[];
     try {
-      gates = expandGateRefs(repo, work.order.gates);
+      gates = orderGateScope(repo, work.order).required;
     } catch {
       return [];
     }

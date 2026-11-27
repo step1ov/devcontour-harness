@@ -1560,6 +1560,39 @@ export function expandGateRefs(
   return out;
 }
 
+/**
+ * Область gates поручения по фазам (0.1.0-alpha.76, R3): `own` — проверки
+ * того, что меняет работа (поле `gates`; нет поля — все gates репозитория,
+ * кроме регрессионных), `regression` — остальные проверки цели
+ * (`regressionGates`, без повторов `own`), `required` — обе вместе. Тонкий
+ * режим исполняет `own` до ревью, `regression` — после одобрения и до CAS;
+ * облегчённый и строгий — `required` одной фазой.
+ *
+ * Без `regressionGates` — прежняя область в прежнем порядке. С ними порядок
+ * `required` и обеих фаз — порядок профиля: без `dependsOn` профиль задаёт
+ * последовательность массивом (неявные предпосылки, `gatePrerequisites`), и
+ * без поля `gates` порядок ровно прежний.
+ */
+export function orderGateScope(
+  repo: Pick<z.infer<typeof repositoryPolicySchema>, 'gates' | 'gateGroups' | 'id'>,
+  order: { gates?: string[] | undefined; regressionGates?: string[] | undefined },
+): { required: string[]; own: string[]; regression: string[] } {
+  const listed = order.regressionGates?.length ? expandGateRefs(repo, order.regressionGates) : [];
+  const own = order.gates?.length
+    ? expandGateRefs(repo, order.gates)
+    : repo.gates.map((g) => g.id).filter((id) => !listed.includes(id));
+  const regression = new Set(listed.filter((id) => !own.includes(id)));
+  if (!regression.size) return { required: own, own, regression: [] };
+  const required = repo.gates
+    .map((g) => g.id)
+    .filter((id) => regression.has(id) || own.includes(id));
+  return {
+    required,
+    own: required.filter((id) => !regression.has(id)),
+    regression: required.filter((id) => regression.has(id)),
+  };
+}
+
 /** Имена переменных, которые MCP-серверы профиля получают по имени от CLI. */
 export const mcpEnvironment = (profile?: { mcp: Record<string, McpServer> }) => ({
   inherit: [

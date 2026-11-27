@@ -51,8 +51,11 @@ outline with a reason when the plan grows.
    ids; `description` becomes the goal; omitted `writePaths` mean the whole
    repository. Scope each task's `gates` to the gates that cover its
    criteria and the packages it touches: a web-only task does not list the
-   API acceptance gate. Keep every test gate a requirement links to. This
-   is guidance, not a check. A new feature test belongs to the task whose behaviour it
+   API acceptance gate. Keep every test gate a requirement links to. In thin
+   mode put other works' slow suites the task must not break into
+   `regressionGates` (on the draft task or on the task-source mapping in
+   the connector config): they run after the review, before the merge, and
+   the writer does not run them. This is guidance, not a check. A new feature test belongs to the task whose behaviour it
    proves, bound by a requirement (test gate, scenario, `testId`): it may fail
    before the implementation and must pass on the accepted commit.
 4. Check the draft (read only, no gates run):

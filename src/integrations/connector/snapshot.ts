@@ -455,7 +455,8 @@ export function legacyStatementSame(
       order.role === mapping.role &&
       order.repositoryId === (mapping.repositoryId ?? config.repository.id) &&
       digestOf(order.writeScope) === digestOf(mapping.writeScope) &&
-      digestOf(order.gates ?? null) === digestOf(mapping.gates ?? null)
+      digestOf(order.gates ?? null) === digestOf(mapping.gates ?? null) &&
+      digestOf(order.regressionGates ?? null) === digestOf(mapping.regressionGates ?? null)
     );
   }
   return false;
@@ -992,6 +993,7 @@ export function buildSnapshot(input: {
       writeScope: mapping.writeScope,
       dependsOn,
       ...(mapping.gates ? { gates: mapping.gates } : {}),
+      ...(mapping.regressionGates ? { regressionGates: mapping.regressionGates } : {}),
       requirements: [],
       contracts: [],
       context: [entry.id, ...(mapping.context ?? [])],

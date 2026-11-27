@@ -113,6 +113,7 @@ export function draftToGraph(
       writeScope: task.writePaths ?? ['.'],
       dependsOn,
       ...(task.gates ? { gates: task.gates } : {}),
+      ...(task.regressionGates ? { regressionGates: task.regressionGates } : {}),
       ...(task.consumers ? { consumers: task.consumers } : {}),
       ...(task.properties ? { properties: task.properties } : {}),
       ...(task.resources ? { resources: task.resources } : {}),

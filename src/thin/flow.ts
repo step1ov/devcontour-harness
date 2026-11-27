@@ -4,7 +4,9 @@
 //      после разбора ведущего — с его текстом, R4);
 //   3. коммит дерева — кандидат;
 //   4. дерево интеграции: чистый checkout цели + слияние кандидата;
-//   5. gates поручения, проверки потребителей, требования, одно ревью;
+//   5. свои gates поручения, проверки потребителей, требования, одно ревью,
+//      затем регрессионные gates (`regressionGates`, alpha.76) — только после
+//      одобрения: отказ ревью возвращает сдачу writer без них;
 //   6. CAS цели под замком интеграции репозитория. Цель сдвинулась — проверка
 //      заново один раз; ещё раз — незасчитанный повтор следующей сдачей без writer.
 // Отказ — обычный отказ попытки (те же записи, фаза integration): следующая
@@ -42,6 +44,7 @@ import {
   handoverSummary,
   mergeText,
   setupText,
+  regressionGatesText,
   resumePrompt,
   THIN_WRITER_TEXT,
   type ThinDelta,
@@ -61,7 +64,10 @@ async function writer(
   h: ThinHandover,
   attempt: AttemptState,
   tree: string,
+  /** Свои gates работы: их writer видит и гоняет сам. */
   gates: Gates,
+  /** Регрессионные gates: harness исполняет их после ревью, writer — нет. */
+  regression: string[],
   /** Слияние текущей цели в дерево работы перед этой сдачей; конфликт — файлы. */
   merged?: { conflicts: string[] },
   /** Подготовка окружения в дереве прошлых сдач упала (H-B): исполнитель чинит файлы. */
@@ -126,6 +132,7 @@ async function writer(
       : {}),
     ...(attempt.input ? { answer: attempt.input.requestId } : {}),
     ...(feedback ? { feedback } : {}),
+    ...regressionDelta(failedGates, previous),
     ...(findings ? { findings } : {}),
     ...(context ? { context } : {}),
     ...(merged ? { merged } : {}),
@@ -151,6 +158,7 @@ async function writer(
       ...((names) => (names.length ? [attemptSecretsNote(names)] : []))(kit.secretNames(attempt)),
       ...kit.proposalNotes(work),
       THIN_WRITER_TEXT,
+      ...(regression.length ? [regressionGatesText(regression)] : []),
       ...(merged ? [mergeText(merged)] : []),
       ...(setupError ? [setupText(setupError)] : []),
     ],
@@ -235,6 +243,29 @@ async function writer(
     const why = text(error).slice(0, 500);
     return invoke(full + '\n\n' + (await summary(why)), undefined, 'fallback', why);
   }
+}
+
+/**
+ * Упавшие регрессионные gates засчитанной сдачи `counted` (её ревью
+ * одобрило, alpha.76) для продолжения writer. Сдача не прошлая (после неё —
+ * незасчитанный отказ: окружение, вопрос, прерывание) — «более ранняя».
+ */
+export function regressionDelta(
+  counted: AttemptState | undefined,
+  previous: AttemptState | undefined,
+): Pick<ThinDelta, 'regressed' | 'regressedEarlier'> {
+  const regressed = counted ? failedRegression(counted) : [];
+  if (!regressed.length) return {};
+  return { regressed, ...(counted !== previous ? { regressedEarlier: true } : {}) };
+}
+
+/** Регрессионные gates попытки, чья последняя запись — провал. */
+function failedRegression(a: AttemptState): string[] {
+  const regression = new Set(a.regressionGates ?? []);
+  const last = new Map<string, boolean>();
+  for (const e of a.evidence)
+    if (e.kind === 'test' && !e.consumer && regression.has(e.gate)) last.set(e.gate, e.passed);
+  return [...last].filter(([, passed]) => !passed).map(([gate]) => gate);
 }
 
 /**
@@ -333,6 +364,7 @@ async function verify(
   gates: Gates,
 ): Promise<string> {
   const { work, repo, repoPath, artifacts, signal, context, worktrees } = h;
+  const regression = new Set(attempt.regressionGates ?? []);
   const candidate = attempt.candidateSha!;
   const target = await git(repoPath, 'rev-parse', repo.targetRef);
   const cwd = kit.checkout(repo.id, 'worktrees', attempt.id) + '-integration';
@@ -391,21 +423,29 @@ async function verify(
               .filter(Boolean),
           )
         : [];
+      const run = (gate: Gates[number]) =>
+        thinGate(kit, { attempt: at, cwd, sha, gate, artifacts, signal, execution });
       await kit.verifyGenerated(
         at,
-        applicable,
+        applicable.filter((g) => !regression.has(g.id)),
         gates,
         generators,
         cwd,
         'integration',
         { execution, signal, artifacts },
-        (gate) => thinGate(kit, { attempt: at, cwd, sha, gate, artifacts, signal, execution }),
+        run,
       );
       await kit.consumers(at, cwd, sha, artifacts, signal);
       kit.requirements(at, work, repoPath, cwd, sha, 'integration');
       h.rearm();
       // Ревью — всё слияние против цели: diff всей работы, а не последней сдачи.
       await kit.review(at, work, cwd, target, sha, 'integration', artifacts, signal, context);
+      // Регрессионные gates (alpha.76, R3) — после одобренного ревью, в том же
+      // дереве и окружении, до CAS. Провал — обычный провал gate: writer
+      // получает хвост, следующая сдача — свои gates и новое ревью.
+      const after = applicable.filter((g) => regression.has(g.id));
+      if (after.length) h.rearm();
+      for (const gate of after) await run(gate);
     },
   );
   if (
@@ -450,6 +490,9 @@ export const thinFlow = {
     kit.engine.phase(h.attempt.id, h.attempt.token, 'running', { baseSha: base, worktree: dir });
     let attempt: AttemptState = { ...h.attempt, baseSha: base, worktree: dir };
     const gates = orderedScope(repo.gates, attempt.requiredGates ?? repo.gates.map((g) => g.id));
+    // Writer видит и гоняет только свои gates; регрессионные — у harness (alpha.76).
+    const regression = attempt.regressionGates ?? [];
+    const own = gates.filter((g) => !regression.includes(g.id));
     const execution = kit.environment(attempt, 'candidate', tree);
     h.rearm();
     const candidate =
@@ -475,7 +518,7 @@ export const thinFlow = {
             h,
             attempt,
             tree,
-            await writer(kit, h, attempt, tree, gates, merged, setupError),
+            await writer(kit, h, attempt, tree, own, regression, merged, setupError),
           ),
       ));
     // База попытки — общая с целью база кандидата.

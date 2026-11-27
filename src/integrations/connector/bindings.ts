@@ -63,7 +63,13 @@ export function criteriaBindingIssues(
     const repo = policy?.repositories.find((r) => r.id === repoId);
     let scope: string[] | undefined;
     try {
-      scope = repo ? expandGateRefs(repo, m.gates) : undefined;
+      // Evidence результата — по своим и регрессионным gates (alpha.76).
+      scope = repo
+        ? [
+            ...expandGateRefs(repo, m.gates),
+            ...(m.regressionGates ? expandGateRefs(repo, m.regressionGates) : []),
+          ]
+        : undefined;
     } catch {
       scope = undefined;
     }

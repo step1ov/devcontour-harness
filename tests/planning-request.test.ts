@@ -456,7 +456,7 @@ test('alpha.73: тонкий режим — 3–5 работ по сценари
   assert.ok(request.prompt.includes(THIN_TASK_SIZE_SECTION));
   assert.ok(!request.prompt.includes(S.s1b), 'обычный размер задачи не повторяется');
   assert.match(THIN_TASK_SIZE_SECTION, /3–5 tasks/);
-  assert.match(THIN_TASK_SIZE_SECTION, /exact gates/);
+  assert.match(THIN_TASK_SIZE_SECTION, /exact own checks/);
   assert.match(THIN_TASK_SIZE_SECTION, /only by repository/);
   // Обычный режим — прежний раздел.
   assert.ok(planningRequest({ brief: 'x', facts: f }).prompt.includes(S.s1b));

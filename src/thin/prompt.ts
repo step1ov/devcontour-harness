@@ -12,7 +12,7 @@ import { droppedOutputsWriterText } from '../verification/gate-outputs.ts';
 
 /** Правило тонкого режима в запросе новой сессии. */
 export const THIN_WRITER_TEXT =
-  'Thin mode: this is the one writer session for the whole work order, and it will be resumed with the controller findings if a handover is rejected. Work like a developer in this worktree: run the gates listed above yourself (the exact commands), fix what fails and repeat until they pass, then hand back (completed=true). The harness commits your worktree, merges it into the current target on a clean checkout (untracked and ignored files such as build output do not travel), reruns the gates there and asks one independent review. Do not switch branches or rewrite history.';
+  'Thin mode: this is the one writer session for the whole work order, and it will be resumed with the controller findings if a handover is rejected. Work like a developer in this worktree: run the gates listed above yourself (the exact commands; only these), fix what fails and repeat until they pass, then hand back (completed=true). The harness commits your worktree, merges it into the current target on a clean checkout (untracked and ignored files such as build output do not travel), reruns these gates there and asks one independent review. Do not switch branches or rewrite history.';
 
 /** Текст ответов на вопросы исполнителя из закреплённого контекста (`input/<id>.md`). */
 export function answersText(context: ContextSnapshot | undefined, only?: string): string {
@@ -40,6 +40,10 @@ export interface ThinDelta {
   answer?: string;
   /** Блок провала gates прошлой сдачи (`gateFeedback`, его пределы). */
   feedback?: string;
+  /** Упавшие регрессионные gates засчитанной сдачи: ревью её одобрило (alpha.76). */
+  regressed?: string[];
+  /** Эта сдача — не прошлая: после неё был незасчитанный отказ. */
+  regressedEarlier?: boolean;
   findings?: CodeReviewHistory;
   context?: ContextSnapshot;
   /** Цель слита в дерево работы перед сдачей; `conflicts` — файлы с конфликтом. */
@@ -55,6 +59,28 @@ export interface ThinDelta {
   diagnosis?: string;
   /** Новые файлы прошлой сдачи, убранные из кандидата как выходы gates (P11-5). */
   dropped?: string[];
+}
+
+/**
+ * Регрессионные gates поручения (alpha.76, R3): чужие сценарии цели, harness
+ * исполняет их после одобренного ревью; writer их не гоняет.
+ */
+export function regressionGatesText(ids: readonly string[]): string {
+  return `Regression gates of this order: ${ids.join(', ')}. They check suites of other works on the target that this work must not break. They are not yours to run: the harness runs them on the merge after the review approves, before accepting; a failure comes back to you with its output.`;
+}
+
+/** Reviewer тонкого режима: регрессионные gates — у harness после одобрения. */
+export function regressionReviewText(ids: readonly string[]): string {
+  return `The harness runs the regression gates ${ids.join(', ')} after approval, before merging; they are not part of this review.`;
+}
+
+/**
+ * Засчитанная сдача одобрена ревью и упала на регрессионных gates: прошлая
+ * или, если после неё был незасчитанный отказ, более ранняя (`earlier`).
+ */
+export function regressedText(ids: readonly string[], earlier = false): string {
+  const which = earlier ? 'an earlier handover' : 'the previous handover';
+  return `The review approved ${which}, but the regression gates ${ids.join(', ')} failed after it: your change breaks a suite of another work. Fix that within the write scope; you may rerun the failing cases alone to reproduce. The next handover runs your gates and a new review again.`;
 }
 
 /** Подготовка окружения упала на файлах дерева работы: исполнитель их чинит. */
@@ -104,6 +130,7 @@ const deltaParts = (d: ThinDelta) => [
   d.diagnosis ?? '',
   d.dropped?.length ? droppedOutputsWriterText(d.dropped) : '',
   d.feedback ?? '',
+  d.regressed?.length ? regressedText(d.regressed, d.regressedEarlier) : '',
   findingsText(d.findings, false),
   d.answer ? answersText(d.context, d.answer) : '',
   d.merged ? mergeText(d.merged) : '',

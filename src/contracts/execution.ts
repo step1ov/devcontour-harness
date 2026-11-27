@@ -692,6 +692,12 @@ export const attemptStateSchema = z.strictObject({
   failureFingerprint: z.string().optional(),
   /** Gates, которые попытка обязана пройти в обеих фазах (раскрытая область). */
   requiredGates: z.array(idSchema).optional(),
+  /**
+   * Из `requiredGates`: регрессионные gates поручения (`regressionGates`,
+   * раскрытые при claim, 0.1.0-alpha.76). Тонкий режим исполняет их после
+   * одобренного ревью; нет поля — все обязательные gates до ревью.
+   */
+  regressionGates: z.array(idSchema).optional(),
   consumers: z.array(attemptConsumerSchema).optional(),
   /** Версия проверок, закреплённая при claim. */
   checks: z

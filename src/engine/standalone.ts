@@ -20,7 +20,12 @@ export function standaloneHost(store: ExecutionStore, policy: ExecutionPolicy): 
     basis: {
       orderDigest: (work) => digestOf(work.order),
       scopeDigest: (work) =>
-        digestOf({ gates: work.order.gates ?? null, consumers: work.order.consumers ?? null }),
+        digestOf({
+          gates: work.order.gates ?? null,
+          consumers: work.order.consumers ?? null,
+          // Без поля — прежний digest области (alpha.76).
+          ...(work.order.regressionGates ? { regressionGates: work.order.regressionGates } : {}),
+        }),
       policyDigest: () => policyDigest,
     },
     guards: {

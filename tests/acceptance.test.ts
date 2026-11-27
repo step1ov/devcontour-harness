@@ -432,6 +432,18 @@ test('S2-R2-03/T20: получатель раскрывает область п�
     scoped.some((p) => /ожидалась ровно \[unit, lint\]/.test(p)),
     scoped.join('; '),
   );
+  // alpha.76 (R3): регрессионные gates поручения — тоже его область.
+  const withRegression = { ...order, gates: ['unit'], regressionGates: ['lint'] };
+  const regressed = resultProblems(
+    tamper(partial, (r) => {
+      r.inputs.workOrderDigest = digestOf(withRegression);
+    }),
+    { ...groupContext, order: withRegression },
+  );
+  assert.ok(
+    regressed.some((p) => /ожидалась ровно \[unit, lint\]/.test(p)),
+    regressed.join('; '),
+  );
   // Имя группы не принимается за имя проверки: PASS «@ci» ничего не доказывает.
   const named = tamper(partial, (r) => {
     r.inputs.requiredGates = ['@ci'];

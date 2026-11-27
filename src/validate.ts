@@ -20,6 +20,8 @@ import {
   type ExecutionPolicy,
   type WorkGraph,
 } from './contracts/index.ts';
+import { isDependencyInstall } from './environment/dependency-network.ts';
+import { gatePrerequisites } from './verification/gate-scope.ts';
 
 const parse = <S extends z.ZodType>(schema: S, value: unknown, root: string): z.infer<S> => {
   const parsed = schema.safeParse(value);
@@ -129,6 +131,74 @@ export function crossIssues(graph: WorkGraph, policy: ExecutionPolicy): CodedIss
       return gates;
     };
     const own = expand(repo, order.gates, at('gates'), 'поручения');
+    // Регрессионные gates (alpha.76, R3): известные ссылки, не повтор своей
+    // области; их предпосылки — в одной из двух областей (исполняются после
+    // своих gates в том же дереве), свои gates от регрессионных не зависят.
+    let regression: string[] = [];
+    if (order.regressionGates) {
+      try {
+        regression = expandGateRefs(repo, order.regressionGates);
+      } catch (error) {
+        add(
+          (error as { code?: ErrorCode }).code ?? 'GATE_UNKNOWN',
+          at('regressionGates'),
+          (error as Error).message,
+        );
+      }
+      const explicit = order.gates?.length ? (own ?? []) : undefined;
+      const twice = explicit ? regression.filter((id) => explicit.includes(id)) : [];
+      if (twice.length)
+        add(
+          'INVALID_INPUT',
+          at('regressionGates'),
+          `Gate и в gates, и в regressionGates: ${twice.join(', ')} — регрессионные gates не повторяют свою область`,
+        );
+      const mine = explicit ?? repo.gates.map((g) => g.id).filter((id) => !regression.includes(id));
+      const parents = (id: string) => repo.gates.find((g) => g.id === id)?.dependsOn ?? [];
+      for (const id of regression)
+        for (const parent of parents(id))
+          if (!mine.includes(parent) && !regression.includes(parent))
+            add(
+              'INVALID_INPUT',
+              at('regressionGates'),
+              `Регрессионный gate ${id} требует ${parent} — добавьте ${parent} в gates или regressionGates`,
+            );
+      // Предпосылки своего gate — явные `dependsOn` и неявные (без поля —
+      // более ранние check gates профиля, `gatePrerequisites`): регрессионный
+      // gate исполняется после ревью и не может им быть.
+      for (const id of mine) {
+        let needs: string[];
+        try {
+          needs = gatePrerequisites(repo.gates, id).filter((p) => regression.includes(p));
+        } catch {
+          // Неизвестную предпосылку называет проверка политики.
+          continue;
+        }
+        if (needs.length)
+          add(
+            'INVALID_INPUT',
+            at('regressionGates'),
+            `Gate ${id} своей области требует регрессионный ${needs.join(', ')}: предпосылка своего gate исполняется до ревью — оставьте ${needs.join(', ')} в своей области`,
+          );
+      }
+      // Установка зависимостей — у своей области: после неё сверяются
+      // генераторы и исполняются остальные gates (`verifyGenerated`).
+      const installs = repo.gates.filter(
+        (g) => regression.includes(g.id) && isDependencyInstall(g.command),
+      );
+      if (installs.length)
+        add(
+          'INVALID_INPUT',
+          at('regressionGates'),
+          `Установка зависимостей ${installs.map((g) => g.id).join(', ')} не может быть регрессионным gate: она готовит дерево до своих gates и генераторов`,
+        );
+      if (!explicit && !mine.some((id) => repo.gates.some((g) => g.id === id && g.kind === 'test')))
+        add(
+          'INVALID_INPUT',
+          at('regressionGates'),
+          'Своя область поручения (все gates, кроме регрессионных) должна включать test gate',
+        );
+    }
     const keys = new Set<string>();
     order.requirements.forEach((req, k) => {
       const key = `${req.source}#${req.id}`;
@@ -151,6 +221,13 @@ export function crossIssues(graph: WorkGraph, policy: ExecutionPolicy): CodedIss
           'INVALID_INPUT',
           at('requirements', k, 'gate'),
           'Требование ссылается на проверку вне области поручения: ' + req.gate,
+        );
+      else if (regression.includes(req.gate))
+        add(
+          'INVALID_INPUT',
+          at('requirements', k, 'gate'),
+          'Требование ссылается на регрессионный gate: требование доказывает своя проверка поручения — ' +
+            req.gate,
         );
     });
     const consumerIds = (order.consumers ?? []).map((c) => c.repositoryId);
