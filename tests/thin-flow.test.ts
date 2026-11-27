@@ -1,4 +1,4 @@
-/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment --
+/* eslint-disable @typescript-eslint/no-explicit-any, @typescript-eslint/no-unsafe-member-access, @typescript-eslint/no-unsafe-assignment, @typescript-eslint/no-unsafe-call --
  * Тест правит сырой JSON политики до разбора схемой.
  */
 /**
@@ -621,4 +621,108 @@ test('R1: отказ только областью — продолжение н
   assert.match(resume, /You do not need to rerun the gates for this/);
   assert.doesNotMatch(resume, /rerun your gates in this worktree until they pass/);
   assert.throws(() => ctx.repo.git('show', `${second!.integrationSha}:docs/notes.md`));
+});
+
+/**
+ * alpha.76 (R3): регрессионный gate `legacy` — чужой сценарий цели. Падает,
+ * если в дереве есть `src/legacy.flag`.
+ */
+const legacyRunner = `
+const fs = require('fs');
+const ok = !fs.existsSync('src/legacy.flag');
+fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,
+  '<testsuite><testcase classname="legacy" name="still works">' + (ok ? '' : '<failure message="legacy broken by src/legacy.flag"/>') + '</testcase></testsuite>');
+`;
+const withRegression = (options: Parameters<typeof thin>[0]) =>
+  thin({
+    ...options,
+    files: { 'test/legacy.js': legacyRunner, ...options.files },
+    policy: (p: Record<string, any>) => {
+      p.repositories[0].gates.push({
+        id: 'legacy',
+        kind: 'test',
+        command: [process.execPath, 'test/legacy.js'],
+        report: { type: 'junit', path: 'test-results/legacy.xml' },
+      });
+      options.policy?.(p);
+    },
+    graph: (g: Record<string, any>) => {
+      g.orders[0].gates = ['unit'];
+      g.orders[0].regressionGates = ['legacy'];
+      options.graph?.(g);
+    },
+  });
+/** Позиции записей попытки: последняя запись ревью и записи gate. */
+const positions = (a: { evidence: { kind: string; gate?: string }[] }, gate: string) => ({
+  review: a.evidence.findLastIndex((e) => e.kind === 'review'),
+  gate: a.evidence.flatMap((e, i) => (e.kind === 'test' && e.gate === gate ? [i] : [])),
+});
+
+test('R3: свои gates → ревью → регрессионные gates → CAS; writer видит и гоняет только свои', async () => {
+  const ctx = withRegression({ scenario: { writer: rec(implement()), reviewer: approve() } });
+  await ctx.run();
+  const [a] = ctx.attempts();
+  assert.equal(a!.status, 'succeeded', a!.error);
+  assert.deepEqual(a!.requiredGates, ['unit', 'legacy']);
+  assert.deepEqual(a!.regressionGates, ['legacy']);
+  const unit = positions(a!, 'unit');
+  const legacy = positions(a!, 'legacy');
+  assert.equal(legacy.gate.length, 1, 'регрессионный gate исполнен один раз');
+  assert.ok(unit.gate[0]! < unit.review, 'свой gate — до ревью');
+  assert.ok(legacy.gate[0]! > legacy.review, 'регрессионный gate — после ревью');
+  const writer = ctx.prompt(0);
+  assert.match(writer, /"command":\[[^\]]*test\/run\.js"\]/);
+  assert.doesNotMatch(writer, /test\/legacy\.js/, 'команды регрессионного gate у writer нет');
+  assert.match(writer, /Regression gates of this order: legacy\. .*They are not yours to run/);
+});
+
+test('R3: отказ ревью — регрессионные gates не исполнялись; следующая сдача — заново', async () => {
+  const ctx = withRegression({
+    scenario: {
+      writer: [rec(implement()), rec(implement())],
+      reviewer: [approve(), reject, closing],
+    },
+  });
+  await ctx.run();
+  const [first, second] = ctx.attempts();
+  assert.equal(first!.failureKind, 'review', first!.error);
+  assert.equal(positions(first!, 'legacy').gate.length, 0, 'без регрессионных gates');
+  assert.equal(second!.status, 'succeeded', second!.error);
+  assert.equal(positions(second!, 'legacy').gate.length, 1);
+});
+
+test('R3: регрессия после одобренного ревью — writer получает хвост; следующая сдача — свои gates и новое ревью', async () => {
+  const ctx = withRegression({
+    scenario: {
+      writer: [
+        rec(implement({ 'src/greet.js': greet, 'src/legacy.flag': 'x\n' })),
+        rec({ ...implement({}), remove: ['src/legacy.flag'] }),
+      ],
+      reviewer: approve(),
+    },
+  });
+  await ctx.run();
+  const [first, second] = ctx.attempts();
+  assert.equal(first!.failureKind, 'gate', first!.error);
+  assert.ok(
+    first!.evidence.some((e) => e.kind === 'review' && e.passed),
+    'ревью одобрило',
+  );
+  assert.equal(
+    first!.evidence.findLast((e) => e.kind === 'test' && e.gate === 'legacy')?.passed,
+    false,
+  );
+  const resume = ctx.prompt(1);
+  assert.match(
+    resume,
+    /The review approved the previous handover, but the regression gates legacy failed/,
+  );
+  assert.match(resume, /legacy broken by src\/legacy\.flag/, 'хвост регрессии');
+  assert.equal(second!.status, 'succeeded', second!.error);
+  const again = positions(second!, 'unit');
+  assert.ok(again.gate.length >= 1 && again.gate[0]! < again.review, 'свои gates заново до ревью');
+  assert.ok(
+    second!.evidence.some((e) => e.kind === 'review' && e.passed),
+    'новое ревью',
+  );
 });
