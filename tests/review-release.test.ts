@@ -793,6 +793,71 @@ test('alpha.72, P9-6: источник задач без меток — рабо
   f.engine.read((v) => checkDocsWorks(v, ['x'], 'release done'));
 });
 
+test('alpha.74, P10-7: поздняя работа исправлений, названная docs, закрывает шаг после приёмки корней; тонкое ревью выпуска проверяет документацию', async () => {
+  const f = fixture((p) => (p.release = { review: 'advisory', docs: 'required' }));
+  // Часы вперёд — и снова controller: аренда c1 истекла бы.
+  const later = (e = f) => {
+    e.clock.now += 60_000;
+    e.engine.lead('c1');
+  };
+  // Выпуск: api, затем d — документация после api (связь), обе приняты.
+  const first = graphOf({ api: [], d: ['api'] });
+  first.orders[1]!.labels = ['docs'];
+  ready(f.engine, first);
+  accept(f.engine, f.base, f.head);
+  later();
+  accept(f.engine, f.base, f.head);
+  later();
+  const docs = (docsWorks?: string[]) =>
+    f.engine.read((v) =>
+      releaseDocsState(v, { release: { docs: 'required' } }, docsWorks ? { docsWorks } : {}),
+    );
+  assert.equal(docs().status, 'done');
+  // Поздняя работа исправлений по ревью выпуска — без связей, новый корень.
+  ready(f.engine, graphOf({ fix: [] }, '1', 'fixes'));
+  accept(f.engine, f.base, f.head);
+  later();
+  assert.deepEqual([docs().status, docs().missingRoots], ['not-after-roots', ['fix']]);
+  // Она сама правит документацию: названная docs, шаг закрыт без новой работы.
+  assert.equal(docs(['fix']).status, 'done');
+  // Единственная работа документации без связей — после корня по приёмке.
+  const g = fixture((p) => (p.release = { review: 'advisory', docs: 'required' }));
+  ready(g.engine, graphOf({ api: [], fix: [] }));
+  accept(g.engine, g.base, g.head);
+  later(g);
+  const before = g.engine.read((v) =>
+    releaseDocsState(v, { release: { docs: 'required' } }, { docsWorks: ['fix'] }),
+  );
+  assert.deepEqual([before.status, before.missingRoots], ['not-after-roots', ['api']]);
+  accept(g.engine, g.base, g.head);
+  const after = g.engine.read((v) =>
+    releaseDocsState(v, { release: { docs: 'required' } }, { docsWorks: ['fix'] }),
+  );
+  assert.deepEqual([after.status, after.roots], ['done', ['api']]);
+  // Принята раньше корня (та же минута — не позже) — не после него.
+  const h = fixture((p) => (p.release = { review: 'advisory', docs: 'required' }));
+  ready(h.engine, graphOf({ fix: [], api: [] }));
+  accept(h.engine, h.base, h.head);
+  accept(h.engine, h.base, h.head);
+  assert.equal(
+    h.engine.read((v) =>
+      releaseDocsState(v, { release: { docs: 'required' } }, { docsWorks: ['fix'] }),
+    ).status,
+    'not-after-roots',
+  );
+  // Тонкий режим: ревью выпуска проверяет документацию; облегчённый — нет.
+  const contract = async (mode: 'thin' | 'light') => {
+    const policy = { ...f.policy, harnessMode: mode };
+    return (await releaseContract({ engine: f.engine, policy }, 'app', f.app, f.head)).prompt;
+  };
+  assert.match(
+    await contract('thin'),
+    /Documentation check: .*including changes made by late works/,
+  );
+  assert.doesNotMatch(await contract('light'), /Documentation check/);
+  for (const e of [f, g, h]) e.store.close();
+});
+
 test('ревью 2: второй проход приёмки выпуска, изменивший своё дерево, не принимается — действует первый', async () => {
   const f = fixture();
   ready(f.engine, graphOf({ w: [] }));
