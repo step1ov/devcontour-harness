@@ -16,10 +16,12 @@ not try to prove that the writer could not cheat.
   A rejection only for files outside the write scope names the paths to drop
   and says the gates need not be rerun.
 - A **handover** is one attempt. The harness commits the work tree, merges
-  it into the current target on a fresh checkout, runs the order's gates
-  there, then the consumers' checks and requirements, then one review of the
-  whole merge against the target, then a CAS of the target. Ignored and
-  untracked files (build output) never reach the check.
+  it into the current target on a fresh checkout, runs the order's own
+  `gates` there, then the consumers' checks and requirements, then one review
+  of the whole merge, then the order's `regressionGates`, then a CAS of the
+  target. Ignored and untracked files never reach the check. Regression
+  gates run only after an approved review; a failure goes back to the writer
+  with its tail, and the next handover runs own gates and a new review.
 - The work tree is kept until the work is accepted or cancelled.
   Accepting it removes the tree, the branch and the sessions.
 
@@ -37,10 +39,10 @@ not try to prove that the writer could not cheat.
 
 `$H plan-request` asks for 3–5 tasks in thin mode. Each work is one coherent
 user scenario through every layer it needs (API, UI, data, tests). Split only by repository or into parts
-that are truly independent. Each work lists its exact gates, because the
-writer runs exactly these commands and the harness reruns them. `plan-check`
-returns `advice: THIN_PLAN_SIZE` when the plan has fewer than 3 or more than
-5 works. This is advice, not a refusal.
+that are truly independent. `gates` lists only the work's own checks, one
+gate per suite it owns: the writer runs exactly these. Slow suites of other
+works it must not break go to `regressionGates` (the writer does not run
+them). `plan-check` advises `THIN_PLAN_SIZE` outside 3–5 works.
 
 Works with no path between them in `dependsOn` run in parallel (policy
 `concurrency`). Add `dependsOn` only for a real build or runtime interface:
@@ -65,8 +67,8 @@ loop). Under the lead driver (`HARNESS_LEAD_DRIVE=1`, `$H lead drive`, see
 ### What wakes you
 
 - **The work ran out of handovers** (`maxAttempts`, default 3). A rejection
-  does not stop the work: the same session gets it, even when it is the same
-  failure as before. Thin has no "same defect twice" stop. After the last
+  does not stop the work: the same session gets it, even the same failure
+  again. After the last
   handover, diagnose the failure (`guide recovery`: explain, `diagnose`,
   `retry --by lead`). After a lead diagnosis (`diagnose`, then `retry`
   without `--reset`), the next handover **resumes the same session** with
@@ -77,10 +79,10 @@ loop). Under the lead driver (`HARNESS_LEAD_DRIVE=1`, `$H lead drive`, see
   tree and the branch; the next handover is a new session with the summary.
   Only `retry --start-over` (implies the reset) starts the work over from the
   target: the tree, the branch and the session are discarded, once.
-- **`gate-environment`** (needs-lead, not counted, no queue pause, no
-  holds). A handover check failed on the environment twice: a gate failed
-  with an environment class, a gate timed out with no failing test, or the
-  environment setup failed. Each gets one automatic rerun. On a tree from
+- **`gate-environment`** (needs-lead, not counted, no queue pause). A
+  handover check failed on the environment twice (an environment-class gate
+  failure, a gate timeout with no failing test, a setup failure), each after
+  one automatic rerun. On a tree from
   earlier handovers a setup failure (a conflicted manifest, say) does not stop
   the handover: the writer gets its output and fixes the files. Read the gate
   output in the failure, fix the environment or the gate command, then run
@@ -134,7 +136,7 @@ enough); no separate docs work for the roots of its repository. Then
 
 ### Reading the state
 
-`$H status` and `$H explain` read the same records as in light mode (phase
+`$H status` and `$H explain` read the light-mode records (phase
 `integration`). In `$H view --work <id>` each attempt shows `writerSession`:
 `fresh` (a new session), `resumed` (continued) or `fallback` (a new session
 after context overflow or a lost session, in the same attempt, at most once).
