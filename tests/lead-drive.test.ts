@@ -1196,14 +1196,21 @@ test('ревью a74 M1: сессия goals-changed упала или снята
   env.engine.claim('c1');
   env.engine.claim('c1');
   const goalsFile = join(env.dir, 'lead-drive-goals.json');
-  const run = async (options: Parameters<typeof driveOf>[1], extra = {}) => {
+  // Драйвер ждёт событий без конца: снимаем его сигналом — по таймеру для
+  // неудачных сессий, а для удачной — когда цели записаны (под нагрузкой
+  // сессия может идти дольше любого фиксированного срока).
+  const run = async (options: Parameters<typeof driveOf>[1], extra = {}, until?: () => boolean) => {
     const abort = new AbortController();
     const { promise } = driveOf(
       env,
       { goalsRecord: false, ...options },
       { signal: abort.signal, ...extra },
     );
-    setTimeout(() => abort.abort(), 1500);
+    if (until) {
+      const deadline = Date.now() + 15_000;
+      const tick = () => (until() || Date.now() > deadline ? abort.abort() : setTimeout(tick, 50));
+      tick();
+    } else setTimeout(() => abort.abort(), 4000);
     return promise;
   };
   const failed = await run({ code: 1 });
@@ -1216,7 +1223,7 @@ test('ревью a74 M1: сессия goals-changed упала или снята
   assert.equal(killed.sessions[0]?.kind, 'goals-changed');
   assert.equal(killed.sessions[0]?.timedOut, true);
   assert.ok(!existsSync(goalsFile), 'снятая сессия — цели не считаются доставленными');
-  const ok = await run({});
+  const ok = await run({}, {}, () => existsSync(goalsFile));
   assert.deepEqual(
     ok.sessions.map((x) => x.kind),
     ['goals-changed'],
