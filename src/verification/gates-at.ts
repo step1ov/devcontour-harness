@@ -1,6 +1,6 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import { mkdir, rm, rmdir } from 'node:fs/promises';
+import { mkdir, rm, rmdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import {
   HarnessError,
@@ -17,6 +17,7 @@ import { TaskFailure } from '../engine/failure.ts';
 import { git } from '../environment/process.ts';
 import {
   allocateAttemptPorts,
+  attemptEnvFile,
   attemptSecrets,
   attemptVariables,
   type AttemptPorts,
@@ -358,6 +359,24 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
                 .map((r) => Number(r.value)),
             },
           );
+        // Файл окружения прогона — как у попытки (P10-6): тестовые помощники
+        // продукта читают HARNESS_ATTEMPT_ENV_FILE, env-up дописывает в него
+        // порты сервисов; без файла gates попытки и прогона расходились.
+        const envFile = light ? join(artifacts, attemptEnvFile(repo.id, true)) : undefined;
+        const variables = light
+          ? attemptVariables(
+              id,
+              ports?.ports ?? {},
+              repo.gateway,
+              repo.id,
+              envFile,
+              attemptSecrets(ctx.policy.attemptEnv, [ctx.policy.environment, repo.environment]),
+            )
+          : {};
+        if (envFile) {
+          await mkdir(artifacts, { recursive: true });
+          await writeFile(envFile, JSON.stringify(variables, null, 2) + '\n', { mode: 0o600 });
+        }
         const execution = executionEnvironment(
           [ctx.policy.environment, repo.environment],
           {
@@ -370,16 +389,7 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
               ...Object.fromEntries(snapshots.map((d) => [d.repositoryId, d.path])),
               [repo.id]: cwd,
             }),
-            ...(light
-              ? attemptVariables(
-                  id,
-                  ports?.ports ?? {},
-                  repo.gateway,
-                  repo.id,
-                  undefined,
-                  attemptSecrets(ctx.policy.attemptEnv, [ctx.policy.environment, repo.environment]),
-                )
-              : {}),
+            ...variables,
           },
           source,
           ctx.policy.toolchain,
