@@ -868,9 +868,10 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
         });
         continue;
       }
-      // Только что закончившаяся сессия могла запустить run в фоне: метка
-      // запуска появится не сразу — `stopped` перепроверяется после паузы.
-      if (w.kind === 'stopped' && lastAgentEnd !== undefined) {
+      // Только что закончившаяся сессия могла запустить run или review-release
+      // в фоне: их метка появится не сразу — `stopped` и `release-ready`
+      // перепроверяются после паузы.
+      if ((w.kind === 'stopped' || w.kind === 'release-ready') && lastAgentEnd !== undefined) {
         const left = lastAgentEnd + graceMs - Date.now();
         if (left > 0) {
           await sleep(left, input.signal);
@@ -888,7 +889,8 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
           if (reviewWaitLogged !== review.pid)
             log(`идёт review-release (pid ${review.pid}, с ${review.startedAt}) — жду его конца`);
           reviewWaitLogged = review.pid;
-          await sleep(pollMs, input.signal);
+          // Реже обычного опроса: ревью идёт минуты, а каждый круг открывает хранилище.
+          await sleep(Math.min(pollMs * 10, 10_000), input.signal);
           continue;
         }
       }

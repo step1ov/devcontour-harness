@@ -9,6 +9,7 @@
 // хвост журнала последнего run, когда очередь стоит.
 
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import {
   accessSync,
   closeSync,
@@ -18,8 +19,10 @@ import {
   openSync,
   readFileSync,
   readSync,
+  readdirSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -192,41 +195,72 @@ export function lastDetachedRun(stateDir: string): DetachedRun | undefined {
 }
 
 /**
- * Идущее ревью выпуска (P10-8): `review-release` ставит метку
- * `<state>/review-release-active.json` (pid, начало) на время своей работы, чтобы
- * `lead drive` не будил ведущего на «выпуск готов», пока ревью (прогон gates
- * и reviewer, до десятков минут) не закончилось. Метка умершего процесса не
- * действует.
+ * Идущее ревью выпуска (P10-8): каждый `review-release` ставит свою метку
+ * `<state>/review-release-active/<pid>-<uuid>.json` и обновляет её время каждые
+ * 30 с, пока работает, чтобы `lead drive` не будил ведущего на «выпуск готов»,
+ * пока ревью (прогон gates и reviewer, до десятков минут) не закончилось.
+ * Метка не действует, если процесса нет или она не обновлялась дольше
+ * REVIEW_MARKER_STALE_MS (процесс убит без finally, pid занят другим); такие
+ * метки убираются при чтении.
  */
-const reviewMarker = (stateDir: string) => join(resolve(stateDir), 'review-release-active.json');
+const reviewMarkers = (stateDir: string) => join(resolve(stateDir), 'review-release-active');
+export const REVIEW_MARKER_BEAT_MS = 30_000;
+export const REVIEW_MARKER_STALE_MS = 3 * 60_000;
+
+const processAlive = (pid: number) => {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+};
 
 export function markReleaseReview(stateDir: string, now = new Date()): () => void {
-  const file = reviewMarker(stateDir);
-  mkdirSync(resolve(stateDir), { recursive: true });
+  const dir = reviewMarkers(stateDir);
+  mkdirSync(dir, { recursive: true });
+  const file = join(dir, `${process.pid}-${randomUUID()}.json`);
   writeFileSync(file, JSON.stringify({ pid: process.pid, startedAt: now.toISOString() }), {
     mode: 0o600,
   });
-  return () => {
+  const beat = setInterval(() => {
     try {
-      const r = JSON.parse(readFileSync(file, 'utf8')) as { pid?: number };
-      if (r.pid === process.pid) rmSync(file, { force: true });
+      const t = new Date();
+      utimesSync(file, t, t);
     } catch {
-      // нет или испорчена — снимать нечего
+      // метку убрали — обновлять нечего
     }
+  }, REVIEW_MARKER_BEAT_MS);
+  beat.unref();
+  return () => {
+    clearInterval(beat);
+    rmSync(file, { force: true });
   };
 }
 
 export function activeReleaseReview(
   stateDir: string,
+  now = Date.now(),
 ): { pid: number; startedAt: string } | undefined {
-  const file = reviewMarker(stateDir);
-  if (!existsSync(file)) return undefined;
-  try {
-    const r = JSON.parse(readFileSync(file, 'utf8')) as { pid?: unknown; startedAt?: unknown };
-    if (typeof r.pid !== 'number' || typeof r.startedAt !== 'string') return undefined;
-    process.kill(r.pid, 0);
-    return { pid: r.pid, startedAt: r.startedAt };
-  } catch {
-    return undefined;
+  const dir = reviewMarkers(stateDir);
+  if (!existsSync(dir)) return undefined;
+  let found: { pid: number; startedAt: string } | undefined;
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith('.json')) continue;
+    const file = join(dir, name);
+    let live = false;
+    try {
+      const r = JSON.parse(readFileSync(file, 'utf8')) as { pid?: unknown; startedAt?: unknown };
+      live =
+        typeof r.pid === 'number' &&
+        typeof r.startedAt === 'string' &&
+        now - statSync(file).mtimeMs <= REVIEW_MARKER_STALE_MS &&
+        processAlive(r.pid);
+      if (live) found ??= { pid: r.pid as number, startedAt: r.startedAt as string };
+    } catch {
+      live = false;
+    }
+    if (!live) rmSync(file, { force: true });
   }
+  return found;
 }
