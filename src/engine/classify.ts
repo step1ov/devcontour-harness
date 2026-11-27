@@ -114,7 +114,7 @@ export function classifyFailure(error: unknown, full: string): FailureKind {
 }
 
 /** Предел или баланс провайдера, а не учётные данные (часть `providerRefusal`). */
-const providerLimit = (message: string) =>
+export const providerLimit = (message: string) =>
   /credit balance|insufficient credit|insufficient_quota|session limit|usage limit|rate limit|rate_limit|limit reached|too many requests|\b429\b|overloaded/i.test(
     message,
   );

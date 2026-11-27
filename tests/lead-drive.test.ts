@@ -93,7 +93,7 @@ interface AgentRecord {
 function driveOf(
   env: Env | { dir: string; engine: { policy: Engine['policy'] } },
   options: {
-    mode?: 'wait-go' | 'exit' | 'hang' | 'grandchild-hang' | 'background-writer';
+    mode?: 'wait-go' | 'exit' | 'hang' | 'grandchild-hang' | 'background-writer' | 'provider-limit';
     code?: number;
     extraArgs?: string[];
     /** false — без записи целей прошлого запуска (alpha.74, P10-3). */
@@ -527,6 +527,22 @@ test('lead drive: предел --max-sessions — выход max-sessions (22); 
   assert.equal(broken.outcome, 'agent-error');
   assert.equal(DRIVE_EXIT_CODES[broken.outcome], 23);
   assert.match(broken.message, /не запустилась/);
+  env.store.close();
+});
+
+test('P11-2: сессия ведущего упала на лимите провайдера (событие error codex) — agent-error (23) сразу, с текстом провайдера; без --log тоже', async () => {
+  const env = engineOf();
+  ready(env.engine, graphOf({ a: [] }));
+  const { promise } = driveOf(env, { mode: 'provider-limit', code: 1 }, { idleSessions: 3 });
+  const data = await promise;
+  assert.equal(data.outcome, 'agent-error');
+  assert.equal(DRIVE_EXIT_CODES[data.outcome], 23);
+  assert.equal(data.sessions.length, 1, 'новые сессии не запускаются');
+  assert.match(data.message, /^лимит провайдера: You've hit your usage limit/);
+  assert.match(data.message, /код выхода 1/);
+  // Обычный отказ сессии без текста провайдера — по-прежнему простой.
+  const plain = await driveOf(env, { code: 1 }, { idleSessions: 2 }).promise;
+  assert.equal(plain.outcome, 'no-progress');
   env.store.close();
 });
 

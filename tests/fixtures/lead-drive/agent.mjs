@@ -7,6 +7,8 @@
 // `grandchild-hang` — то же, с внуком в той же группе (pid в grandchild.pid);
 // `background-writer` — выходит сразу, а внук через 700 мс пишет в
 // унаследованный stdout и оставляет late.done (как фоновый `harness run`).
+// `provider-limit` — как codex при исчерпанном лимите: событие `error` в
+// JSONL stdout и выход с кодом из аргумента.
 import { spawn } from 'node:child_process';
 import { existsSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -54,6 +56,15 @@ if (mode === 'background-writer') {
     { stdio: ['ignore', 'inherit', 'inherit'] },
   );
   child.unref();
+}
+if (mode === 'provider-limit') {
+  process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: 't-1' }) + '\n');
+  process.stdout.write(
+    JSON.stringify({
+      type: 'error',
+      message: "You've hit your usage limit. Upgrade to Pro or try again at 3:05 PM.",
+    }) + '\n',
+  );
 }
 if (mode === 'hang' || mode === 'grandchild-hang') {
   process.on('SIGTERM', () => process.stderr.write('fake lead ignores SIGTERM\n'));

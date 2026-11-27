@@ -143,7 +143,9 @@ sessions in a row without a lead decision or over the time limit — passing
 an owner question on does not count — or the same stop again without a
 decision and no change within `--repeat-wait`: check the agent command and
 its logs),
-22 max-sessions, 23 agent-error (the command did not start), 16 aborted
+22 max-sessions, 23 agent-error (the command did not start, or a session
+failed on a provider refusal — usage limit or credentials; no new sessions
+start), 16 aborted
 (signal). Progress lines go to stderr.
 
 Before a long cycle, first run the cheap decisive gates

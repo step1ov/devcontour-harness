@@ -61,6 +61,8 @@ import {
   type RunEvent,
 } from '../contracts/index.ts';
 import type { NotPromise } from '../contracts/ports.ts';
+import { runtimeEvents } from '../agents/runtime-events.ts';
+import { providerLimit, providerRefusal } from '../engine/classify.ts';
 import { diagnoseState } from '../explain/diagnose.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import { LEAD_WAITING_OWNER } from './lead.ts';
@@ -1141,12 +1143,10 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
           HARNESS_LEAD_DRIVE_SESSION: String(session),
           HARNESS_LEAD_DRIVE_EVENT: sessionKind,
         },
-        ...(input.logDir
-          ? {
-              out: join(promptDir, `session-${session}.out`),
-              err: join(promptDir, `session-${session}.err`),
-            }
-          : {}),
+        // Вывод — в файлы и без --log (во временный каталог драйвера): по
+        // нему узнаётся отказ провайдера (P11-2).
+        out: join(promptDir, `session-${session}.out`),
+        err: join(promptDir, `session-${session}.err`),
         ...(input.signal ? { signal: input.signal } : {}),
         timeoutMs: sessionTimeoutMs,
         killGraceMs: input.killGraceMs ?? 10_000,
@@ -1192,6 +1192,21 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
           'agent-error',
           `команда ведущего не запустилась: ${run.error} (${input.agent[0]})`,
         );
+      // Отказ провайдера (лимит, учётные данные) повторится в любой
+      // следующей сессии: драйвер останавливается сразу (P11-2), а не
+      // считает сессии простоями до no-progress.
+      const refusal =
+        run.exitCode !== 0 && !run.timedOut
+          ? providerRefusalOf(
+              join(promptDir, `session-${session}.out`),
+              join(promptDir, `session-${session}.err`),
+            )
+          : undefined;
+      if (refusal)
+        return result(
+          'agent-error',
+          `${providerLimit(refusal) ? 'лимит провайдера' : 'отказ провайдера'}: ${refusal} (сессия ${session}, код выхода ${run.exitCode ?? 'сигнал'}). ${logHint(input.logDir, session)}`,
+        );
       // Передача вопроса владельцу — не простой (вопросов может быть много);
       // снятая по сроку сессия — неудачная, даже если что-то успела записать.
       if (sessionKind !== 'owner-question' || run.timedOut)
@@ -1232,6 +1247,43 @@ function runLogOf(stateDir: string): { runLog?: { path: string; tail: string } }
 }
 
 /** Где смотреть вывод сессии: файл журнала или совет включить --log. */
+/** Хвост файла вывода сессии (последние 64 КБ); нет файла — пусто. */
+function tailOf(path: string, bytes = 65536): string {
+  try {
+    const text = readFileSync(path);
+    return text.subarray(Math.max(0, text.length - bytes)).toString('utf8');
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Текст отказа провайдера упавшей сессии ведущего, или undefined. Причина —
+ * последнее событие отказа JSONL (`error`/`turn.failed` codex, `result` с
+ * `is_error` claude), иначе последняя строка stderr, иначе последняя
+ * не-JSON строка stdout; отказ — по тем же признакам, что у попыток
+ * (`providerRefusal`).
+ */
+export function providerRefusalOf(outPath: string, errPath: string): string | undefined {
+  const out = tailOf(outPath);
+  const last = runtimeEvents(out).events.findLast(
+    (e) =>
+      e.type === 'error' ||
+      e.type === 'turn.failed' ||
+      (e.type === 'result' && e.is_error === true),
+  ) as { message?: unknown; error?: { message?: unknown }; result?: unknown } | undefined;
+  const lastLine = (text: string, plain = false) =>
+    text
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l && !(plain && l.startsWith('{')))
+      .at(-1);
+  const event = last?.message ?? last?.error?.message ?? last?.result;
+  const text =
+    (typeof event === 'string' && event.trim()) || lastLine(tailOf(errPath)) || lastLine(out, true);
+  return text && providerRefusal(text) ? text.slice(0, 300) : undefined;
+}
+
 const logHint = (logDir: string | undefined, session: number) =>
   logDir
     ? `Вывод сессии: ${join(resolve(logDir), `session-${session}.err`)} и .out`
