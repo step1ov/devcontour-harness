@@ -669,6 +669,15 @@ export function cliAdapter(
               (e) => e.type === 'result',
             ) as { result?: unknown } | undefined;
             if (typeof last?.result === 'string') text = last.result;
+          } else {
+            // codex пишет отказ хода событием `error` / `turn.failed` в stdout
+            // (P11-1: «usage limit»); в stderr последней строкой бывает шум
+            // MCP-серверов, по которому класс отказа не узнать.
+            const last = runtimeEvents(result.stdout).events.findLast(
+              (e) => e.type === 'error' || e.type === 'turn.failed',
+            ) as { message?: unknown; error?: { message?: unknown } } | undefined;
+            const message = last?.message ?? last?.error?.message;
+            if (typeof message === 'string' && message.trim()) text = message.trim();
           }
           text ??= result.stderr
             .split('\n')

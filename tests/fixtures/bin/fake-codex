@@ -307,6 +307,16 @@ if (runtime === 'codex') {
     out({ type: 'error', message: "Codex ran out of room in the model's context window" });
     process.exit(1);
   }
+  // Отказ провайдера (P11-1): текст — событием error в stdout, а в stderr —
+  // посторонний шум (ошибки MCP-серверов), как у живого codex.
+  if (step.providerError) {
+    // Ход начат (как в пилоте: отказ — «runtime завершился отказом», не «недоступен»).
+    out({ type: 'turn.started' });
+    out({ type: 'item.completed', item: { type: 'reasoning', text: 'fixture' } });
+    out({ type: 'error', message: step.providerError });
+    process.stderr.write('ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed\n');
+    process.exit(1);
+  }
   if (started) out({ type: 'item.completed', item: { type: 'agent_message', text: 'fixture' } });
   if (role === 'reviewer' && step.observedCommand)
     out({
