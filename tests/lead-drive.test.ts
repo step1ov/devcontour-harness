@@ -278,7 +278,11 @@ test('lead drive: каталога состояния ещё нет — веду
 
 test('lead drive: новое состояние (пауза первого запуска без причины) — сессия ведущего, не выход owner; пауза оператора — выход owner (20)', async () => {
   const fresh = engineOf();
-  assert.equal(fresh.engine.read((v) => v.control().paused), true, 'новое состояние стоит на паузе первого запуска');
+  assert.equal(
+    fresh.engine.read((v) => v.control().paused),
+    true,
+    'новое состояние стоит на паузе первого запуска',
+  );
   const { promise } = driveOf(fresh, {}, { idleSessions: 1 });
   const data = await promise;
   assert.notEqual(data.outcome, 'owner', data.message);
@@ -1019,5 +1023,31 @@ test('ревью 3: записи начала и конца run в журнал�
   const data = await promise;
   assert.equal(data.sessions[0]!.progressed, false);
   assert.equal(data.outcome, 'no-progress');
+  env.store.close();
+});
+
+test('P10-8: весь код принят, но review-release идёт — ведущего не будим до конца ревью; метка умершего процесса не действует', async () => {
+  const { markReleaseReview, activeReleaseReview } = await import('../src/control/detach.ts');
+  const env = engineOf();
+  ready(env.engine, graphOf({ a: [] }));
+  const a = env.engine.claim('c1')!;
+  accept(env.engine, a.id, a.token);
+  // Идущее ревью — метка с живым pid (этот процесс теста).
+  const unmark = markReleaseReview(env.dir);
+  assert.equal(activeReleaseReview(env.dir)?.pid, process.pid);
+  const { dir, promise } = driveOf(env, {}, { idleSessions: 1 });
+  await new Promise((r) => setTimeout(r, 800));
+  assert.deepEqual(sessionFiles(dir), [], 'пока ревью идёт — ни одной сессии');
+  unmark();
+  assert.equal(activeReleaseReview(env.dir), undefined);
+  const rec = await sessionRecord(dir, 1);
+  assert.equal(rec.env.HARNESS_LEAD_DRIVE_EVENT, 'release-ready');
+  await promise;
+  // Метка процесса, которого уже нет, — не идущее ревью.
+  writeFileSync(
+    join(env.dir, 'review-release-active.json'),
+    JSON.stringify({ pid: 2 ** 22 + 12345, startedAt: new Date().toISOString() }),
+  );
+  assert.equal(activeReleaseReview(env.dir), undefined);
   env.store.close();
 });

@@ -56,7 +56,7 @@ import type { NotPromise } from '../contracts/ports.ts';
 import { diagnoseState } from '../explain/diagnose.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import { LEAD_WAITING_OWNER } from './lead.ts';
-import { lastDetachedRun, logTail } from './detach.ts';
+import { activeReleaseReview, lastDetachedRun, logTail } from './detach.ts';
 import { pendingKind, releaseReady, waitForEvents, waitStatusLine, type WaitData } from './wait.ts';
 
 /** Исходы драйвера и их коды выхода (коды `wait` 10–16 не пересекаются, кроме aborted). */
@@ -675,6 +675,8 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
   const idleLimit = input.idleSessions ?? 3;
   const graceMs = input.graceMs ?? 30_000;
   const pollMs = input.pollMs ?? 1000;
+  /** pid ревью выпуска, о котором драйвер уже написал «жду». */
+  let reviewWaitLogged: number | undefined;
   const log = input.onLog ?? (() => {});
   const sessions: DriveSession[] = [];
   const notices: DriveNotice[] = [];
@@ -878,6 +880,18 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
       }
       if (w.kind === 'release-ready' && readState(input.stateDir, releaseDone))
         return result('release-done', 'выпуск закончен: release done записан, весь код принят');
+      // Ревью выпуска ещё идёт (P10-8): ведущему решать нечего — ждём его конца,
+      // не тратя сессии и счёт простоя.
+      if (w.kind === 'release-ready') {
+        const review = activeReleaseReview(input.stateDir);
+        if (review) {
+          if (reviewWaitLogged !== review.pid)
+            log(`идёт review-release (pid ${review.pid}, с ${review.startedAt}) — жду его конца`);
+          reviewWaitLogged = review.pid;
+          await sleep(pollMs, input.signal);
+          continue;
+        }
+      }
       if (w.kind === 'stopped' && existsSync(stateFile(input.stateDir))) {
         // Run не идёт: если идти дальше нечему, кроме решения владельца, — выход.
         const pending = await scanPending(input, w.cursor);

@@ -18,6 +18,7 @@ import {
   openSync,
   readFileSync,
   readSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -185,6 +186,46 @@ export function lastDetachedRun(stateDir: string): DetachedRun | undefined {
   try {
     const r = JSON.parse(readFileSync(file, 'utf8')) as DetachedRun;
     return typeof r.log === 'string' ? r : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Идущее ревью выпуска (P10-8): `review-release` ставит метку
+ * `<state>/review-release-active.json` (pid, начало) на время своей работы, чтобы
+ * `lead drive` не будил ведущего на «выпуск готов», пока ревью (прогон gates
+ * и reviewer, до десятков минут) не закончилось. Метка умершего процесса не
+ * действует.
+ */
+const reviewMarker = (stateDir: string) => join(resolve(stateDir), 'review-release-active.json');
+
+export function markReleaseReview(stateDir: string, now = new Date()): () => void {
+  const file = reviewMarker(stateDir);
+  mkdirSync(resolve(stateDir), { recursive: true });
+  writeFileSync(file, JSON.stringify({ pid: process.pid, startedAt: now.toISOString() }), {
+    mode: 0o600,
+  });
+  return () => {
+    try {
+      const r = JSON.parse(readFileSync(file, 'utf8')) as { pid?: number };
+      if (r.pid === process.pid) rmSync(file, { force: true });
+    } catch {
+      // нет или испорчена — снимать нечего
+    }
+  };
+}
+
+export function activeReleaseReview(
+  stateDir: string,
+): { pid: number; startedAt: string } | undefined {
+  const file = reviewMarker(stateDir);
+  if (!existsSync(file)) return undefined;
+  try {
+    const r = JSON.parse(readFileSync(file, 'utf8')) as { pid?: unknown; startedAt?: unknown };
+    if (typeof r.pid !== 'number' || typeof r.startedAt !== 'string') return undefined;
+    process.kill(r.pid, 0);
+    return { pid: r.pid, startedAt: r.startedAt };
   } catch {
     return undefined;
   }
