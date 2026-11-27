@@ -110,8 +110,6 @@ async function writer(
   const feedback = failedGates
     ? (await gateFeedback(failedGates, execution.redact).catch(() => undefined))?.text
     : undefined;
-  // Упавшие регрессионные gates прошлой сдачи: ревью её одобрило (alpha.76).
-  const regressed = failedGates ? failedRegression(failedGates) : [];
   // Отказ только областью (R1): пути и база работы — убрать или вернуть их.
   const outside =
     previous?.failureKind === 'scope-violation' ? scopeRejectedPaths(previous.error) : undefined;
@@ -134,7 +132,7 @@ async function writer(
       : {}),
     ...(attempt.input ? { answer: attempt.input.requestId } : {}),
     ...(feedback ? { feedback } : {}),
-    ...(regressed.length ? { regressed } : {}),
+    ...regressionDelta(failedGates, previous),
     ...(findings ? { findings } : {}),
     ...(context ? { context } : {}),
     ...(merged ? { merged } : {}),
@@ -245,6 +243,20 @@ async function writer(
     const why = text(error).slice(0, 500);
     return invoke(full + '\n\n' + (await summary(why)), undefined, 'fallback', why);
   }
+}
+
+/**
+ * Упавшие регрессионные gates засчитанной сдачи `counted` (её ревью
+ * одобрило, alpha.76) для продолжения writer. Сдача не прошлая (после неё —
+ * незасчитанный отказ: окружение, вопрос, прерывание) — «более ранняя».
+ */
+export function regressionDelta(
+  counted: AttemptState | undefined,
+  previous: AttemptState | undefined,
+): Pick<ThinDelta, 'regressed' | 'regressedEarlier'> {
+  const regressed = counted ? failedRegression(counted) : [];
+  if (!regressed.length) return {};
+  return { regressed, ...(counted !== previous ? { regressedEarlier: true } : {}) };
 }
 
 /** Регрессионные gates попытки, чья последняя запись — провал. */

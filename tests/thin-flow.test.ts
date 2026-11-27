@@ -17,7 +17,8 @@ import { Engine } from '../src/engine/engine.ts';
 import { Runner } from '../src/engine/runner.ts';
 import { standaloneHost } from '../src/engine/standalone.ts';
 import { SqliteExecutionStore } from '../src/storage/sqlite.ts';
-import { resumePrompt } from '../src/thin/prompt.ts';
+import { regressionDelta } from '../src/thin/flow.ts';
+import { regressedText, resumePrompt } from '../src/thin/prompt.ts';
 import { hsetup } from './harness-fixture.ts';
 import { approve, bin, greet, implement, runAll, setup } from './runner-fixture.ts';
 
@@ -659,7 +660,7 @@ const positions = (a: { evidence: { kind: string; gate?: string }[] }, gate: str
 });
 
 test('R3: свои gates → ревью → регрессионные gates → CAS; writer видит и гоняет только свои', async () => {
-  const ctx = withRegression({ scenario: { writer: rec(implement()), reviewer: approve() } });
+  const ctx = withRegression({ scenario: { writer: rec(implement()), reviewer: rec(approve()) } });
   await ctx.run();
   const [a] = ctx.attempts();
   assert.equal(a!.status, 'succeeded', a!.error);
@@ -674,6 +675,18 @@ test('R3: свои gates → ревью → регрессионные gates →
   assert.match(writer, /"command":\[[^\]]*test\/run\.js"\]/);
   assert.doesNotMatch(writer, /test\/legacy\.js/, 'команды регрессионного gate у writer нет');
   assert.match(writer, /Regression gates of this order: legacy\. .*They are not yours to run/);
+  // Reviewer видит и пробует только свои gates (их же получает проба ревью).
+  const review = readdirSync(dirname(ctx.scenarioPath))
+    .filter((f) => /\.reviewer\.\d+\.prompt$/.test(f))
+    .map((f) => readFileSync(join(dirname(ctx.scenarioPath), f), 'utf8'))
+    .find((r) => r.includes('Review commit:'))!;
+  const proving = /Gates that prove this work: (.*)/.exec(review)![1]!;
+  assert.match(proving, /"id":"unit"/);
+  assert.doesNotMatch(proving, /legacy/, 'регрессионного gate среди gates ревью нет');
+  assert.match(
+    review,
+    /The harness runs the regression gates legacy after approval, before merging; they are not part of this review\./,
+  );
 });
 
 test('R3: отказ ревью — регрессионные gates не исполнялись; следующая сдача — заново', async () => {
@@ -725,4 +738,21 @@ test('R3: регрессия после одобренного ревью — wr
     second!.evidence.some((e) => e.kind === 'review' && e.passed),
     'новое ревью',
   );
+});
+
+test('R3 L7: регрессия не прошлой сдачи (после неё незасчитанный отказ) — «более ранняя сдача»', () => {
+  const regressed = {
+    id: 'r1',
+    regressionGates: ['legacy'],
+    evidence: [{ kind: 'test', gate: 'legacy', passed: false }],
+  } as never;
+  const environment = { id: 'r2', failureKind: 'environment', evidence: [] } as never;
+  assert.deepEqual(regressionDelta(regressed, regressed), { regressed: ['legacy'] });
+  assert.deepEqual(regressionDelta(regressed, environment), {
+    regressed: ['legacy'],
+    regressedEarlier: true,
+  });
+  assert.deepEqual(regressionDelta(undefined, environment), {});
+  assert.match(regressedText(['legacy']), /^The review approved the previous handover/);
+  assert.match(regressedText(['legacy'], true), /^The review approved an earlier handover/);
 });

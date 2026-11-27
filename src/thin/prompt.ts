@@ -40,8 +40,10 @@ export interface ThinDelta {
   answer?: string;
   /** Блок провала gates прошлой сдачи (`gateFeedback`, его пределы). */
   feedback?: string;
-  /** Упавшие регрессионные gates прошлой сдачи: ревью её одобрило (alpha.76). */
+  /** Упавшие регрессионные gates засчитанной сдачи: ревью её одобрило (alpha.76). */
   regressed?: string[];
+  /** Эта сдача — не прошлая: после неё был незасчитанный отказ. */
+  regressedEarlier?: boolean;
   findings?: CodeReviewHistory;
   context?: ContextSnapshot;
   /** Цель слита в дерево работы перед сдачей; `conflicts` — файлы с конфликтом. */
@@ -67,9 +69,18 @@ export function regressionGatesText(ids: readonly string[]): string {
   return `Regression gates of this order: ${ids.join(', ')}. They check suites of other works on the target that this work must not break. They are not yours to run: the harness runs them on the merge after the review approves, before accepting; a failure comes back to you with its output.`;
 }
 
-/** Прошлая сдача одобрена ревью и упала на регрессионных gates. */
-export function regressedText(ids: readonly string[]): string {
-  return `The review approved the previous handover, but the regression gates ${ids.join(', ')} failed after it: your change breaks a suite of another work. Fix that within the write scope; you may rerun the failing cases alone to reproduce. The next handover runs your gates and a new review again.`;
+/** Reviewer тонкого режима: регрессионные gates — у harness после одобрения. */
+export function regressionReviewText(ids: readonly string[]): string {
+  return `The harness runs the regression gates ${ids.join(', ')} after approval, before merging; they are not part of this review.`;
+}
+
+/**
+ * Засчитанная сдача одобрена ревью и упала на регрессионных gates: прошлая
+ * или, если после неё был незасчитанный отказ, более ранняя (`earlier`).
+ */
+export function regressedText(ids: readonly string[], earlier = false): string {
+  const which = earlier ? 'an earlier handover' : 'the previous handover';
+  return `The review approved ${which}, but the regression gates ${ids.join(', ')} failed after it: your change breaks a suite of another work. Fix that within the write scope; you may rerun the failing cases alone to reproduce. The next handover runs your gates and a new review again.`;
 }
 
 /** Подготовка окружения упала на файлах дерева работы: исполнитель их чинит. */
@@ -119,7 +130,7 @@ const deltaParts = (d: ThinDelta) => [
   d.diagnosis ?? '',
   d.dropped?.length ? droppedOutputsWriterText(d.dropped) : '',
   d.feedback ?? '',
-  d.regressed?.length ? regressedText(d.regressed) : '',
+  d.regressed?.length ? regressedText(d.regressed, d.regressedEarlier) : '',
   findingsText(d.findings, false),
   d.answer ? answersText(d.context, d.answer) : '',
   d.merged ? mergeText(d.merged) : '',

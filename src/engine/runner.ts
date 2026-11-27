@@ -281,6 +281,7 @@ import { thinFlow } from '../thin/flow.ts';
 import type { ThinKit } from '../thin/kit.ts';
 import { SessionLost } from '../thin/session.ts';
 import { discardWork } from '../thin/tree.ts';
+import { regressionReviewText } from '../thin/prompt.ts';
 import { evaluateInput, normalizeImplementation, type InputEvaluation } from './input-policy.ts';
 
 type Repo = ExecutionPolicy['repositories'][number];
@@ -4431,7 +4432,12 @@ export class Runner {
     const diff = await codeReviewDiff(cwd, base, sha);
     const status = await git(cwd, 'status', '--porcelain', '--untracked-files=all');
     const repo = this.repo(attempt.repositoryId);
-    const gates = ordered(repo.gates, attempt.requiredGates ?? repo.gates.map((g) => g.id));
+    // Тонкий режим (alpha.76, R3): регрессионные gates исполняет harness после
+    // одобрения, до CAS. Reviewer видит и пробует только свои gates работы.
+    const after = harnessModeOf(this.policy) === 'thin' ? (attempt.regressionGates ?? []) : [];
+    const gates = ordered(repo.gates, attempt.requiredGates ?? repo.gates.map((g) => g.id)).filter(
+      (g) => !after.includes(g.id),
+    );
     const scope = codeReviewScope(attempt.repositoryId, attempt.workId);
     const calls = 1 + (this.policy.reviewProtocolRetries ?? DEFAULT_REVIEW_PROTOCOL_RETRIES);
     // Адаптер без протокола переходов: переходы не требуются (alpha.5), ошибка
@@ -4482,6 +4488,7 @@ export class Runner {
       ...this.notes(attempt, true, sha),
       ...(await this.hostNotes(work, attempt, true)),
       ...(unchanged ? [ALREADY_SATISFIED_REVIEW_NOTE] : []),
+      ...(after.length ? [regressionReviewText(after)] : []),
       // Новые файлы, убранные из кандидата как выходы gates исполнителя (P11-5).
       ...((dropped) => (dropped.length ? [droppedOutputsReviewText(dropped)] : []))(
         await droppedGateOutputs(artifacts),
