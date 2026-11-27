@@ -11,6 +11,7 @@ import {
   checkDocsWorks,
   RELEASE_DOCS_HINT,
   releaseDocsLine,
+  releaseDocsMode,
   releaseDocsOpen,
   releaseDocsState,
 } from './release-docs.ts';
@@ -24,6 +25,7 @@ import {
   WORKSPACE_OWNER,
   INPUT_SOURCE_KIND,
   digestOf,
+  harnessModeOf,
 } from '../contracts/index.ts';
 import { requestsOf } from '../engine/input-requests.ts';
 import { recordDocsWorks } from './lead.ts';
@@ -351,6 +353,20 @@ export async function reviewRelease(
   );
 }
 
+const RELEASE_DOCS_CHECK_BASE =
+  'Documentation check: the user and operator documentation in the checkout (README, docs, setup and run instructions, configuration examples) must describe what the accepted target does, including changes made by late works. A doc that contradicts the target, misses a new command, setting or user-visible behaviour, or describes removed behaviour is ';
+
+/**
+ * Проверка документации в ревью выпуска тонкого режима (alpha.74, P10-7):
+ * блокирующая находка только при `release.docs: required`; при `advisory`
+ * (умолчание) — замечание, раунд она не блокирует (ревью a74 M4).
+ */
+export const releaseDocsCheck = (mode: 'required' | 'advisory') =>
+  RELEASE_DOCS_CHECK_BASE +
+  (mode === 'required'
+    ? 'a blocking finding; name the file.'
+    : 'a note, not a blocking finding (release.docs: advisory); name the file.');
+
 /**
  * Договор выпуска для репозитория на `head`: постановки и критерии, ответы
  * владельца, файлы топологии на head. `digest` — по ПОЛНОМУ тексту (без
@@ -365,6 +381,12 @@ export async function releaseContract(
   sha: string,
 ): Promise<{ prompt: string; digest: string }> {
   const state = ctx.engine.read((v) => contractFromState(v, repositoryId));
+  // Тонкий режим (alpha.74, P10-7): документацию выпуска проверяет само ревью
+  // выпуска — поздняя работа исправлений, правящая документацию, закрывает шаг
+  // (--docs-work), а устаревшая документация — находка этого же раунда.
+  const docsMode = releaseDocsMode(ctx.policy);
+  const docsCheck =
+    harnessModeOf(ctx.policy) === 'thin' && docsMode !== 'off' ? releaseDocsCheck(docsMode) : '';
   const owner = ctx.engine.read((v) => releaseBriefsAndAnswers(v, repositoryId));
   const topology = ctx.policy.release?.topology ?? [];
   const files: { full: string; clipped: string }[] = [];
@@ -417,6 +439,7 @@ export async function releaseContract(
         ? '(e) Deploy topology (policy release.topology, read from head):\n' + list.join('\n')
         : '(e) Deploy topology: the policy names no topology files (release.topology). Find the production gateway/proxy configs and production env files in the checkout yourself; their absence for a deployed app is a finding.',
       'Topology check: compare the production routing and env (gateway/proxy routes, production env files, public base URLs for media, uploads and API) with what the gates and tests exercised (often the API port directly). Every user-visible URL the works produce must be routed by the production gateway; report mismatches as blocking.',
+      ...(docsCheck ? [docsCheck] : []),
       '(f) The diff base..head follows.',
     ].join('\n\n');
   const end = tail(files.map((f) => f.clipped));

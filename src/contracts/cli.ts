@@ -2761,7 +2761,12 @@ export const leadDriveDataSchema = z.strictObject({
     .array(
       z.strictObject({
         session: z.number().int().positive(),
-        kind: z.union([waitDataSchema.shape.kind, z.literal('owner-question')]),
+        /** `goals-changed` (alpha.74): оператор изменил цели драйвера, сессия без события harness. */
+        kind: z.union([
+          waitDataSchema.shape.kind,
+          z.literal('owner-question'),
+          z.literal('goals-changed'),
+        ]),
         workId: idSchema.optional(),
         cursor: z.number().int().min(0),
         exitCode: z.number().int().nullable(),
@@ -2787,7 +2792,7 @@ export const leadDriveDataSchema = z.strictObject({
   status: z.string().max(500),
   last: z
     .strictObject({
-      kind: waitDataSchema.shape.kind,
+      kind: z.union([waitDataSchema.shape.kind, z.literal('goals-changed')]),
       workId: idSchema.optional(),
       next: waitDataSchema.shape.next,
     })

@@ -216,9 +216,10 @@ human opted in with `inputPolicy.leadAnswers.technical: true`
 in `questions.line`. It applies when the writer marked the question
 `impact: technical` and it has no critical-path floor; a question with the
 declared floor (severity 10 or a named area) is yours only when it names
-areas and every one is in `technicalAreas` (light default: `internal`, a fork
-inside the code that changes no approved contract, public API, data model or
-security). Questions about `contract` or `api` go to the owner unless the
+areas and every one is in `technicalAreas` (light and thin default:
+`internal`, a fork inside the code that changes no approved contract, public
+API, data model or security, and `migration`, a data migration the writer
+marked `impact: technical`). Questions about `contract` or `api` go to the owner unless the
 owner listed them; a severity-10 question with no area goes to the owner. `explain` and
 `status` then name you (`leadMay: technical`).
 Read the options, choose, and record the choice with the reason:
@@ -228,7 +229,12 @@ Read the options, choose, and record the choice with the reason:
 вопрос)» in `status`, `explain`, `handoff` and the report (a count there);
 `explain` and `handoff` also carry your reason.
 If you see that an option would in fact change what the user sees or gets,
-do not decide it: pass it on to the human as above.
+do not decide it: pass it on to the human as above. Before you answer a
+`migration` question, check that every option is additive or reversible
+(new tables or columns, backfill, a rollback exists). A migration that
+deletes, truncates or irreversibly rewrites existing user data, or has no
+rollback, is the owner's even when marked `impact: technical`: do not
+answer it, pass it on.
 
 Never close a question that changes the result for the user (`impact`
 absent or `user-visible`) with `--actor lead`: the harness refuses it with

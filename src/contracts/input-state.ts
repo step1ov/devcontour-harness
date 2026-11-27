@@ -32,10 +32,14 @@ const blockingQuestion = (r: Pick<InputRequest, 'kind' | 'blocking'>) =>
 export const leadTechnicalAreas = ['internal', 'contract', 'api', 'migration'] as const;
 export type LeadTechnicalArea = (typeof leadTechnicalAreas)[number];
 /**
- * Умолчание облегчённого режима (P9-1, ревью H1): внутренние технические
- * вопросы решает ведущий; договор и публичный API остаются у владельца.
+ * Умолчание облегчённого и тонкого режимов (P9-1, ревью H1; P10-5,
+ * alpha.74): технический вопрос (`impact: technical`) решает ведущий и с
+ * минимумом `declared`, если каждая названная область — внутренняя
+ * (`internal`) или миграция данных (`migration`): исполнитель сам сказал,
+ * что результат для пользователя тот же. Договор, публичный API, продукт и
+ * приёмка остаются у владельца, пока он не перечислит их явно.
  */
-export const LIGHT_LEAD_TECHNICAL_AREAS: readonly LeadTechnicalArea[] = ['internal'];
+export const LIGHT_LEAD_TECHNICAL_AREAS: readonly LeadTechnicalArea[] = ['internal', 'migration'];
 
 /** Разрешение ответов ведущего в объёме, который читает правило (без zod). */
 export interface LeadAnswersRule {

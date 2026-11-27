@@ -49,12 +49,6 @@ export const releaseDocsMode = (policy: Pick<ExecutionPolicy, 'release'>) =>
 const labelled = (w: WorkState) => w.order.labels?.includes(DOCS_LABEL) === true;
 
 /**
- * Состояние шага: работы выпуска — неотменённые работы всех графов; корни —
- * работы не документации, от которых не зависит ни одна другая работа не
- * документации. Работа документации стоит «после корней», когда она
- * (транзитивно) зависит от каждого корня; `done` — такая работа принята.
- */
-/**
  * Работы текущего выпуска (ревью 1): неотменённые, без принятых до последнего
  * `release done` — их связи корнями нового выпуска не считаются.
  */
@@ -74,6 +68,14 @@ function currentReleaseWorks(
   return view.works().filter((w) => w.status !== 'cancelled' && !earlier(w));
 }
 
+/**
+ * Состояние шага: работы выпуска — неотменённые работы всех графов; корни —
+ * работы не документации, от которых не зависит ни одна другая работа не
+ * документации. Работа документации стоит «после корня», когда она
+ * (транзитивно) зависит от него или (alpha.74) она названа `--docs-work`,
+ * корень из того же репозитория и её принятая попытка началась после
+ * приёмки корня; `done` — работа после всех корней принята.
+ */
 export function releaseDocsState(
   view: Pick<ExecutionView, 'works'> & Partial<Pick<ExecutionView, 'attempts' | 'local'>>,
   policy: Pick<ExecutionPolicy, 'release'>,
@@ -112,9 +114,33 @@ export function releaseDocsState(
     }
     return seen;
   };
+  // Принятая попытка работы: последняя успешная (её начало и конец).
+  const accepted = new Map<string, { startedAt: string; finishedAt: string }>();
+  for (const a of view.attempts?.() ?? [])
+    if (a.status === 'succeeded' && a.finishedAt) {
+      const prev = accepted.get(a.workId);
+      if (!prev || a.finishedAt > prev.finishedAt)
+        accepted.set(a.workId, { startedAt: a.startedAt, finishedAt: a.finishedAt });
+    }
+  // После корня (alpha.74, P10-7) — и без связи: принятая попытка работы
+  // документации началась позже приёмки корня, то есть её база уже
+  // содержала корень. Так шаг закрывает поздняя работа (исправления по
+  // ревью выпуска), когда она сама правит документацию, — без отдельной
+  // работы документации. Только работа, явно названная --docs-work (метка
+  // docs у поздней работы — не решение ведущего о документации), и только
+  // для корня того же репозитория: база попытки содержит лишь свой
+  // репозиторий, корень другого остаётся непокрытым.
+  const acceptedAfter = (w: WorkState, root: string) => {
+    if (!named.has(w.id)) return false;
+    const rootWork = byId.get(root);
+    if (!rootWork || rootWork.order.repositoryId !== w.order.repositoryId) return false;
+    const mine = w.status === 'done' ? accepted.get(w.id) : undefined;
+    const theirs = accepted.get(root);
+    return !!mine && !!theirs && mine.startedAt > theirs.finishedAt;
+  };
   const scored = docs.map((w) => {
     const deps = closure(w);
-    return { w, missing: roots.filter((r) => !deps.has(r)) };
+    return { w, missing: roots.filter((r) => !deps.has(r) && !acceptedAfter(w, r)) };
   });
   const after = scored.filter((s) => !s.missing.length);
   if (!after.length) {
@@ -168,7 +194,7 @@ export const docsWorksNote = (ids: readonly string[], command: string) => ({
 
 /** Как закрыть открытый шаг: метка docs или явная работа (`--docs-work`). */
 export const RELEASE_DOCS_HINT =
-  'примите работу документации (метка docs, зависит от корневых работ выпуска); источник задач без меток (Relay) — назовите её явно: --docs-work <id>';
+  'примите работу документации (метка docs, зависит от корневых работ выпуска); источник задач без меток — назовите её явно: --docs-work <id>; поздняя работа (исправления по ревью выпуска), которая сама правит документацию, закрывает шаг для корней своего репозитория, только названная --docs-work <id>';
 
 /**
  * Источник задач без метки docs (doctor): `release.docs: required`, работы

@@ -185,10 +185,13 @@ const INPUT_LIMITS_TEXT = `Limits: question up to ${INPUT_LIMITS.question} chara
 /**
  * Как writer классифицирует вопрос: технический — только когда ни один
  * вариант не меняет того, что видит и получает пользователь продукта; в
- * сомнении — `user-visible`. `forUser` — строка для человека без терминов.
+ * сомнении — `user-visible`. Разрушающая или необратимая миграция данных
+ * пользователей (удаление, очистка, необратимая перезапись, нет отката) —
+ * всегда `user-visible` (ревью a74 M3: её решает владелец, не ведущий).
+ * `forUser` — строка для человека без терминов.
  */
 const IMPACT_TEXT =
-  'Classify the question with `impact`: "technical" only when no option changes what the users of the product see or get — behaviour, texts, data, timing, access or cost stay the same and the choice is internal (a library, code structure, internal naming, a test approach); otherwise "user-visible". When unsure, use "user-visible": such a question goes to a person, a technical one may be decided by the lead. For each option give `forUser`: one short sentence in plain words, without technical terms and in the language of the work order, saying what changes for the user if this option is chosen (for a technical question say that nothing changes for the user), or null if you cannot tell.';
+  'Classify the question with `impact`: "technical" only when no option changes what the users of the product see or get — behaviour, texts, data, timing, access or cost stay the same and the choice is internal (a library, code structure, internal naming, a test approach); otherwise "user-visible". When unsure, use "user-visible": such a question goes to a person, a technical one may be decided by the lead. A data migration that deletes, truncates or irreversibly rewrites existing user data, or has no rollback, is always "user-visible", even with `affects` migration. For each option give `forUser`: one short sentence in plain words, without technical terms and in the language of the work order, saying what changes for the user if this option is chosen (for a technical question say that nothing changes for the user), or null if you cannot tell.';
 
 /** Раздел запроса writer: порог, шкала, критические области и пути, как задать вопрос. */
 export function inputPolicyText(policy: InputPolicy) {
