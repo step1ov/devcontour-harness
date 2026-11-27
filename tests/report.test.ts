@@ -829,3 +829,30 @@ test('round 2: «без действий человека» — не измер�
   assert.match(text, /Pauses are counted from events/);
   assert.doesNotMatch(text, /Pauses and approvals are counted/);
 });
+
+test('P11: отказ ревью без записи ревью — в перечне «review», не «scope»; provider-auth — в окружении наравне с environment', () => {
+  const input = keep(reportFixture(), ['review', 'env']);
+  const r = valueReport(
+    {
+      ...input,
+      attempts: input.attempts.map((a) =>
+        a.id === 'run-review-1'
+          ? { ...a, evidence: a.evidence.filter((e) => e.kind !== 'review') }
+          : a.id === 'run-env-1'
+            ? { ...a, failureKind: 'provider-auth' as const, blocked: false }
+            : a,
+      ),
+    },
+    options,
+  );
+  assert.deepEqual(r.defects.byKind, { gate: 0, review: 1, 'scope-violation': 0 });
+  assert.deepEqual(
+    r.defects.items.map((i) => [i.runId, i.kind]),
+    [['run-review-1', 'review']],
+  );
+  assert.equal(r.environment.buckets.find((b) => b.bucket === 'environment')?.count, 1);
+  assert.equal(r.environment.share.value, 1);
+  // Нарушение области без записи провала — по-прежнему «scope».
+  const scope = valueReport(keep(reportFixture(), ['broken']), options);
+  assert.ok(scope.defects.items.some((i) => i.kind === 'scope'));
+});
