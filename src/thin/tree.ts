@@ -9,7 +9,11 @@ import { mkdir, rm } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { TaskFailure } from '../contracts/index.ts';
 import { git } from '../environment/process.ts';
-import { dropGateOutputs } from '../verification/gate-outputs.ts';
+import {
+  dropGateOutputs,
+  NO_GATE_OUTPUTS,
+  type GateOutputs,
+} from '../verification/gate-outputs.ts';
 
 /** Ветка дерева работы. */
 export const workBranch = (workId: string) => `harness/work-${workId}`;
@@ -66,7 +70,7 @@ const HARNESS_GIT = [
 export async function commitWork(
   dir: string,
   message: string,
-  outputs: readonly string[] = [],
+  outputs: GateOutputs = NO_GATE_OUTPUTS,
   dropped?: (paths: string[]) => void,
 ): Promise<string> {
   await git(dir, 'add', '-A');

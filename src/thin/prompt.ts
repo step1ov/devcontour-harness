@@ -7,6 +7,7 @@
 import { pinnedBytes, type ContextSnapshot } from '../contracts/index.ts';
 import { findingsText } from '../engine/prompt.ts';
 import type { CodeReviewHistory } from '../contracts/index.ts';
+import { droppedOutputsWriterText } from '../verification/gate-outputs.ts';
 
 /** Правило тонкого режима в запросе новой сессии. */
 export const THIN_WRITER_TEXT =
@@ -51,6 +52,8 @@ export interface ThinDelta {
   scope?: { paths: string[]; base: string };
   /** Разбор ведущего после прошлой сессии (`leadDiagnosisNote`, R4). */
   diagnosis?: string;
+  /** Новые файлы прошлой сдачи, убранные из кандидата как выходы gates (P11-5). */
+  dropped?: string[];
 }
 
 /** Подготовка окружения упала на файлах дерева работы: исполнитель их чинит. */
@@ -88,6 +91,7 @@ const deltaParts = (d: ThinDelta) => [
     : '',
   d.scope ? scopeText(d.scope) : '',
   d.diagnosis ?? '',
+  d.dropped?.length ? droppedOutputsWriterText(d.dropped) : '',
   d.feedback ?? '',
   findingsText(d.findings, false),
   d.answer ? answersText(d.context, d.answer) : '',

@@ -255,7 +255,12 @@ import {
   type GateFeedback,
 } from './gate-feedback.ts';
 import { SCOPE_PATHS_TEXT, scopeViolations } from './scope.ts';
-import { dropGateOutputs, gateOutputPaths } from '../verification/gate-outputs.ts';
+import {
+  dropGateOutputs,
+  droppedGateOutputs,
+  droppedOutputsReviewText,
+  gateOutputPaths,
+} from '../verification/gate-outputs.ts';
 import { generatorNote, runGenerators, selectGenerators } from '../verification/generators.ts';
 import {
   contractDocuments,
@@ -2450,7 +2455,11 @@ export class Runner {
                     if (left.size)
                       await writeFile(
                         join(dir, 'gate-outputs.json'),
-                        JSON.stringify({ outputs, dropped: [...left].sort() }, null, 2),
+                        JSON.stringify(
+                          { outputs: outputs.paths, dropped: [...left].sort() },
+                          null,
+                          2,
+                        ),
                       );
                     // Пустой результат — не отказ сразу: приёмку могла уже
                     // выполнить зависимость. Кандидат — сама база (без
@@ -4473,6 +4482,10 @@ export class Runner {
       ...this.notes(attempt, true, sha),
       ...(await this.hostNotes(work, attempt, true)),
       ...(unchanged ? [ALREADY_SATISFIED_REVIEW_NOTE] : []),
+      // Новые файлы, убранные из кандидата как выходы gates исполнителя (P11-5).
+      ...((dropped) => (dropped.length ? [droppedOutputsReviewText(dropped)] : []))(
+        await droppedGateOutputs(artifacts),
+      ),
       ...(followUps.length
         ? [
             REVIEW_FOLLOW_UPS_TEXT +

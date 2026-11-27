@@ -14,7 +14,7 @@
 import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import {
   codeReviewHistory,
   codeReviewScope,
@@ -34,7 +34,7 @@ import { git } from '../environment/process.ts';
 import { redactDeep } from '../environment/redaction.ts';
 import { scopeRejectedPaths } from '../engine/scope.ts';
 import { orderedScope } from '../verification/gate-scope.ts';
-import { gateOutputPaths } from '../verification/gate-outputs.ts';
+import { droppedGateOutputs, gateOutputPaths } from '../verification/gate-outputs.ts';
 import { generatorNote, selectGenerators } from '../verification/generators.ts';
 import { writerDependenciesNote, writerDependencyGates } from '../verification/gates.ts';
 import type { ThinHandover, ThinKit } from './kit.ts';
@@ -107,8 +107,11 @@ async function writer(
   // Отказ только областью (R1): пути и база работы — убрать или вернуть их.
   const outside =
     previous?.failureKind === 'scope-violation' ? scopeRejectedPaths(previous.error) : undefined;
+  // Новые файлы прошлой сдачи, которые harness не взял в кандидата как выходы gates.
+  const dropped = previous ? await droppedGateOutputs(join(dirname(artifacts), previous.id)) : [];
   const delta: ThinDelta = {
     ...(previous?.error ? { reason: previous.error } : {}),
+    ...(dropped.length ? { dropped } : {}),
     ...(outside
       ? {
           scope: {
@@ -250,7 +253,7 @@ function gateOutputs(h: ThinHandover) {
       await mkdir(dir, { recursive: true });
       await writeFile(
         join(dir, 'gate-outputs.json'),
-        JSON.stringify({ outputs, dropped: [...dropped].sort() }, null, 2),
+        JSON.stringify({ outputs: outputs.paths, dropped: [...dropped].sort() }, null, 2),
       );
     },
   };

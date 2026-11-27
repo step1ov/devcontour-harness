@@ -10,7 +10,7 @@ import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { cliAdapter } from '../src/agents/cli-adapter.ts';
 import { Engine } from '../src/engine/engine.ts';
@@ -522,6 +522,41 @@ test('P11-5: отчёты и артефакты gates, которые испол
     'playwright-report/data/trace.zip',
     'test-results/junit.xml',
   ]);
+});
+
+test('P11-5: убранные выходы gates названы в продолжении writer и в заметке reviewer', async () => {
+  const ctx = thin({
+    scenario: {
+      writer: [
+        rec(
+          implement({
+            'src/greet.js': greet,
+            'test-results/junit.xml': '<testsuite/>\n',
+            'docs/notes.md': 'notes\n',
+          }),
+        ),
+        rec({ ...implement({}), remove: ['docs/notes.md'] }),
+      ],
+      reviewer: rec(approve()),
+    },
+  });
+  await ctx.run();
+  const [first, second] = ctx.attempts();
+  assert.equal(first!.failureKind, 'scope-violation', first!.error);
+  assert.equal(second!.status, 'succeeded', second!.error);
+  assert.match(
+    ctx.prompt(1),
+    /kept these new files out of your previous handover as outputs of gate runs .*: "test-results\/junit\.xml"\./,
+  );
+  assert.doesNotMatch(ctx.prompt(0), /outputs of gate runs/);
+  // Ревью кода — последний вызов reviewer (первые — ревью плана).
+  const reviews = readdirSync(dirname(ctx.scenarioPath))
+    .filter((f) => /\.reviewer\.\d+\.prompt$/.test(f))
+    .map((f) => readFileSync(join(dirname(ctx.scenarioPath), f), 'utf8'));
+  assert.match(
+    reviews.find((r) => r.includes('Base commit')) ?? reviews.join('\n'),
+    /kept these new files out of the candidate as outputs of the writer's own gate runs, so they are not in the diff: "test-results\/junit\.xml"\./,
+  );
 });
 
 test('R1: отказ только областью — продолжение называет пути и не требует гонять gates заново', async () => {
