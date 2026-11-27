@@ -20,6 +20,7 @@ import {
   driveLead,
   eventSummary,
   parseAgentTemplate,
+  rememberDriveGoals,
   writeHarnessWrapper,
 } from '../src/control/drive.ts';
 import { detachRun, harnessInvocation, lastDetachedRun } from '../src/control/detach.ts';
@@ -95,10 +96,14 @@ function driveOf(
     mode?: 'wait-go' | 'exit' | 'hang' | 'grandchild-hang' | 'background-writer';
     code?: number;
     extraArgs?: string[];
+    /** false — без записи целей прошлого запуска (alpha.74, P10-3). */
+    goalsRecord?: false;
   } = {},
   extra: Partial<Parameters<typeof driveLead>[0]> = {},
 ) {
   const dir = mkdtempSync(join(tmpdir(), 'harness-drive-agent-'));
+  // Прежний запуск драйвера с теми же целями: цели не новые.
+  if (options.goalsRecord !== false) rememberDriveGoals(env.dir, extra.goals ?? GOALS);
   const promise = driveLead({
     stateDir: env.dir,
     policy: env.engine.policy,
@@ -143,6 +148,7 @@ function driveLeadOf(
   extra: Partial<Parameters<typeof driveLead>[0]> = {},
 ) {
   const dir = mkdtempSync(join(tmpdir(), 'harness-drive-lead-'));
+  rememberDriveGoals(env.dir, extra.goals ?? GOALS);
   const policyFile = join(dir, 'policy.json');
   writeFileSync(policyFile, JSON.stringify(env.engine.policy));
   const promise = driveLead({
@@ -1100,5 +1106,86 @@ test('ревью P10-8: метка ревью появилась после ко
   // После ревью то же состояние без решения ведущего — не новая сессия, а no-progress.
   assert.equal(data.sessions.length, 1, JSON.stringify(data.sessions));
   assert.equal(data.outcome, 'no-progress');
+  env.store.close();
+});
+
+test('P10-3: цели драйвера изменились — сессия goals-changed сразу, не на событии harness; те же цели — сессии нет; первая настройка — нет', async () => {
+  const env = engineOf(policyOf((p: Record<string, unknown>) => (p.maxAttempts = 3)));
+  ready(env.engine, graphOf({ a: [], b: [] }));
+  // Работы идут: ведущего ничего не ждёт.
+  env.engine.claim('c1');
+  env.engine.claim('c1');
+  const goalsFile = join(env.dir, 'lead-drive-goals.json');
+  assert.ok(!existsSync(goalsFile));
+  const run = async (goals: string, goalsRecord?: false) => {
+    const abort = new AbortController();
+    const { dir, promise } = driveOf(env, goalsRecord === false ? { goalsRecord } : {}, {
+      goals,
+      signal: abort.signal,
+    });
+    setTimeout(() => abort.abort(), 1500);
+    return { dir, data: await promise };
+  };
+  // Записи нет, а работы уже есть (драйвер прежней версии): цели — новые.
+  const first = await run(GOALS, false);
+  assert.deepEqual(
+    first.data.sessions.map((x) => x.kind),
+    ['goals-changed'],
+  );
+  const rec = await sessionRecord(first.dir, 1);
+  assert.ok(rec.stdin.startsWith(GOALS));
+  assert.match(rec.stdin, /Событие: goals-changed — оператор изменил цели драйвера/);
+  assert.match(rec.stdin, /ответы владельца, указания/);
+  assert.equal(rec.env.HARNESS_LEAD_DRIVE_EVENT, 'goals-changed');
+  assert.match(rec.stdin, /в источнике задач .*lead end --waiting owner/s);
+  leadDriveDataSchema.parse(first.data);
+  assert.ok(existsSync(goalsFile), 'цели записаны в каталоге состояния');
+  // Тот же запуск с теми же целями — сессии нет.
+  const same = await run(GOALS, false);
+  assert.deepEqual(same.data.sessions, []);
+  // Оператор добавил ответы владельца — сессия сразу.
+  const answers = GOALS + '\nОтветы владельца: формат приветствия — Hello, <name>!';
+  const changed = await run(answers, false);
+  assert.deepEqual(
+    changed.data.sessions.map((x) => x.kind),
+    ['goals-changed'],
+  );
+  assert.ok((await sessionRecord(changed.dir, 1)).stdin.includes('Ответы владельца'));
+  assert.deepEqual((await run(answers, false)).data.sessions, []);
+  env.store.close();
+
+  // Первая настройка (работ нет) — без сессии goals-changed.
+  const fresh = engineOf();
+  const abort = new AbortController();
+  const { promise } = driveOf(
+    fresh,
+    { goalsRecord: false },
+    { idleSessions: 1, signal: abort.signal },
+  );
+  setTimeout(() => abort.abort(), 1500);
+  const data = await promise;
+  assert.ok(
+    data.sessions.every((x) => x.kind !== 'goals-changed'),
+    JSON.stringify(data.sessions),
+  );
+  fresh.store.close();
+});
+
+test('P10-3: новые цели при отказе, который ждёт ведущего, — одна сессия этого события, со строкой о новых целях', async () => {
+  const env = engineOf(policyOf((p: Record<string, unknown>) => (p.maxAttempts = 1)));
+  ready(env.engine, graphOf({ a: [], b: [] }));
+  const a = env.engine.claim('c1')!;
+  env.engine.claim('c1');
+  env.engine.fail(a.id, a.token, 'gate unit упал', { kind: 'gate' });
+  const { dir, promise } = driveOf(env, { goalsRecord: false }, { idleSessions: 1 });
+  const data = await promise;
+  assert.deepEqual(
+    data.sessions.map((x) => x.kind),
+    ['failed'],
+  );
+  assert.match(
+    (await sessionRecord(dir, 1)).stdin,
+    /Также: оператор изменил цели драйвера .* — вместе с этим событием/,
+  );
   env.store.close();
 });

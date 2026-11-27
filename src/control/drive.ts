@@ -26,6 +26,13 @@
 // ведущего второй раз подряд без его решения: такая остановка — no-progress
 // (или owner, если ждут владельца). Сессии без решений подряд и сессии
 // сверх `--session-timeout` — остановка с диагнозом.
+//
+// Цели (alpha.74, P10-3). Драйвер помнит digest своих целей в каталоге
+// состояния (`lead-drive-goals.json`). Цели изменились с прошлого запуска
+// (или записи нет, а работы в состоянии уже есть — не первая настройка) —
+// первая сессия получает их сразу, а если ведущего ничего не ждёт, драйвер
+// запускает одну сессию `goals-changed`, не дожидаясь события harness: ответы
+// владельца в целях не ждут следующего отказа. Те же цели — сессии нет.
 
 import { spawn } from 'node:child_process';
 import { createHash } from 'node:crypto';
@@ -70,22 +77,72 @@ export const DRIVE_EXIT_CODES = {
 } as const;
 export type DriveOutcome = keyof typeof DRIVE_EXIT_CODES;
 
+/** Чем разбужен ведущий: исход `wait` или изменённые цели оператора (alpha.74). */
+export type DriveWakeKind = WaitData['kind'] | 'goals-changed';
+/** Событие сессии: как у `wait`, плюс `goals-changed`. */
+export type DriveWait = Omit<WaitData, 'kind'> & { kind: DriveWakeKind };
+
 /** Исходы `wait`, которые будят ведущего (принятие и таймаут — нет). */
-const WAKING = new Set<WaitData['kind']>([
+const WAKING = new Set<DriveWakeKind>([
   'failed',
   'held',
   'question',
   'release-ready',
   'stopped',
+  'goals-changed',
 ]);
+
+/** Запись целей драйвера в каталоге состояния (alpha.74, P10-3). */
+export const DRIVE_GOALS_FILE = 'lead-drive-goals.json';
+const goalsFile = (stateDir: string) => join(resolve(stateDir), DRIVE_GOALS_FILE);
+export const goalsDigest = (goals: string) => createHash('sha256').update(goals).digest('hex');
+
+/** Digest целей прошлого запуска; записи нет или она испорчена — undefined. */
+function recordedGoals(stateDir: string): string | undefined {
+  try {
+    const value = JSON.parse(readFileSync(goalsFile(stateDir), 'utf8')) as { digest?: unknown };
+    return typeof value.digest === 'string' ? value.digest : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Запомнить цели драйвера: только при созданном состоянии (до первой
+ * настройки каталога нет — запись появится после сессии ведущего).
+ */
+export function rememberDriveGoals(stateDir: string, goals: string) {
+  if (!existsSync(stateFile(stateDir))) return;
+  const digest = goalsDigest(goals);
+  if (recordedGoals(stateDir) === digest) return;
+  writeFileSync(
+    goalsFile(stateDir),
+    JSON.stringify({ digest, at: new Date().toISOString() }) + '\n',
+    { mode: 0o600 },
+  );
+}
+
+/**
+ * Цели изменились с прошлого запуска: digest другой, или записи нет, а
+ * работы в состоянии уже есть (драйвер прежней версии или первый запуск
+ * драйвера после ручной работы ведущего).
+ */
+function goalsChanged(stateDir: string, goals: string): boolean {
+  const before = recordedGoals(stateDir);
+  if (before !== undefined) return before !== goalsDigest(goals);
+  return readState(stateDir, (view) => view.works().length > 0) ?? false;
+}
 
 /** Действия explain, которые совершает только человек. */
 const OWNER_ACTIONS = new Set(['raise-budget', 'fix-access']);
 
 export interface DriveSession {
   session: number;
-  /** Чем разбужен ведущий; `owner-question` — передать новый вопрос владельцу. */
-  kind: WaitData['kind'] | 'owner-question';
+  /**
+   * Чем разбужен ведущий; `owner-question` — передать новый вопрос владельцу;
+   * `goals-changed` — оператор изменил цели драйвера (alpha.74).
+   */
+  kind: DriveWakeKind | 'owner-question';
   workId?: string;
   cursor: number;
   /** Код выхода команды ведущего (`null` — снят сигналом). */
@@ -118,7 +175,7 @@ export interface DriveData {
   status: string;
   /** Последнее значимое событие. */
   last?: {
-    kind: WaitData['kind'];
+    kind: DriveWakeKind;
     workId?: string;
     next?: WaitData['next'];
   };
@@ -327,9 +384,13 @@ const questionLine = (r: InputRequest) =>
 /** Как сессия видит вопрос: ответить можете вы, ответил владелец, передать владельцу. */
 type QuestionMode = 'lead' | 'answered' | 'owner';
 
+/** Событие `goals-changed` словами (alpha.74, P10-3). */
+const GOALS_CHANGED =
+  'оператор изменил цели драйвера (цели выше): примените новое (ответы владельца, указания)';
+
 /** Сводка события для новой сессии ведущего: что случилось и какие команды есть. */
 export function eventSummary(
-  w: WaitData,
+  w: DriveWait,
   input: Pick<DriveInput, 'stateDir' | 'policyPath'> & {
     /** Путь обёртки `H` (в окружении сессии — `$H` и в PATH). */
     wrapper: string;
@@ -342,6 +403,8 @@ export function eventSummary(
     question?: QuestionMode;
     /** Новые вопросы владельцу, о которых ведущий ещё не знает. */
     owner?: InputRequest[];
+    /** Цели оператора изменились с прошлого запуска драйвера (alpha.74). */
+    goalsChanged?: boolean;
   },
 ): string {
   const owner = input.owner ?? [];
@@ -361,6 +424,7 @@ export function eventSummary(
     'owner-question': `исполнитель задал вопрос ${req}, на который отвечает только владелец`,
     'release-ready': 'весь код выпуска принят: нужны ревью выпуска и итоговый отчёт',
     stopped: '`harness run` не идёт (нет controller и попыток), а выпуск не закончен',
+    'goals-changed': GOALS_CHANGED,
   };
   const commands: Record<string, string[]> = {
     failed: [
@@ -391,6 +455,11 @@ export function eventSummary(
       `$H explain --state ${S} --policy ${P} --human`,
       `$H run --detach --log <журнал run> --graph <граф> --policy ${P} --state ${S} --author <claude|codex>`,
     ],
+    'goals-changed': [
+      `$H status --state ${S} --human`,
+      `$H explain --state ${S} --policy ${P} --human`,
+      `$H run --detach --log <журнал run> --graph <граф> --policy ${P} --state ${S} --author <claude|codex>   # если run не идёт`,
+    ],
   };
   const text = input.request ? quoted(input.request.question.question) : undefined;
   const ownerLines = owner.length
@@ -414,6 +483,9 @@ export function eventSummary(
         ]
       : []),
     ...ownerLines,
+    input.goalsChanged && kind !== 'goals-changed'
+      ? `Также: ${GOALS_CHANGED} — вместе с этим событием.`
+      : '',
     kind !== 'owner-question' && w.next
       ? `Следующий шаг по explain: ${w.next.actor ?? '—'} ${w.next.action}: ${w.next.message}`
       : '',
@@ -428,7 +500,9 @@ export function eventSummary(
     '`$H run --detach --log <журнал> …` (отдельный процесс, переживёт ваш ход), затем закончите ход коротким итогом.',
     'Не вызывайте `harness wait` в цикле — драйвер разбудит вас при следующем значимом событии. Если дальше нужно',
     'только решение владельца — `$H lead end --state … --waiting owner --reason "…"`: драйвер передаст его и не будет',
-    'будить вас снова.',
+    'будить вас снова. Вопрос владельцу, который вы задали сами в источнике задач (не вопрос исполнителя harness),',
+    'драйвер не видит: если от ответа зависит оставшаяся работа, после вопроса тоже `lead end --waiting owner`;',
+    'ответ придёт в целях драйвера при его перезапуске.',
   ]
     .filter((l, i, all) => l !== '' || all[i - 1] !== '')
     .join('\n');
@@ -622,7 +696,10 @@ async function scanPending(input: DriveInput, cursor: number): Promise<Pending> 
 }
 
 /** Вопрос события: по `requestId` события, иначе последний открытый вопрос работы. */
-function requestOf(w: WaitData, stateDir: string): InputRequest | undefined {
+function requestOf(
+  w: Pick<DriveWait, 'event' | 'workId'>,
+  stateDir: string,
+): InputRequest | undefined {
   return readState(stateDir, (view, _seq, events) => {
     const requests = view.locals('input-requests').map((r) => r.value);
     if (w.event) {
@@ -695,6 +772,9 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
   let last: DriveData['last'];
   /** Ключ прошлой сессии (вид, работа, событие, решения) и как она кончилась. */
   let previous: { key: string; failed: boolean } | undefined;
+  /** Цели изменились с прошлого запуска: первая сессия передаёт их ведущему (alpha.74). */
+  let goalsNew = goalsChanged(input.stateDir, input.goals);
+  if (!goalsNew) rememberDriveGoals(input.stateDir, input.goals);
   // Prompt и журналы сессий — в каталоге журналов или во временном каталоге драйвера.
   const promptDir = input.logDir
     ? (mkdirSync(resolve(input.logDir), { recursive: true, mode: 0o700 }), resolve(input.logDir))
@@ -775,7 +855,7 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
    * уже передан; иначе — вид сессии.
    */
   const resolveQuestion = (
-    w: WaitData,
+    w: DriveWait,
   ): { skip: true } | { skip: false; request: InputRequest; mode: QuestionMode } => {
     const request = requestOf(w, input.stateDir);
     if (!request || (request.lifecycle !== 'pending' && request.lifecycle !== 'answered')) {
@@ -804,7 +884,7 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
       if (input.signal?.aborted) return result('aborted', 'драйвер остановлен сигналом');
       if (readState(input.stateDir, releaseDone))
         return result('release-done', 'выпуск закончен: release done записан, весь код принят');
-      let w: WaitData;
+      let w: DriveWait;
       /** Событие выведено из состояния (очередь стоит, выпуск готов, ждущее), а не из нового события. */
       let level = false;
       if (!existsSync(stateFile(input.stateDir))) {
@@ -834,6 +914,8 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
             cursor,
             waitedMs: 0,
           };
+        // Ведущего ничего не ждёт, а цели новые — сессия сейчас, не на событии.
+        else if (goalsNew) w = { kind: 'goals-changed', status: status(), cursor, waitedMs: 0 };
         else continue;
         level = true;
       } else {
@@ -1006,6 +1088,7 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
           ...(request ? { request } : {}),
           ...(mode ? { question: mode } : {}),
           owner,
+          ...(goalsNew ? { goalsChanged: true } : {}),
         }) +
         '\n';
       const promptFile = join(promptDir, `session-${session}.prompt.md`);
@@ -1043,6 +1126,11 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
         killGraceMs: input.killGraceMs ?? 10_000,
       });
       lastAgentEnd = Date.now();
+      // Цели дошли до ведущего с этой сессией (prompt начинается с них).
+      if (!run.error) {
+        goalsNew = false;
+        rememberDriveGoals(input.stateDir, input.goals);
+      }
       const waiting = readState(input.stateDir, waitingOwnerOf);
       if (waiting?.at && waiting.at !== waitingBefore) {
         ownerWait = waiting.plain ?? 'ведущий ждёт решения владельца';

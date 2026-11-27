@@ -81,6 +81,14 @@ your turn; the same question does not wake you again, the owner's answer
 does. When nothing is left for you but an owner's decision, say so:
 `$H lead end --state <state> --waiting owner --reason "<which decision>"` —
 the driver tells the owner and keeps waiting instead of waking you.
+A product question you ask the owner yourself in the task source (not an
+executor question of harness) is invisible to the driver: when the remaining
+work depends on the answer, follow it with `lead end --waiting owner` too.
+The operator brings the answer back in the driver's goals. When the goals
+changed since the driver's last start (`HARNESS_LEAD_DRIVE_EVENT=goals-changed`,
+or the line «Также: оператор изменил цели драйвера …» in another event's
+summary),
+apply what is new (owner answers, instructions) before anything else.
 
 **Running the driver (operator).** Instead of a lead session that waits:
 
@@ -95,7 +103,12 @@ $H lead drive --state <manifest.paths.state> --policy .harness/policy.json \
 (quotes group arguments); the session prompt goes to its stdin, and
 `{session}`, `{cursor}` and `{prompt-file}` are substituted. `goals.md` is a
 short goals-only prompt (what the release must achieve, who answers what);
-the driver appends the event summary. Each session is new, so the context
+the driver appends the event summary. The driver keeps a digest of the goals
+in the state (`lead-drive-goals.json`). When you restart it with changed
+goals (owner answers, new instructions), or with no record on a state that
+already has works, the first session gets them at once: if nothing else
+waits for the lead, the driver starts one `goals-changed` session before
+waiting for events. The same goals start no extra session. Each session is new, so the context
 stays small; the agent gets `HARNESS_LEAD_DRIVE=1`,
 `HARNESS_LEAD_DRIVE_CURSOR`, `HARNESS_LEAD_DRIVE_SESSION` and
 `HARNESS_LEAD_DRIVE_EVENT`, runs in its own process group, and its stdout
