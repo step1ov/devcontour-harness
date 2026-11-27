@@ -11,7 +11,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { cliAdapter } from '../src/agents/cli-adapter.ts';
 import { Engine } from '../src/engine/engine.ts';
 import { Runner } from '../src/engine/runner.ts';
@@ -676,8 +676,10 @@ test('R3: свои gates → ревью → регрессионные gates →
   assert.doesNotMatch(writer, /test\/legacy\.js/, 'команды регрессионного gate у writer нет');
   assert.match(writer, /Regression gates of this order: legacy\. .*They are not yours to run/);
   // Reviewer видит и пробует только свои gates (их же получает проба ревью).
+  // Только файлы этого сценария: каталог сценариев общий для всех тестов процесса.
+  const own = basename(ctx.scenarioPath) + '.';
   const review = readdirSync(dirname(ctx.scenarioPath))
-    .filter((f) => /\.reviewer\.\d+\.prompt$/.test(f))
+    .filter((f) => f.startsWith(own) && /\.reviewer\.\d+\.prompt$/.test(f))
     .map((f) => readFileSync(join(dirname(ctx.scenarioPath), f), 'utf8'))
     .find((r) => r.includes('Review commit:'))!;
   const proving = /Gates that prove this work: (.*)/.exec(review)![1]!;
