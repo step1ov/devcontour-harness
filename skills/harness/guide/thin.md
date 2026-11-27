@@ -81,8 +81,11 @@ loop). Under the lead driver (`HARNESS_LEAD_DRIVE=1`, `$H lead drive`, see
 --actor lead --reason …`), product ones go to the owner, as in
   `guide recovery`. A technical question rated 10 is still yours when every
   area it names is `internal` or `migration`; `contract`, `api`, `product`,
-  `acceptance`, no area or a critical path go to the owner. The answer
-  reaches the same session.
+  `acceptance`, no area or a critical path go to the owner. Before answering
+  a migration question, check it is additive or reversible: a migration that
+  deletes, truncates or irreversibly rewrites user data, or has no rollback,
+  is the owner's — do not answer it, pass it on. The answer reaches the same
+  session.
 - **Release ready**: all works accepted.
 
 The target moving between the review and the CAS is not your event. The

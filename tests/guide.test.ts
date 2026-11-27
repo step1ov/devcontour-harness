@@ -108,8 +108,14 @@ test('guide thin (alpha.73): весь поток тонкого режима д�
     /What thin mode does NOT have/,
     /retry --reset/,
     /retry --start-over/,
+    // Ревью a74 M3: разрушающую миграцию ведущий не решает.
+    /migration question, check it is additive or reversible.*is the owner's — do not answer it, pass it on/s,
   ])
     assert.match(s.text, rule);
+  assert.match(
+    guideSection('recovery').text,
+    /Before you answer a\s+`migration` question, check that every option is additive or reversible.*is the owner's even when marked `impact: technical`: do not\s+answer it, pass it on/s,
+  );
   assert.ok(skill.includes('`$H guide thin`'), 'тема в оглавлении skill');
   const cli = harness('guide', 'thin');
   assert.equal(cli.status, 0, cli.stderr);

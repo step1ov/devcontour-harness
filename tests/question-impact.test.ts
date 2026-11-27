@@ -130,6 +130,11 @@ test('alpha.55: запрос writer объясняет классификаци�
   assert.match(text, /`impact`: "technical" only when no option changes what the users/);
   assert.match(text, /When unsure, use "user-visible"/);
   assert.match(text, /`forUser`: one short sentence in plain words/);
+  // Ревью a74 M3: разрушающая миграция — не технический вопрос.
+  assert.match(
+    text,
+    /A data migration that deletes, truncates or irreversibly rewrites existing user data, or has no rollback, is always "user-visible"/,
+  );
   const q = (implementationOutputSchema.properties.inputRequest as { required: string[] }).required;
   assert.ok(q.includes('impact'));
   const option = (
