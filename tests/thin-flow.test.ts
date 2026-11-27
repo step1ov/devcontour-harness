@@ -588,6 +588,14 @@ test('ревью M3: отказ областью при открытых нах�
   assert.doesNotMatch(resumePrompt({ scope, findings: closed }), fixAll);
 });
 
+test('ревью L5: пути отказа областью — в кавычках JSON и не больше 50', () => {
+  const paths = Array.from({ length: 60 }, (_, i) => `docs/n, ${i}.md`);
+  const text = resumePrompt({ scope: { paths, base: 'a'.repeat(40) } });
+  assert.match(text, /these paths from your work: "docs\/n, 0\.md", "docs\/n, 1\.md",/);
+  assert.match(text, /"docs\/n, 49\.md" and 10 more\./);
+  assert.doesNotMatch(text, /n, 50\.md/);
+});
+
 test('R1: отказ только областью — продолжение называет пути и не требует гонять gates заново', async () => {
   const ctx = thin({
     scenario: {
@@ -608,7 +616,7 @@ test('R1: отказ только областью — продолжение н
     resume,
     /rejected only because it changes files outside the work order's write scope/,
   );
-  assert.match(resume, /Drop exactly these paths from your work: docs\/notes\.md\./);
+  assert.match(resume, /Drop exactly these paths from your work: "docs\/notes\.md"\./);
   assert.match(resume, /git checkout [0-9a-f]{40} -- <path>/);
   assert.match(resume, /You do not need to rerun the gates for this/);
   assert.doesNotMatch(resume, /rerun your gates in this worktree until they pass/);

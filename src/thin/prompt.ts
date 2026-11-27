@@ -6,6 +6,7 @@
 
 import { pinnedBytes, type ContextSnapshot } from '../contracts/index.ts';
 import { findingsText } from '../engine/prompt.ts';
+import { scopePathList } from '../engine/scope.ts';
 import type { CodeReviewHistory } from '../contracts/index.ts';
 import { droppedOutputsWriterText } from '../verification/gate-outputs.ts';
 
@@ -74,7 +75,7 @@ export function mergeText(m: { conflicts: string[] }): string {
 
 /** Отказ только областью: какие пути убрать или вернуть (R1). */
 export function scopeText(s: { paths: string[]; base: string }): string {
-  return `The handover was rejected only because it changes files outside the work order's write scope (or protected files); the gates and the review did not run. Drop exactly these paths from your work: ${s.paths.join(', ')}. Delete the ones you added (outputs of your own check runs included) and restore the ones you changed to the work base (git checkout ${s.base} -- <path>); do not rewrite history.`;
+  return `The handover was rejected only because it changes files outside the work order's write scope (or protected files); the gates and the review did not run. Drop exactly these paths from your work: ${scopePathList(s.paths)}. Delete the ones you added (outputs of your own check runs included) and restore the ones you changed to the work base (git checkout ${s.base} -- <path>); do not rewrite history.`;
 }
 
 /** Последняя строка продолжения после отказа только областью: gates заново не нужны. */

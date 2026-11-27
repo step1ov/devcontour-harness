@@ -78,3 +78,14 @@ export function scopeRejectedPaths(error: string | undefined): string[] | undefi
   const paths = error!.slice(prefix.length).split(', ').filter(Boolean);
   return paths.length ? paths : undefined;
 }
+
+/** Сколько путей отказа областью называет запрос исполнителя; остальные — числом. */
+export const SCOPE_PATHS_SHOWN = 50;
+
+/** Пути для запроса исполнителя: каждый в кавычках JSON, не больше `SCOPE_PATHS_SHOWN`. */
+export const scopePathList = (paths: readonly string[]) =>
+  paths
+    .slice(0, SCOPE_PATHS_SHOWN)
+    .map((p) => JSON.stringify(p))
+    .join(', ') +
+  (paths.length > SCOPE_PATHS_SHOWN ? ` and ${paths.length - SCOPE_PATHS_SHOWN} more` : '');

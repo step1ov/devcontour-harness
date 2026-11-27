@@ -520,7 +520,18 @@ test('alpha.75 R2: plan-check советует THIN_CHAIN для цепочки 
   const advice = thinAdvice(thin, chain);
   assert.equal(advice.length, 1, advice.join('\n'));
   assert.match(advice[0]!, /^THIN_CHAIN: .*API-1 → SDK-1 → ADMIN-1 → WEB-1/);
-  assert.match(advice[0]!, /не пересекаются/);
+  // Совет — вопрос о конкретной связи, а не утверждение.
+  assert.match(advice[0]!, /Проверьте, действительно ли SDK-1 зависит от API-1/);
+  // Каждая связь цепочки идёт через объявленный контракт — совета нет.
+  const contract = (id: string) => ({ id, digest: '0'.repeat(64) });
+  assert.deepEqual(
+    thinAdvice(thin, [
+      { ...order('API-1', ['api']), contracts: [contract('api')] },
+      { ...order('SDK-1', ['sdk'], ['API-1']), contracts: [contract('api'), contract('sdk')] },
+      { ...order('WEB-1', ['web'], ['SDK-1']), contracts: [contract('sdk')] },
+    ]).filter((a) => a.startsWith('THIN_CHAIN')),
+    [],
+  );
   // Цепочка с лишними транзитивными связями — тоже цепочка.
   assert.match(
     thinAdvice(thin, [...chain.slice(0, 3), order('WEB-1', ['web'], ['ADMIN-1', 'API-1'])])[0] ??

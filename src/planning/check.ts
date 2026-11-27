@@ -191,13 +191,15 @@ export function planCheck(
 
 /**
  * Советы тонкого режима (не отказ): работ на фичу 3–5 (`THIN_TASK_SIZE_SECTION`);
- * цепочка из 3+ работ, хотя у некоторых области записи не пересекаются
- * (`THIN_CHAIN`: параллельно не идёт ничего); работы без пути между ними
- * (идут одновременно) пишут в пересекающиеся области (`THIN_SCOPE_OVERLAP`).
+ * цепочка из 3+ работ, где у какой-то связи dependsOn нет ни общей области
+ * записи, ни общего контракта (`THIN_CHAIN`: параллельно не идёт ничего —
+ * вопрос, нужна ли эта связь); работы без пути между ними (идут
+ * одновременно) пишут в пересекающиеся области (`THIN_SCOPE_OVERLAP`).
  */
 export function thinAdvice(
   policy: ExecutionPolicy,
-  orders: readonly Pick<WorkOrder, 'id' | 'repositoryId' | 'writeScope' | 'dependsOn'>[],
+  orders: readonly (Pick<WorkOrder, 'id' | 'repositoryId' | 'writeScope' | 'dependsOn'> &
+    Partial<Pick<WorkOrder, 'contracts'>>)[],
 ): string[] {
   if (harnessModeOf(policy) !== 'thin') return [];
   const out: string[] = [];
@@ -231,13 +233,21 @@ export function thinAdvice(
       b.writeScope.some((y) => x === '.' || y === '.' || pathsOverlap(x, y)),
     );
   const pairs = orders.flatMap((a, i) => orders.slice(i + 1).map((b) => [a, b] as const));
+  // Общий контракт — объявленный интерфейс, который работа использует.
+  const contract = (a: (typeof orders)[number], b: (typeof orders)[number]) =>
+    (a.contracts ?? []).some((x) => (b.contracts ?? []).some((y) => x.id === y.id));
   // Цепочка: каждая пара работ связана путём — порядок единственный.
   if (works >= 3 && pairs.every(([a, b]) => related(a.id, b.id))) {
-    const disjoint = pairs.find(([a, b]) => !overlap(a, b));
-    if (disjoint) {
+    // Связь dependsOn без общей области и без общего контракта: может быть
+    // лишней. Что работа использует интерфейс сборки или исполнения другой,
+    // из плана не видно — совет спрашивает, а не утверждает.
+    const loose = orders
+      .flatMap((w) => w.dependsOn.map((d) => [w, byId.get(d)] as const))
+      .find(([w, p]) => p && !overlap(w, p) && !contract(w, p));
+    if (loose?.[1]) {
       const chain = [...orders].sort((a, b) => ancestors(a.id).size - ancestors(b.id).size);
       out.push(
-        `THIN_CHAIN: работы идут одной цепочкой (${chain.map((o) => o.id).join(' → ')}), параллельно не выполнится ничего, хотя области записи ${disjoint[0].id} и ${disjoint[1].id} не пересекаются. Оставьте dependsOn только там, где работа использует интерфейс сборки или исполнения другой (UI — контракт API или SDK, а не другой UI); общую тестовую инфраструктуру отдайте ранней работе контракта, сквозную проверку двух поверхностей — выпуску`,
+        `THIN_CHAIN: работы идут одной цепочкой (${chain.map((o) => o.id).join(' → ')}), параллельно не выполнится ничего. Проверьте, действительно ли ${loose[0].id} зависит от ${loose[1].id}: общей области записи и общего контракта у них нет. Если ${loose[0].id} не использует интерфейс сборки или исполнения ${loose[1].id} (UI — контракт API или SDK, а не другой UI), уберите эту связь dependsOn; общую тестовую инфраструктуру отдайте ранней работе контракта, сквозную проверку двух поверхностей — выпуску`,
       );
     }
   }
