@@ -32,10 +32,14 @@ export const THIN_TASKS = { min: 3, max: 5 } as const;
 
 /**
  * Размер работы тонкого режима (alpha.73): работа — одна длинная сессия
- * исполнителя со своими проверками, поэтому работ мало и они крупные. Совет,
- * не проверка; plan-check советует при числе вне 3–5.
+ * исполнителя со своими проверками, поэтому работ мало и они крупные.
+ * Работы без пути в dependsOn идут параллельно (alpha.75, R2): связь — только
+ * настоящий интерфейс сборки или исполнения, общая тестовая инфраструктура —
+ * у ранней работы контракта, сквозная проверка двух поверхностей — у выпуска.
+ * Совет, не проверка; plan-check советует при числе вне 3–5, цепочке и
+ * пересечении областей параллельных работ.
  */
-export const THIN_TASK_SIZE_SECTION = `Thin mode: plan ${THIN_TASKS.min}–${THIN_TASKS.max} tasks for the feature. Each task is one long writer session that runs its own gates until they pass, so make each task one coherent user scenario through every layer it needs (API, UI, data, tests), including the shared test infrastructure it needs. Split only by repository or into parts that are truly independent and can be accepted separately. Each task lists its exact gates (the checks that prove its acceptance criteria); the writer runs exactly these commands, and the harness reruns them on a clean checkout.`;
+export const THIN_TASK_SIZE_SECTION = `Thin mode: plan ${THIN_TASKS.min}–${THIN_TASKS.max} tasks for the feature. Each task is one long writer session that runs its own gates until they pass, so make each task one coherent user scenario through every layer it needs (API, UI, data, tests). Split only by repository or into parts that are truly independent and can be accepted separately. Each task lists its exact gates (the checks that prove its acceptance criteria); the writer runs exactly these commands, and the harness reruns them on a clean checkout. Tasks without a path between them in dependsOn run in parallel, so add dependsOn only for a real build or runtime interface: a UI task depends on the API or SDK contract it consumes, not on another UI task. Shared test infrastructure (browser test config, fixtures, test environment helpers) belongs to the earliest contract task or to one small task of its own that the others depend on; never let two tasks that may run in parallel own or extend the same files. A check that spans two surfaces (data entered in one UI, seen in another) is the release's job; inside a task, seed the data it needs through the API or SDK instead of depending on another UI task.`;
 
 /**
  * Область gates задачи (alpha.71): только gates, покрывающие её критерии и

@@ -13,6 +13,8 @@ not try to prove that the writer could not cheat.
   `harness/work-<id>`) and one **writer session** per work. A rejected
   handover goes back into the same session (`codex exec resume` /
   `claude --resume`) with the reason, gate tails and open finding ids.
+  A rejection only for files outside the write scope names the paths to drop
+  and says the gates need not be rerun.
 - A **handover** is one attempt. The harness commits the work tree, merges
   it into the current target on a fresh checkout, runs the order's gates
   there, then the consumers' checks and requirements, then one review of the
@@ -34,12 +36,22 @@ not try to prove that the writer could not cheat.
 ### Plan: 3–5 works
 
 `$H plan-request` asks for 3–5 tasks in thin mode. Each work is one coherent
-user scenario through every layer it needs (API, UI, data, tests), together
-with the test infrastructure it needs. Split only by repository or into parts
+user scenario through every layer it needs (API, UI, data, tests). Split only by repository or into parts
 that are truly independent. Each work lists its exact gates, because the
 writer runs exactly these commands and the harness reruns them. `plan-check`
 returns `advice: THIN_PLAN_SIZE` when the plan has fewer than 3 or more than
-5 works. This is advice, not a refusal. Plan review and approval work as in
+5 works. This is advice, not a refusal.
+
+Works with no path between them in `dependsOn` run in parallel (policy
+`concurrency`). Add `dependsOn` only for a real build or runtime interface:
+a UI work needs the API or SDK contract, not another UI work. Shared test
+infrastructure (browser config, fixtures, env helpers) belongs to the
+earliest contract work or one small work of its own. A check across two
+surfaces is the release's job. `plan-check` advises `THIN_CHAIN` (3+ works in
+one chain where some `dependsOn` link shares neither a write scope nor a
+declared contract: check whether that work really depends on the other) and `THIN_SCOPE_OVERLAP`
+(works that can run in parallel own overlapping write scopes). Give heavy
+gates timeout headroom. Plan review and approval work as in
 `guide review`.
 
 ### Run and wait
@@ -56,9 +68,11 @@ loop). Under the lead driver (`HARNESS_LEAD_DRIVE=1`, `$H lead drive`, see
   does not stop the work: the same session gets it, even when it is the same
   failure as before. Thin has no "same defect twice" stop. After the last
   handover, diagnose the failure (`guide recovery`: explain, `diagnose`,
-  `retry --by lead`). After a lead diagnosis, a recovery decision or a
-  changed order, the next handover is a **new session** with a summary of
-  the tree and your diagnosis. `retry --reset` (the way back after the
+  `retry --by lead`). After a lead diagnosis (`diagnose`, then `retry`
+  without `--reset`), the next handover **resumes the same session** with
+  your diagnosis, the failure reason and the gate tails. After a changed
+  order or a changed runtime, the next handover is a **new session** with a
+  summary of the tree. `retry --reset` (the way back after the
   handovers or the neutral limit run out) resets the budget and keeps the
   tree and the branch; the next handover is a new session with the summary.
   Only `retry --start-over` (implies the reset) starts the work over from the

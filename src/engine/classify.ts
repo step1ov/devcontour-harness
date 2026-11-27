@@ -28,10 +28,12 @@ export function failureOrigin(error: unknown): unknown {
 
 /**
  * Отказ провайдера, а не работы: он повторится на любой следующей выдаче.
- * Список узкий намеренно — временные ошибки сети сюда не входят.
+ * Список узкий намеренно — временные ошибки сети сюда не входят. Коды 401 и
+ * 429 — отдельным словом: число токенов (`142901 tokens`) или ID запроса
+ * отказом не становится.
  */
 export const providerRefusal = (message: string) =>
-  /credit balance|insufficient credit|not logged in|please run \/login|invalid api key|authentication_error|insufficient_quota|unauthorized|oauth token|token expired|401|session limit|usage limit|rate limit|rate_limit|limit reached|too many requests|429|overloaded/i.test(
+  /credit balance|insufficient credit|not logged in|please run \/login|invalid api key|authentication_error|insufficient_quota|unauthorized|oauth token|token expired|(?<![\w-]|\d\.)(?:401|429)(?![\w-]|\.\d)|session limit|usage limit|rate limit|rate_limit|limit reached|too many requests|overloaded/i.test(
     message,
   );
 
@@ -114,7 +116,7 @@ export function classifyFailure(error: unknown, full: string): FailureKind {
 }
 
 /** Предел или баланс провайдера, а не учётные данные (часть `providerRefusal`). */
-const providerLimit = (message: string) =>
+export const providerLimit = (message: string) =>
   /credit balance|insufficient credit|insufficient_quota|session limit|usage limit|rate limit|rate_limit|limit reached|too many requests|\b429\b|overloaded/i.test(
     message,
   );

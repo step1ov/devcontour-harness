@@ -20,6 +20,7 @@ import {
   driveLead,
   eventSummary,
   parseAgentTemplate,
+  providerRefusalOf,
   rememberDriveGoals,
   writeHarnessWrapper,
 } from '../src/control/drive.ts';
@@ -93,7 +94,7 @@ interface AgentRecord {
 function driveOf(
   env: Env | { dir: string; engine: { policy: Engine['policy'] } },
   options: {
-    mode?: 'wait-go' | 'exit' | 'hang' | 'grandchild-hang' | 'background-writer';
+    mode?: 'wait-go' | 'exit' | 'hang' | 'grandchild-hang' | 'background-writer' | 'provider-limit';
     code?: number;
     extraArgs?: string[];
     /** false — без записи целей прошлого запуска (alpha.74, P10-3). */
@@ -527,6 +528,144 @@ test('lead drive: предел --max-sessions — выход max-sessions (22); 
   assert.equal(broken.outcome, 'agent-error');
   assert.equal(DRIVE_EXIT_CODES[broken.outcome], 23);
   assert.match(broken.message, /не запустилась/);
+  env.store.close();
+});
+
+test('P11-2: сессия ведущего упала на лимите провайдера (событие error codex) — agent-error (23) сразу, с текстом провайдера; без --log тоже', async () => {
+  const env = engineOf();
+  ready(env.engine, graphOf({ a: [] }));
+  const { promise } = driveOf(env, { mode: 'provider-limit', code: 1 }, { idleSessions: 3 });
+  const data = await promise;
+  assert.equal(data.outcome, 'agent-error');
+  assert.equal(DRIVE_EXIT_CODES[data.outcome], 23);
+  assert.equal(data.sessions.length, 1, 'новые сессии не запускаются');
+  assert.match(data.message, /^лимит провайдера: You've hit your usage limit/);
+  assert.match(data.message, /код выхода 1/);
+  // Обычный отказ сессии без текста провайдера — по-прежнему простой.
+  const plain = await driveOf(env, { code: 1 }, { idleSessions: 2 }).promise;
+  assert.equal(plain.outcome, 'no-progress');
+  env.store.close();
+});
+
+/** Файлы вывода сессии: JSONL-события stdout и строки stderr. */
+function sessionOutput(events: object[], err = '', plain = '') {
+  const dir = mkdtempSync(join(tmpdir(), 'harness-drive-out-'));
+  const out = join(dir, 'session-1.out');
+  writeFileSync(out, events.map((e) => JSON.stringify(e) + '\n').join('') + plain);
+  writeFileSync(join(dir, 'session-1.err'), err);
+  return [out, join(dir, 'session-1.err')] as const;
+}
+
+test('ревью M1: переполнение контекста с числом токенов — не отказ провайдера; коды 401/429 — только отдельным словом', () => {
+  const started = { type: 'thread.started', thread_id: 't-1' };
+  assert.equal(
+    providerRefusalOf(
+      ...sessionOutput([
+        started,
+        {
+          type: 'turn.failed',
+          error: { message: 'context_length_exceeded: input token limit reached (142901 tokens)' },
+        },
+      ]),
+    ),
+    undefined,
+  );
+  assert.equal(
+    providerRefusalOf(
+      ...sessionOutput([
+        started,
+        { type: 'turn.failed', error: { message: 'stream closed after 142901 tokens' } },
+      ]),
+    ),
+    undefined,
+  );
+  assert.equal(
+    providerRefusalOf(...sessionOutput([], 'request req-429-a1 failed: tool crashed\n')),
+    undefined,
+  );
+  // Настоящий лимит по-прежнему останавливает: событие codex и результат claude.
+  assert.match(
+    providerRefusalOf(
+      ...sessionOutput([
+        started,
+        { type: 'turn.failed', error: { message: "You've hit your usage limit." } },
+      ]),
+    )!,
+    /usage limit/,
+  );
+  assert.match(
+    providerRefusalOf(
+      ...sessionOutput([
+        { type: 'result', is_error: true, result: 'API Error: 429 Too Many Requests.' },
+      ]),
+    )!,
+    /429/,
+  );
+});
+
+test('ревью M1: прежняя временная ошибка (переподключение) перед удачным шагом — не причина позднего отказа', () => {
+  const events = [
+    { type: 'thread.started', thread_id: 't-1' },
+    { type: 'error', message: 'Reconnecting... 1/5 (unexpected status 429 Too Many Requests)' },
+    { type: 'item.completed', item: { id: 'i1', type: 'agent_message', text: 'ok' } },
+  ];
+  assert.equal(
+    providerRefusalOf(...sessionOutput(events, 'panic: tool runner crashed\n')),
+    undefined,
+  );
+  // Ошибка после последнего удачного шага — причина.
+  assert.match(
+    providerRefusalOf(
+      ...sessionOutput([...events, { type: 'error', message: 'usage limit reached' }]),
+    )!,
+    /usage limit/,
+  );
+});
+
+test('ревью M2: простая строка stdout рядом с JSONL (фоновый процесс сессии) — не причина отказа', () => {
+  const events = [
+    { type: 'thread.started', thread_id: 't-1' },
+    { type: 'item.completed', item: { id: 'i1', type: 'agent_message', text: 'ok' } },
+  ];
+  assert.equal(
+    providerRefusalOf(...sessionOutput(events, '', 'gate log: rate limit test passed\n')),
+    undefined,
+  );
+  // Без JSONL последняя строка stdout — по-прежнему причина.
+  assert.match(
+    providerRefusalOf(...sessionOutput([], '', 'Error: rate limit exceeded\n'))!,
+    /rate limit/,
+  );
+  // Читается только хвост: событие лимита за 64 КБ от конца не видно.
+  const [out, err] = sessionOutput([
+    { type: 'turn.failed', error: { message: 'usage limit reached' } },
+  ]);
+  writeFileSync(
+    out,
+    readFileSync(out, 'utf8') +
+      JSON.stringify({ type: 'item.completed', item: { text: 'x'.repeat(70_000) } }) +
+      '\n',
+  );
+  assert.equal(providerRefusalOf(out, err), undefined);
+});
+
+test('ревью M2: без --log вывод сессии убирается сразу после проверки, до следующей сессии', async () => {
+  const env = engineOf();
+  ready(env.engine, graphOf({ a: [] }));
+  const { dir, promise } = driveOf(
+    env,
+    { mode: 'wait-go', code: 1, extraArgs: ['{prompt-file}'] },
+    { idleSessions: 2 },
+  );
+  const one = await sessionRecord(dir, 1);
+  const promptDir = dirname(one.argv[3]!);
+  assert.ok(existsSync(join(promptDir, 'session-1.out')), 'вывод пишется во время сессии');
+  go(dir, 1);
+  await sessionRecord(dir, 2);
+  assert.ok(!existsSync(join(promptDir, 'session-1.out')));
+  assert.ok(!existsSync(join(promptDir, 'session-1.err')));
+  go(dir, 2);
+  assert.equal((await promise).outcome, 'no-progress');
   env.store.close();
 });
 

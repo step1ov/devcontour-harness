@@ -61,3 +61,31 @@ export function scopeViolations(changed: readonly string[], rules: ScopeRules) {
   );
   return { forbidden, outside };
 }
+
+/** Начало отказа области с путями (`assertScope`): защищённые файлы и файлы вне области. */
+export const SCOPE_PATHS_TEXT = {
+  forbidden: 'Изменены защищённые файлы: ',
+  outside: 'Изменены файлы вне области поручения/роли: ',
+} as const;
+
+/**
+ * Пути из отказа области только по путям (защищённые или вне области); у
+ * других отказов области (символические ссылки, файлы шагов, эталоны) — нет.
+ */
+export function scopeRejectedPaths(error: string | undefined): string[] | undefined {
+  const prefix = Object.values(SCOPE_PATHS_TEXT).find((p) => error?.startsWith(p));
+  if (!prefix || error!.includes('\n')) return undefined;
+  const paths = error!.slice(prefix.length).split(', ').filter(Boolean);
+  return paths.length ? paths : undefined;
+}
+
+/** Сколько путей отказа областью называет запрос исполнителя; остальные — числом. */
+export const SCOPE_PATHS_SHOWN = 50;
+
+/** Пути для запроса исполнителя: каждый в кавычках JSON, не больше `SCOPE_PATHS_SHOWN`. */
+export const scopePathList = (paths: readonly string[]) =>
+  paths
+    .slice(0, SCOPE_PATHS_SHOWN)
+    .map((p) => JSON.stringify(p))
+    .join(', ') +
+  (paths.length > SCOPE_PATHS_SHOWN ? ` and ${paths.length - SCOPE_PATHS_SHOWN} more` : '');

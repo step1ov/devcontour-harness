@@ -884,13 +884,21 @@ export function valueReport(
   const allItems = defectAttempts
     .flatMap((a): EvidenceRef[] => {
       const failing = failingOf(a);
+      // Отказ без записи провала (reviewer упал без ревью, gate без
+      // evidence) — по классу отказа: «scope» только у нарушения области,
+      // иначе перечень расходился бы со счётом по классам (P11).
       if (!failing.length)
         return [
           {
             workId: a.workId,
             runId: a.id,
             attempt: a.attempt,
-            kind: 'scope' as const,
+            kind:
+              a.failureKind === 'review'
+                ? ('review' as const)
+                : a.failureKind === 'gate'
+                  ? ('test' as const)
+                  : ('scope' as const),
             phase: null,
             gate: null,
             at: toIso(at(a.finishedAt ?? a.startedAt)),

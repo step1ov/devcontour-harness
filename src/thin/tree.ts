@@ -9,6 +9,11 @@ import { mkdir, rm } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import { TaskFailure } from '../contracts/index.ts';
 import { git } from '../environment/process.ts';
+import {
+  dropGateOutputs,
+  NO_GATE_OUTPUTS,
+  type GateOutputs,
+} from '../verification/gate-outputs.ts';
 
 /** Ветка дерева работы. */
 export const workBranch = (workId: string) => `harness/work-${workId}`;
@@ -57,9 +62,20 @@ const HARNESS_GIT = [
   'core.hooksPath=/dev/null',
 ];
 
-/** Закоммитить дерево работы (если есть что); кандидат — HEAD дерева. */
-export async function commitWork(dir: string, message: string): Promise<string> {
+/**
+ * Закоммитить дерево работы (если есть что); кандидат — HEAD дерева. Новые
+ * файлы под объявленными выходами gates (`outputs`, P11-5) в коммит не идут;
+ * `dropped` получает их пути.
+ */
+export async function commitWork(
+  dir: string,
+  message: string,
+  outputs: GateOutputs = NO_GATE_OUTPUTS,
+  dropped?: (paths: string[]) => void,
+): Promise<string> {
   await git(dir, 'add', '-A');
+  const left = await dropGateOutputs(dir, outputs);
+  if (left.length) dropped?.(left);
   if (await git(dir, 'status', '--porcelain', '--untracked-files=no'))
     await git(dir, ...HARNESS_GIT, 'commit', '-q', '--no-gpg-sign', '--no-verify', '-m', message);
   return git(dir, 'rev-parse', 'HEAD');

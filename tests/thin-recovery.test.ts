@@ -2,8 +2,9 @@
  * Тест правит сырой JSON политики до разбора схемой.
  */
 /**
- * 0.1.0-alpha.73: тонкий режим и вмешательства — разбор ведущего даёт новую
- * сессию со сводкой, сброс начинает работу заново от цели; уборка деревьев
+ * 0.1.0-alpha.73: тонкий режим и вмешательства — разбор ведущего (с
+ * alpha.75, R4) продолжает ту же сессию с его текстом, сброс даёт новую
+ * сессию со сводкой, `--start-over` начинает работу заново от цели; уборка деревьев
  * не трогает дерево работы между сдачами; два сбоя среды разных gates в
  * одной сдаче; сессия codex записана и при отказе; приёмка после падения
  * между update-ref и записью убирает дерево работы.
@@ -66,7 +67,9 @@ function thin(
   return { ...ctx, work, attempts, prompt, again };
 }
 
-test('разбор ведущего после отказа — новая сессия со сводкой и заметками разбора', async () => {
+// alpha.75 (R4): прежде разбор давал новую сессию со сводкой; теперь та же
+// сессия продолжается с текстом разбора и хвостом провала.
+test('R4: разбор ведущего после отказа — та же сессия продолжена с разбором и хвостом провала', async () => {
   const ctx = thin([rec(implement({ 'src/greet.js': wrong })), rec(implement())]);
   await runAll(ctx);
   const [first] = ctx.attempts();
@@ -79,11 +82,43 @@ test('разбор ведущего после отказа — новая се�
   await ctx.again();
   const [, second] = ctx.attempts();
   assert.equal(second!.status, 'succeeded', second!.error);
-  assert.equal(second!.writerSession?.mode, 'fresh');
-  assert.match(second!.writerSession?.reason ?? '', /разбор ведущего/);
-  assert.notEqual(second!.writerSession?.id, first!.writerSession?.id);
+  assert.equal(second!.writerSession?.mode, 'resumed');
+  assert.equal(second!.writerSession?.id, first!.writerSession?.id);
+  const resume = ctx.prompt(1);
+  assert.doesNotMatch(resume, /Handover summary/);
+  assert.doesNotMatch(resume, /Thin mode: this is the one writer session/);
+  assert.match(resume, /Lead diagnosis .*cause approach/);
+  assert.match(resume, /нужна другая строка приветствия/, 'разбор в продолжении');
+  assert.match(resume, /got Hi Ada/, 'хвост провала gate в продолжении');
+  assert.match(resume, /rerun your gates in this worktree until they pass/);
+});
+
+test('R4: разбор, затем новая постановка — новая сессия (смена задачи главнее разбора)', async () => {
+  const ctx = thin([rec(implement({ 'src/greet.js': wrong })), rec(implement())]);
+  await runAll(ctx);
+  const [first] = ctx.attempts();
+  assert.equal(first!.failureKind, 'gate');
+  ctx.engine.diagnose(ctx.work, { cause: 'approach', hypothesis: 'другая строка' });
+  // Постановка, записанная сессией, — уже не согласованная (как после перепланирования).
+  const { thinFlow: flow } = await import('../src/thin/flow.ts');
+  const original = flow.handover;
+  flow.handover = (kit, h) =>
+    original(kit, { ...h, work: { ...h.work, approvedDigest: '0'.repeat(64) } });
+  try {
+    ctx.engine.retry(ctx.work, undefined, 'lead');
+    await ctx.again();
+  } finally {
+    flow.handover = original;
+  }
+  const [, second] = ctx.attempts();
+  assert.equal(
+    second!.writerSession?.mode,
+    'fresh',
+    JSON.stringify([second?.status, second?.error]),
+  );
+  assert.match(second!.writerSession?.reason ?? '', /постановка работы изменилась/);
   assert.match(ctx.prompt(1), /Handover summary/);
-  assert.match(ctx.prompt(1), /нужна другая строка приветствия/, 'разбор в заметках');
+  assert.match(ctx.prompt(1), /другая строка/, 'разбор — заметкой полного запроса');
 });
 
 for (const startOver of [false, true])

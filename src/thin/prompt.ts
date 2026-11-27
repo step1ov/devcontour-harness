@@ -6,7 +6,9 @@
 
 import { pinnedBytes, type ContextSnapshot } from '../contracts/index.ts';
 import { findingsText } from '../engine/prompt.ts';
+import { scopePathList } from '../engine/scope.ts';
 import type { CodeReviewHistory } from '../contracts/index.ts';
+import { droppedOutputsWriterText } from '../verification/gate-outputs.ts';
 
 /** Правило тонкого режима в запросе новой сессии. */
 export const THIN_WRITER_TEXT =
@@ -44,6 +46,15 @@ export interface ThinDelta {
   merged?: { conflicts: string[] };
   /** Подготовка окружения в дереве упала до вызова (хвост отказа). */
   setupError?: string;
+  /**
+   * Прошлая сдача отклонена только областью (R1): пути, которые надо убрать
+   * или вернуть, и база работы; gates и ревью не исполнялись.
+   */
+  scope?: { paths: string[]; base: string };
+  /** Разбор ведущего после прошлой сессии (`leadDiagnosisNote`, R4). */
+  diagnosis?: string;
+  /** Новые файлы прошлой сдачи, убранные из кандидата как выходы gates (P11-5). */
+  dropped?: string[];
 }
 
 /** Подготовка окружения упала на файлах дерева работы: исполнитель их чинит. */
@@ -62,10 +73,36 @@ export function mergeText(m: { conflicts: string[] }): string {
     : 'The target branch moved; the harness merged it into this worktree cleanly. Rerun your gates on the merged tree.';
 }
 
+/** Отказ только областью: какие пути убрать или вернуть (R1). */
+export function scopeText(s: { paths: string[]; base: string }): string {
+  return `The handover was rejected only because it changes files outside the work order's write scope (or protected files); the gates and the review did not run. Drop exactly these paths from your work: ${scopePathList(s.paths)}. Delete the ones you added (outputs of your own check runs included) and restore the ones you changed to the work base (git checkout ${s.base} -- <path>); do not rewrite history.`;
+}
+
+/** Последняя строка продолжения после отказа только областью: gates заново не нужны. */
+export const SCOPE_ONLY_TEXT =
+  'You do not need to rerun the gates for this: rerun them if code inside the write scope uses any removed path. Then hand back with the same JSON response format (completed=true).';
+
+/**
+ * Отказ только областью, и других поводов гонять gates заново нет: ни
+ * открытых находок, ни провала gates, ни ответа, слияния, отказа подготовки
+ * или разбора ведущего.
+ */
+const scopeOnly = (d: ThinDelta) =>
+  d.scope &&
+  !d.merged &&
+  !d.setupError &&
+  !d.answer &&
+  !d.diagnosis &&
+  !d.feedback &&
+  !d.findings?.findings.some((f) => f.status === 'open');
+
 const deltaParts = (d: ThinDelta) => [
   d.reason
     ? `${d.stopped ? 'The previous handover did not complete' : 'The previous handover was rejected'}: ${d.reason.slice(0, 2000)}`
     : '',
+  d.scope ? scopeText(d.scope) : '',
+  d.diagnosis ?? '',
+  d.dropped?.length ? droppedOutputsWriterText(d.dropped) : '',
   d.feedback ?? '',
   findingsText(d.findings, false),
   d.answer ? answersText(d.context, d.answer) : '',
@@ -81,7 +118,9 @@ export function resumePrompt(d: ThinDelta): string {
       : 'The harness checked your handover and it did not pass. Everything you did before is still in this worktree.',
     ...deltaParts(d),
     ENV_CHANGED_TEXT,
-    'Fix every point above, rerun your gates in this worktree until they pass, then hand back with the same JSON response format (completed=true).',
+    scopeOnly(d)
+      ? SCOPE_ONLY_TEXT
+      : 'Fix every point above, rerun your gates in this worktree until they pass, then hand back with the same JSON response format (completed=true).',
   ]
     .filter(Boolean)
     .join('\n\n');

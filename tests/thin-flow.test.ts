@@ -9,13 +9,15 @@
 import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readFileSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { cliAdapter } from '../src/agents/cli-adapter.ts';
 import { Engine } from '../src/engine/engine.ts';
 import { Runner } from '../src/engine/runner.ts';
 import { standaloneHost } from '../src/engine/standalone.ts';
 import { SqliteExecutionStore } from '../src/storage/sqlite.ts';
+import { resumePrompt } from '../src/thin/prompt.ts';
 import { hsetup } from './harness-fixture.ts';
 import { approve, bin, greet, implement, runAll, setup } from './runner-fixture.ts';
 
@@ -148,6 +150,8 @@ test('провал gate → та же сессия продолжена с хв�
   assert.equal(ctx.resumed(1), first!.writerSession?.id);
   assert.match(ctx.prompt(1), /did not pass/);
   assert.match(ctx.prompt(1), /got Hi Ada/, 'хвост провала gate в продолжении');
+  assert.match(ctx.prompt(1), /rerun your gates in this worktree until they pass/);
+  assert.doesNotMatch(ctx.prompt(1), /You do not need to rerun the gates/);
   assert.doesNotMatch(ctx.prompt(1), /Thin mode: this is the one writer session/);
   assert.equal(first!.worktree, second!.worktree, 'одно дерево работы');
 });
@@ -464,4 +468,157 @@ test('P11-1: исчерпан лимит провайдера (событие er
   const [a] = ctx.attempts();
   assert.equal(a!.failureKind, 'provider-auth', a!.error);
   assert.match(a!.error ?? '', /usage limit/);
+});
+
+test('P11-3: CLI ревьюера упал без ревью (таймаут провайдера) — отказ окружения, не дефект ревью исполнителя; следующая сдача принята', async () => {
+  const ctx = thin({
+    scenario: {
+      writer: [rec(implement()), rec(implement())],
+      // Первый вызов reviewer — ревью плана.
+      reviewer: [
+        approve(),
+        {
+          providerError:
+            'codex_models_manager::manager: failed to refresh available models: request timed out',
+        },
+        approve(),
+      ],
+    },
+  });
+  await ctx.run();
+  const [first, second] = ctx.attempts();
+  assert.equal(first!.failureKind, 'environment', first!.error);
+  assert.equal(second!.status, 'succeeded', second!.error);
+});
+
+test('P11-5: отчёты и артефакты gates, которые исполнитель гонял сам, не идут в кандидата и не нарушают область', async () => {
+  const ctx = thin({
+    maxAttempts: 1,
+    policy: (p: any) => {
+      p.repositories[0].gates[0].artifacts = ['playwright-report'];
+    },
+    scenario: {
+      writer: rec(
+        implement({
+          'src/greet.js': greet,
+          'test-results/junit.xml': '<testsuite/>\n',
+          'playwright-report/data/trace.zip': 'zip\n',
+        }),
+      ),
+      reviewer: approve(),
+    },
+  });
+  await ctx.run();
+  const [a] = ctx.attempts();
+  assert.equal(a!.status, 'succeeded', a!.error);
+  const files = ctx.repo.git('ls-tree', '-r', '--name-only', a!.integrationSha!).split('\n');
+  assert.ok(files.includes('src/greet.js'));
+  assert.ok(
+    !files.some((f) => f.startsWith('test-results/') || f.startsWith('playwright-report/')),
+  );
+  const log = execFileSync('find', [ctx.state, '-name', 'gate-outputs.json'], { encoding: 'utf8' })
+    .trim()
+    .split('\n')[0]!;
+  assert.deepEqual(JSON.parse(readFileSync(log, 'utf8')).dropped, [
+    'playwright-report/data/trace.zip',
+    'test-results/junit.xml',
+  ]);
+});
+
+test('P11-5: убранные выходы gates названы в продолжении writer и в заметке reviewer', async () => {
+  const ctx = thin({
+    scenario: {
+      writer: [
+        rec(
+          implement({
+            'src/greet.js': greet,
+            'test-results/junit.xml': '<testsuite/>\n',
+            'docs/notes.md': 'notes\n',
+          }),
+        ),
+        rec({ ...implement({}), remove: ['docs/notes.md'] }),
+      ],
+      reviewer: rec(approve()),
+    },
+  });
+  await ctx.run();
+  const [first, second] = ctx.attempts();
+  assert.equal(first!.failureKind, 'scope-violation', first!.error);
+  assert.equal(second!.status, 'succeeded', second!.error);
+  assert.match(
+    ctx.prompt(1),
+    /kept these new files out of your previous handover as outputs of gate runs .*: "test-results\/junit\.xml"\./,
+  );
+  assert.doesNotMatch(ctx.prompt(0), /outputs of gate runs/);
+  // Ревью кода — последний вызов reviewer (первые — ревью плана).
+  const reviews = readdirSync(dirname(ctx.scenarioPath))
+    .filter((f) => /\.reviewer\.\d+\.prompt$/.test(f))
+    .map((f) => readFileSync(join(dirname(ctx.scenarioPath), f), 'utf8'));
+  assert.match(
+    reviews.find((r) => r.includes('Base commit')) ?? reviews.join('\n'),
+    /kept these new files out of the candidate as outputs of the writer's own gate runs, so they are not in the diff: "test-results\/junit\.xml"\./,
+  );
+});
+
+test('ревью M3: отказ областью при открытых находках или провале gates — продолжение требует исправить всё и прогнать gates', () => {
+  const scope = { paths: ['docs/notes.md'], base: 'a'.repeat(40) };
+  const finding = {
+    id: 'F-1',
+    severity: 'high',
+    message: 'greet ignores the name',
+    path: 'src/greet.js',
+    line: 1,
+    status: 'open',
+    origin: { runId: 'r1', phase: 'integration', sha: 'b'.repeat(40), round: 1 },
+  };
+  const findings = { scope: 'app/add-greeting', round: 1, findings: [finding] } as any;
+  const fixAll = /Fix every point above, rerun your gates in this worktree until they pass/;
+  assert.match(
+    resumePrompt({ scope }),
+    /rerun them if code inside the write scope uses any removed path/,
+  );
+  assert.doesNotMatch(resumePrompt({ scope }), fixAll);
+  for (const extra of [{ findings }, { feedback: 'Gate unit failed: 1 test' }]) {
+    const text = resumePrompt({ scope, ...extra });
+    assert.match(text, fixAll);
+    assert.doesNotMatch(text, /You do not need to rerun the gates/);
+  }
+  // Закрытые находки — не повод гонять gates заново.
+  const closed = { ...findings, findings: [{ ...finding, status: 'closed' }] };
+  assert.doesNotMatch(resumePrompt({ scope, findings: closed }), fixAll);
+});
+
+test('ревью L5: пути отказа областью — в кавычках JSON и не больше 50', () => {
+  const paths = Array.from({ length: 60 }, (_, i) => `docs/n, ${i}.md`);
+  const text = resumePrompt({ scope: { paths, base: 'a'.repeat(40) } });
+  assert.match(text, /these paths from your work: "docs\/n, 0\.md", "docs\/n, 1\.md",/);
+  assert.match(text, /"docs\/n, 49\.md" and 10 more\./);
+  assert.doesNotMatch(text, /n, 50\.md/);
+});
+
+test('R1: отказ только областью — продолжение называет пути и не требует гонять gates заново', async () => {
+  const ctx = thin({
+    scenario: {
+      writer: [
+        rec(implement({ 'src/greet.js': greet, 'docs/notes.md': 'notes\n' })),
+        rec({ ...implement({}), remove: ['docs/notes.md'] }),
+      ],
+      reviewer: approve(),
+    },
+  });
+  await ctx.run();
+  const [first, second] = ctx.attempts();
+  assert.equal(first!.failureKind, 'scope-violation', first!.error);
+  assert.equal(second!.status, 'succeeded', second!.error);
+  assert.equal(second!.writerSession?.mode, 'resumed');
+  const resume = ctx.prompt(1);
+  assert.match(
+    resume,
+    /rejected only because it changes files outside the work order's write scope/,
+  );
+  assert.match(resume, /Drop exactly these paths from your work: "docs\/notes\.md"\./);
+  assert.match(resume, /git checkout [0-9a-f]{40} -- <path>/);
+  assert.match(resume, /You do not need to rerun the gates for this/);
+  assert.doesNotMatch(resume, /rerun your gates in this worktree until they pass/);
+  assert.throws(() => ctx.repo.git('show', `${second!.integrationSha}:docs/notes.md`));
 });

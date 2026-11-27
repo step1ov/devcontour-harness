@@ -467,9 +467,103 @@ test('alpha.73: тонкий режим — 3–5 работ по сценари
     ...JSON.parse(JSON.stringify(generatedPolicy())),
     harnessMode: 'thin',
   });
-  assert.match(thinAdvice(thin, 2) ?? '', /^THIN_PLAN_SIZE: работ 2 — меньше 3/);
-  assert.match(thinAdvice(thin, 6) ?? '', /^THIN_PLAN_SIZE: работ 6 — больше 5/);
-  assert.equal(thinAdvice(thin, 3), undefined);
-  assert.equal(thinAdvice(thin, 5), undefined);
-  assert.equal(thinAdvice(executionPolicySchema.parse(generatedPolicy()), 9), undefined);
+  // Независимые работы с раздельными областями — без советов о цепочке.
+  const works = (n: number) =>
+    Array.from({ length: n }, (_, i) => ({
+      id: `W-${i}`,
+      repositoryId: 'app',
+      writeScope: [`src/w${i}`],
+      dependsOn: [],
+    }));
+  assert.match(thinAdvice(thin, works(2))[0] ?? '', /^THIN_PLAN_SIZE: работ 2 — меньше 3/);
+  assert.match(thinAdvice(thin, works(6))[0] ?? '', /^THIN_PLAN_SIZE: работ 6 — больше 5/);
+  assert.deepEqual(thinAdvice(thin, works(3)), []);
+  assert.deepEqual(thinAdvice(thin, works(5)), []);
+  assert.deepEqual(thinAdvice(executionPolicySchema.parse(generatedPolicy()), works(9)), []);
+});
+
+test('alpha.75 R2: тонкий запрос плана — dependsOn только для настоящего интерфейса, общая тестовая инфраструктура у ранней работы, сквозная проверка у выпуска', () => {
+  assert.match(THIN_TASK_SIZE_SECTION, /run in parallel/);
+  assert.match(THIN_TASK_SIZE_SECTION, /real build or runtime interface/);
+  assert.match(THIN_TASK_SIZE_SECTION, /not on another UI task/);
+  assert.match(THIN_TASK_SIZE_SECTION, /earliest contract task/);
+  assert.match(THIN_TASK_SIZE_SECTION, /never let two tasks that may run in parallel own/);
+  assert.match(THIN_TASK_SIZE_SECTION, /the release's job/);
+});
+
+test('alpha.75 R2: plan-check советует THIN_CHAIN для цепочки при раздельных областях и THIN_SCOPE_OVERLAP для параллельных работ с общей областью', async () => {
+  const { thinAdvice } = await import('../src/planning/check.ts');
+  const thin = executionPolicySchema.parse({
+    ...JSON.parse(
+      JSON.stringify(generatePolicy({ profile: resolveProfile('npm-ci'), writer: 'claude' }).input),
+    ),
+    harnessMode: 'thin',
+  });
+  const order = (
+    id: string,
+    writeScope: string[],
+    dependsOn: string[] = [],
+    repositoryId = 'app',
+  ) => ({
+    id,
+    repositoryId,
+    writeScope,
+    dependsOn,
+  });
+  // Цепочка API → SDK → ADMIN → WEB: ADMIN и WEB друг другу не нужны.
+  const chain = [
+    order('API-1', ['api']),
+    order('SDK-1', ['sdk'], ['API-1']),
+    order('ADMIN-1', ['admin', 'test/support'], ['SDK-1']),
+    order('WEB-1', ['web', 'test/support'], ['ADMIN-1']),
+  ];
+  const advice = thinAdvice(thin, chain);
+  assert.equal(advice.length, 1, advice.join('\n'));
+  assert.match(advice[0]!, /^THIN_CHAIN: .*API-1 → SDK-1 → ADMIN-1 → WEB-1/);
+  // Совет — вопрос о конкретной связи, а не утверждение.
+  assert.match(advice[0]!, /Проверьте, действительно ли SDK-1 зависит от API-1/);
+  // Каждая связь цепочки идёт через объявленный контракт — совета нет.
+  const contract = (id: string) => ({ id, digest: '0'.repeat(64) });
+  assert.deepEqual(
+    thinAdvice(thin, [
+      { ...order('API-1', ['api']), contracts: [contract('api')] },
+      { ...order('SDK-1', ['sdk'], ['API-1']), contracts: [contract('api'), contract('sdk')] },
+      { ...order('WEB-1', ['web'], ['SDK-1']), contracts: [contract('sdk')] },
+    ]).filter((a) => a.startsWith('THIN_CHAIN')),
+    [],
+  );
+  // Цепочка с лишними транзитивными связями — тоже цепочка.
+  assert.match(
+    thinAdvice(thin, [...chain.slice(0, 3), order('WEB-1', ['web'], ['ADMIN-1', 'API-1'])])[0] ??
+      '',
+    /^THIN_CHAIN/,
+  );
+  // Цепочка из двух работ и цепочка с общей областью у каждой пары — без совета.
+  assert.deepEqual(
+    thinAdvice(thin, chain.slice(0, 2)).filter((a) => a.startsWith('THIN_CHAIN')),
+    [],
+  );
+  assert.deepEqual(
+    thinAdvice(thin, [order('A', ['.']), order('B', ['src'], ['A']), order('C', ['src/x'], ['B'])]),
+    [],
+  );
+  // ADMIN ∥ WEB, оба от SDK: параллельно, но оба владеют test/support.
+  const parallel = [
+    ...chain.slice(0, 3),
+    order('WEB-1', ['web', 'test/support/env.mjs'], ['SDK-1']),
+  ];
+  const overlap = thinAdvice(thin, parallel);
+  assert.equal(overlap.length, 1, overlap.join('\n'));
+  assert.match(overlap[0]!, /^THIN_SCOPE_OVERLAP: работы ADMIN-1 и WEB-1 могут идти одновременно/);
+  assert.match(overlap[0]!, /test\/support/);
+  // Общую инфраструктуру держит работа контракта — советов нет; другой репозиторий не пересекается.
+  assert.deepEqual(
+    thinAdvice(thin, [
+      order('API-1', ['api', 'test/support']),
+      order('SDK-1', ['sdk'], ['API-1']),
+      order('ADMIN-1', ['admin'], ['SDK-1']),
+      order('WEB-1', ['admin'], ['SDK-1'], 'site'),
+    ]),
+    [],
+  );
 });

@@ -509,6 +509,16 @@ export async function gitRawOutput(cwd: string, ...args: string[]) {
 }
 
 /**
+ * git со входом на stdin (`--pathspec-from-file=-`): длинный список путей не
+ * упирается в предел длины командной строки.
+ */
+export async function gitWithInput(cwd: string, input: string, ...args: string[]) {
+  const result = await command(['git', ...hostGitArgs(cwd, args)], cwd, { env: gitEnv(), input });
+  if (result.code !== 0) throw new Error(`git ${args[0]}: ${result.stderr.trim()}`);
+  return result.stdout;
+}
+
+/**
  * Содержимое объектов git одним `cat-file --batch`: байты, без усечения и
  * без процесса на объект. Отсутствующий объект — отказ.
  */

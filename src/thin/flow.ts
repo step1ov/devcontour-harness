@@ -1,6 +1,7 @@
 // Поток сдачи тонкого режима (alpha.73). Сдача — одна попытка:
 //   1. дерево работы (одно на все сдачи) и окружение в нём;
-//   2. writer: новая сессия на первой сдаче, продолжение — на следующих;
+//   2. writer: новая сессия на первой сдаче, продолжение — на следующих (и
+//      после разбора ведущего — с его текстом, R4);
 //   3. коммит дерева — кандидат;
 //   4. дерево интеграции: чистый checkout цели + слияние кандидата;
 //   5. gates поручения, проверки потребителей, требования, одно ревью;
@@ -12,7 +13,8 @@
 
 import { randomUUID } from 'node:crypto';
 import { realpathSync } from 'node:fs';
-import { join } from 'node:path';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { dirname, join } from 'node:path';
 import {
   codeReviewHistory,
   codeReviewScope,
@@ -27,10 +29,12 @@ import {
 import { gateFeedback } from '../engine/gate-feedback.ts';
 import { countedFailure } from '../projections/lead-recovery.ts';
 import { evaluateInput, normalizeImplementation } from '../engine/input-policy.ts';
-import { attemptSecretsNote, prompt } from '../engine/prompt.ts';
+import { attemptSecretsNote, leadDiagnosisNote, prompt } from '../engine/prompt.ts';
 import { git } from '../environment/process.ts';
 import { redactDeep } from '../environment/redaction.ts';
+import { scopeRejectedPaths } from '../engine/scope.ts';
 import { orderedScope } from '../verification/gate-scope.ts';
+import { droppedGateOutputs, gateOutputPaths } from '../verification/gate-outputs.ts';
 import { generatorNote, selectGenerators } from '../verification/generators.ts';
 import { writerDependenciesNote, writerDependencyGates } from '../verification/gates.ts';
 import type { ThinHandover, ThinKit } from './kit.ts';
@@ -43,7 +47,7 @@ import {
   type ThinDelta,
 } from './prompt.ts';
 import { thinEnvironment, thinGate } from './rerun.ts';
-import { intervention, lostSession, planSession, sessionHome } from './session.ts';
+import { diagnosisSince, intervention, lostSession, planSession, sessionHome } from './session.ts';
 import { commitWork, ensureWorkTree, integrationTree, mergeBase, mergeTarget } from './tree.ts';
 
 const text = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -100,8 +104,22 @@ async function writer(
   const feedback = failedGates
     ? (await gateFeedback(failedGates, execution.redact).catch(() => undefined))?.text
     : undefined;
+  // Отказ только областью (R1): пути и база работы — убрать или вернуть их.
+  const outside =
+    previous?.failureKind === 'scope-violation' ? scopeRejectedPaths(previous.error) : undefined;
+  // Новые файлы прошлой сдачи, которые harness не взял в кандидата как выходы gates.
+  const dropped = previous ? await droppedGateOutputs(join(dirname(artifacts), previous.id)) : [];
   const delta: ThinDelta = {
     ...(previous?.error ? { reason: previous.error } : {}),
+    ...(dropped.length ? { dropped } : {}),
+    ...(outside
+      ? {
+          scope: {
+            paths: outside,
+            base: await mergeBase(tree, base, 'HEAD').catch(() => base),
+          },
+        }
+      : {}),
     ...(previous &&
     (uncountedStop(previous) || previous.blocked || previous.failureKind === 'environment')
       ? { stopped: true }
@@ -194,8 +212,15 @@ async function writer(
   };
   const plan = await planSession(kit, attempt, work);
   try {
+    // Разбор ведущего после прошлой сессии — в продолжение той же сессии
+    // (R4); новой сессии он приходит заметкой полного запроса.
+    const lead = diagnosisSince(kit, attempt, work);
     return plan.kind === 'resume'
-      ? await invoke(resumePrompt(delta), { kind: 'continue', id: plan.id }, 'resumed')
+      ? await invoke(
+          resumePrompt({ ...delta, ...(lead ? { diagnosis: leadDiagnosisNote(lead) } : {}) }),
+          { kind: 'continue', id: plan.id },
+          'resumed',
+        )
       : await invoke(
           // Новая сессия над деревом прежних сдач — со сводкой того, что в нём.
           previous ? full + '\n\n' + (await summary(plan.reason ?? 'новая сессия')) : full,
@@ -210,6 +235,28 @@ async function writer(
     const why = text(error).slice(0, 500);
     return invoke(full + '\n\n' + (await summary(why)), undefined, 'fallback', why);
   }
+}
+
+/**
+ * Новые файлы под объявленными выходами gates (P11-5) остаются в дереве, но
+ * не в кандидате; их пути — в `implementation/gate-outputs.json` попытки.
+ */
+function gateOutputs(h: ThinHandover) {
+  const outputs = gateOutputPaths(h.repo.gates);
+  const dropped = new Set<string>();
+  return {
+    outputs,
+    dropped: (paths: string[]) => paths.forEach((p) => dropped.add(p)),
+    record: async () => {
+      if (!dropped.size) return;
+      const dir = join(h.artifacts, 'implementation');
+      await mkdir(dir, { recursive: true });
+      await writeFile(
+        join(dir, 'gate-outputs.json'),
+        JSON.stringify({ outputs: outputs.paths, dropped: [...dropped].sort() }, null, 2),
+      );
+    },
+  };
 }
 
 /** Ответ writer → кандидат: разбор, коммит дерева, область, вопросы. */
@@ -228,7 +275,8 @@ async function candidateOf(
     throw new Error('Ответ исполнителя вне схемы: ' + parsed.error.issues[0]?.message);
   const data = parsed.success ? parsed.data : normalized!.output;
   kit.engine.heartbeat(attempt.id, attempt.token);
-  let sha = await commitWork(tree, `${work.id}: ${work.order.title}`);
+  const left = gateOutputs(h);
+  let sha = await commitWork(tree, `${work.id}: ${work.order.title}`, left.outputs, left.dropped);
   const from = await mergeBase(tree, base, sha);
   const changedOf = async (to: string) =>
     (await git(tree, 'diff', '--no-renames', '--name-only', from, to)).split('\n').filter(Boolean);
@@ -242,8 +290,9 @@ async function candidateOf(
       signal: h.signal,
       artifacts: h.artifacts,
     });
-    sha = await commitWork(tree, `${work.id}: generated outputs`);
+    sha = await commitWork(tree, `${work.id}: generated outputs`, left.outputs, left.dropped);
   }
+  await left.record();
   const empty = await kit.assertScope(
     work,
     repo,
@@ -380,7 +429,8 @@ export const thinFlow = {
     // CLI находит сессию прошлой сдачи.
     const tree = realpathSync(dir);
     // Незакоммиченные правки прошлой сдачи — в ветку до слияния цели.
-    if (!created) await commitWork(tree, `${work.id}: work in progress`);
+    if (!created)
+      await commitWork(tree, `${work.id}: work in progress`, gateOutputPaths(repo.gates));
     const head = await git(tree, 'rev-parse', 'HEAD');
     // Прошлая сдача упала только сдвигом цели после проверки, а дерево то же:
     // проверка заново без writer (незасчитанный повтор).

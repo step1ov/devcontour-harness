@@ -40,10 +40,12 @@ import {
   chmodSync,
   closeSync,
   existsSync,
+  fstatSync,
   mkdirSync,
   mkdtempSync,
   openSync,
   readFileSync,
+  readSync,
   renameSync,
   rmSync,
   writeFileSync,
@@ -61,6 +63,9 @@ import {
   type RunEvent,
 } from '../contracts/index.ts';
 import type { NotPromise } from '../contracts/ports.ts';
+import { CODEX_CONTEXT_PATTERNS } from '../agents/cli-adapter.ts';
+import { runtimeEvents } from '../agents/runtime-events.ts';
+import { providerLimit, providerRefusal } from '../engine/classify.ts';
 import { diagnoseState } from '../explain/diagnose.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import { LEAD_WAITING_OWNER } from './lead.ts';
@@ -1141,12 +1146,11 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
           HARNESS_LEAD_DRIVE_SESSION: String(session),
           HARNESS_LEAD_DRIVE_EVENT: sessionKind,
         },
-        ...(input.logDir
-          ? {
-              out: join(promptDir, `session-${session}.out`),
-              err: join(promptDir, `session-${session}.err`),
-            }
-          : {}),
+        // Вывод — в файлы и без --log (во временный каталог драйвера): по
+        // нему узнаётся отказ провайдера (P11-2); без --log файлы убираются
+        // сразу после проверки.
+        out: join(promptDir, `session-${session}.out`),
+        err: join(promptDir, `session-${session}.err`),
         ...(input.signal ? { signal: input.signal } : {}),
         timeoutMs: sessionTimeoutMs,
         killGraceMs: input.killGraceMs ?? 10_000,
@@ -1192,6 +1196,21 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
           'agent-error',
           `команда ведущего не запустилась: ${run.error} (${input.agent[0]})`,
         );
+      // Отказ провайдера (лимит, учётные данные) повторится в любой
+      // следующей сессии: драйвер останавливается сразу (P11-2), а не
+      // считает сессии простоями до no-progress.
+      const outFile = join(promptDir, `session-${session}.out`);
+      const errFile = join(promptDir, `session-${session}.err`);
+      const refusal =
+        run.exitCode !== 0 && !run.timedOut ? providerRefusalOf(outFile, errFile) : undefined;
+      // Без --log вывод нужен только этой проверке: фоновый процесс сессии,
+      // унаследовавший его, не копит файлы драйвера между сессиями.
+      if (!input.logDir) for (const f of [outFile, errFile]) rmSync(f, { force: true });
+      if (refusal)
+        return result(
+          'agent-error',
+          `${providerLimit(refusal) ? 'лимит провайдера' : 'отказ провайдера'}: ${refusal} (сессия ${session}, код выхода ${run.exitCode ?? 'сигнал'}). ${logHint(input.logDir, session)}`,
+        );
       // Передача вопроса владельцу — не простой (вопросов может быть много);
       // снятая по сроку сессия — неудачная, даже если что-то успела записать.
       if (sessionKind !== 'owner-question' || run.timedOut)
@@ -1229,6 +1248,76 @@ function runLogOf(stateDir: string): { runLog?: { path: string; tail: string } }
   const run = lastDetachedRun(stateDir);
   if (!run || !existsSync(run.log)) return {};
   return { runLog: { path: run.log, tail: logTail(run.log, 20) } };
+}
+
+/**
+ * Хвост файла вывода сессии (последние 64 КБ) — чтением с конца, а не всего
+ * файла: фоновый процесс сессии (`harness run`) может дописывать в него
+ * долго. Нет файла — пусто.
+ */
+function tailOf(path: string, bytes = 65536): string {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, 'r');
+    const size = fstatSync(fd).size;
+    const length = Math.min(size, bytes);
+    const buffer = Buffer.alloc(length);
+    const read = readSync(fd, buffer, 0, length, size - length);
+    return buffer.subarray(0, read).toString('utf8');
+  } catch {
+    return '';
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+/** Событие JSONL, после которого прежняя ошибка уже не причина (повтор удался). */
+const successEvent = (type: unknown) =>
+  type === 'item.completed' || type === 'turn.completed' || type === 'assistant';
+
+/** Переполнение окна контекста — не отказ провайдера, сколько бы токенов ни назвал текст. */
+const CONTEXT_OVERFLOW = [
+  ...CODEX_CONTEXT_PATTERNS,
+  /context window/i,
+  /context length/i,
+  /prompt is too long/i,
+  /input is too long/i,
+];
+
+/**
+ * Текст отказа провайдера упавшей сессии ведущего, или undefined. Причина —
+ * завершающее событие JSONL (`turn.failed` codex, `result` с `is_error`
+ * claude), иначе событие `error` после последнего удачного шага (прежняя
+ * ошибка — переподключение или повтор, который удался), иначе последняя
+ * строка stderr, иначе — если в stdout нет JSONL — его последняя строка.
+ * Отказ — по тем же признакам, что у попыток (`providerRefusal`), кроме
+ * переполнения окна контекста.
+ */
+export function providerRefusalOf(outPath: string, errPath: string): string | undefined {
+  const out = tailOf(outPath);
+  const { events } = runtimeEvents(out);
+  type Failure = { message?: unknown; error?: { message?: unknown }; result?: unknown };
+  const terminal = events.findLast(
+    (e) => e.type === 'turn.failed' || (e.type === 'result' && e.is_error === true),
+  ) as Failure | undefined;
+  const lastSuccess = events.findLastIndex((e) => successEvent(e.type));
+  const errorAt = events.findLastIndex((e) => e.type === 'error');
+  const last: Failure | undefined =
+    terminal ?? (errorAt > lastSuccess ? events[errorAt] : undefined);
+  const lastLine = (text: string) =>
+    text
+      .split('\n')
+      .map((l) => l.trim())
+      .filter(Boolean)
+      .at(-1);
+  const event = last?.message ?? last?.error?.message ?? last?.result;
+  const text =
+    (typeof event === 'string' && event.trim()) ||
+    lastLine(tailOf(errPath)) ||
+    (events.length ? undefined : lastLine(out));
+  return text && providerRefusal(text) && !CONTEXT_OVERFLOW.some((re) => re.test(text))
+    ? text.slice(0, 300)
+    : undefined;
 }
 
 /** Где смотреть вывод сессии: файл журнала или совет включить --log. */
