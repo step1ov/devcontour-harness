@@ -195,6 +195,30 @@ test('H2-01/H2-03 route: init → plan-request → draft ведущего → pl
     'claude',
   );
   ok(review, 'review-plan');
+  assert.doesNotMatch(
+    review.stderr,
+    /совет плана/,
+    'советы тонкого плана — только в тонком режиме',
+  );
+  // Тонкий режим: тот же граф (одна работа) — совет THIN_PLAN_SIZE и в review-plan,
+  // а не только в plan-check --draft (граф из источника задач plan-check не проходит).
+  const thinPolicy = join(dirname(p.policyPath), 'policy-thin.json');
+  writeFileSync(
+    thinPolicy,
+    JSON.stringify({ ...JSON.parse(readFileSync(p.policyPath, 'utf8')), harnessMode: 'thin' }),
+  );
+  const thinReview = p.harness(
+    'review-plan',
+    '--graph',
+    graphPath,
+    '--policy',
+    thinPolicy,
+    '--state',
+    p.state + '-thin',
+    '--author',
+    'claude',
+  );
+  assert.match(thinReview.stderr, /harness: совет плана: THIN_PLAN_SIZE/, thinReview.stderr);
   assert.equal(review.json.data.approved, true, 'fixture codex одобряет план');
   assert.equal(review.json.data.digest, data.graphDigest, 'ревью относится к графу plan-check');
 

@@ -58,7 +58,7 @@ import { leanMismatch, leanText, switchLean } from './init/lean.ts';
 import { diagnoseState, explainText } from './explain/diagnose.ts';
 import { statusFrame, statusSettled, statusSetup, statusText } from './control/status.ts';
 import { setupProgress } from './control/setup-progress.ts';
-import { planCheck, planRequestOf } from './planning/check.ts';
+import { planCheck, planRequestOf, thinAdvice } from './planning/check.ts';
 import { checkJsonBytes } from './catalog/bytes.ts';
 import { isSharedOperation, sharedOperations } from './catalog/shared.ts';
 import { harnessCapabilities } from './catalog/harness.ts';
@@ -1362,6 +1362,10 @@ async function run(
               connector.close();
             }
           } else h.engine.register(graph, { trusted: () => false, reachable: () => true });
+          // Советы тонкого плана (THIN_CHAIN, THIN_SCOPE_OVERLAP, THIN_PLAN_SIZE) —
+          // и для графа из источника задач, а не только для plan-check --draft.
+          for (const line of thinAdvice(b.policy, graph.orders))
+            process.stderr.write(`harness: совет плана: ${line}\n`);
           record = await h.review({
             kind: 'plan',
             graph,
