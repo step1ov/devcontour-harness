@@ -1148,10 +1148,13 @@ export class Runner {
           undefined,
           response.diagnostics.contextExhausted,
         );
+      // Runtime ревьюера упал, не вернув ревью (P11-3: таймаут или предел
+      // провайдера): это не замечание к коду исполнителя — отказ окружения
+      // с однократным повтором и общим пределом нейтральных отказов.
       throw new TaskFailure(
         classifyFailure(undefined, message) === 'unknown'
           ? review
-            ? 'review'
+            ? 'environment'
             : 'unknown'
           : classifyFailure(undefined, message),
         message,

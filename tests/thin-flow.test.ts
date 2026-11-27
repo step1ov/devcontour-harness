@@ -465,3 +465,24 @@ test('P11-1: исчерпан лимит провайдера (событие er
   assert.equal(a!.failureKind, 'provider-auth', a!.error);
   assert.match(a!.error ?? '', /usage limit/);
 });
+
+test('P11-3: CLI ревьюера упал без ревью (таймаут провайдера) — отказ окружения, не дефект ревью исполнителя; следующая сдача принята', async () => {
+  const ctx = thin({
+    scenario: {
+      writer: [rec(implement()), rec(implement())],
+      // Первый вызов reviewer — ревью плана.
+      reviewer: [
+        approve(),
+        {
+          providerError:
+            'codex_models_manager::manager: failed to refresh available models: request timed out',
+        },
+        approve(),
+      ],
+    },
+  });
+  await ctx.run();
+  const [first, second] = ctx.attempts();
+  assert.equal(first!.failureKind, 'environment', first!.error);
+  assert.equal(second!.status, 'succeeded', second!.error);
+});
