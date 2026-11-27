@@ -445,3 +445,23 @@ test('рестарт controller: следующая сдача продолжа�
     store.close();
   }
 });
+
+test('P11-1: исчерпан лимит провайдера (событие error codex) — provider-auth, а не неизвестный отказ; текст провайдера в причине', async () => {
+  const ctx = thin({
+    writer: 'codex',
+    vendor: 'same-vendor-allowed',
+    scenario: {
+      writer: [
+        {
+          providerError:
+            "You've hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits or try again at Dec 3rd, 2026 3:53 PM.",
+        },
+      ],
+      reviewer: approve(),
+    },
+  });
+  await ctx.run();
+  const [a] = ctx.attempts();
+  assert.equal(a!.failureKind, 'provider-auth', a!.error);
+  assert.match(a!.error ?? '', /usage limit/);
+});
