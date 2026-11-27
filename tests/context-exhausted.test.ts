@@ -188,10 +188,11 @@ test('Телеметрия потока: terminal_reason последнего re
 });
 
 test('Класс по признаку адаптера, а не по тексту: числа токенов с «401» не делают отказ провайдерским', () => {
-  // Текст причины prompt_too_long несёт числа токенов; «401» в них совпал бы
-  // с признаком отказа провайдера, поэтому класс ставится по признаку адаптера.
+  // Текст причины prompt_too_long несёт числа токенов; класс ставится по
+  // признаку адаптера. С alpha.75 и текстовый разбор не видит «401» внутри
+  // числа: коды провайдера — только отдельным словом.
   const reason = 'Prompt is too long · the request is ~1401764 tokens (limit 1000000)';
-  assert.equal(classifyFailure(undefined, reason), 'provider-auth', 'текстовый разбор ошибся бы');
+  assert.notEqual(classifyFailure(undefined, reason), 'provider-auth');
   assert.equal(repairPolicy['context-exhausted'].action, 'retry');
   assert.equal(repairRepeats('context-exhausted', 'blocking-limit'), 1);
   assert.equal(
