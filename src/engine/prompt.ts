@@ -1,3 +1,4 @@
+import type { LeadDiagnosis } from '../contracts/execution.ts';
 import type {
   InputPolicy,
   AttemptState,
@@ -337,4 +338,34 @@ export function prompt(input: {
   ]
     .filter(Boolean)
     .join('\n\n');
+}
+
+/**
+ * Разбор ведущего — исполнителю: что не так с прежними попытками и что
+ * сделать иначе. `coverage` — добавить случаи, `approach` — сменить подход
+ * по гипотезе; гипотеза — проверяемое утверждение ведущего.
+ */
+export function leadDiagnosisNote(d: LeadDiagnosis) {
+  const action: Record<LeadDiagnosis['cause'], string> = {
+    coverage:
+      'Weak coverage: add test cases (добавить случаи) for the failing class of inputs and strengthen the check before changing the implementation.',
+    approach: 'Wrong approach: change the implementation approach as the hypothesis says.',
+    split: 'The task is too big: do only the part the current order still asks for.',
+    contradiction: 'The promise is contradictory: do not guess; stop and ask (needs-input).',
+    environment: 'The cause is in the environment, not in the code: do not rewrite working code.',
+    other: 'See the hypothesis.',
+  };
+  return [
+    `Lead diagnosis ${d.id} of the previous failed attempts (${d.failures.join(', ')}): cause ${d.cause}. ${action[d.cause]}`,
+    d.hypothesis ? `Hypothesis to test in this attempt: ${d.hypothesis}` : '',
+    d.evidence.length ? `Evidence: ${JSON.stringify(d.evidence)}` : '',
+    ...(d.addenda ?? []).map(
+      (a, i) =>
+        `Lead addendum ${i + 1} to ${d.id} (${a.at}): ${a.text}` +
+        (a.evidence.length ? ` Evidence: ${JSON.stringify(a.evidence)}` : ''),
+    ),
+    'Do not repeat the approach of the failed attempts.',
+  ]
+    .filter(Boolean)
+    .join(' ');
 }

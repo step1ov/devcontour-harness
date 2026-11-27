@@ -149,6 +149,8 @@ test('провал gate → та же сессия продолжена с хв�
   assert.equal(ctx.resumed(1), first!.writerSession?.id);
   assert.match(ctx.prompt(1), /did not pass/);
   assert.match(ctx.prompt(1), /got Hi Ada/, 'хвост провала gate в продолжении');
+  assert.match(ctx.prompt(1), /rerun your gates in this worktree until they pass/);
+  assert.doesNotMatch(ctx.prompt(1), /You do not need to rerun the gates/);
   assert.doesNotMatch(ctx.prompt(1), /Thin mode: this is the one writer session/);
   assert.equal(first!.worktree, second!.worktree, 'одно дерево работы');
 });
@@ -520,4 +522,31 @@ test('P11-5: отчёты и артефакты gates, которые испол
     'playwright-report/data/trace.zip',
     'test-results/junit.xml',
   ]);
+});
+
+test('R1: отказ только областью — продолжение называет пути и не требует гонять gates заново', async () => {
+  const ctx = thin({
+    scenario: {
+      writer: [
+        rec(implement({ 'src/greet.js': greet, 'docs/notes.md': 'notes\n' })),
+        rec({ ...implement({}), remove: ['docs/notes.md'] }),
+      ],
+      reviewer: approve(),
+    },
+  });
+  await ctx.run();
+  const [first, second] = ctx.attempts();
+  assert.equal(first!.failureKind, 'scope-violation', first!.error);
+  assert.equal(second!.status, 'succeeded', second!.error);
+  assert.equal(second!.writerSession?.mode, 'resumed');
+  const resume = ctx.prompt(1);
+  assert.match(
+    resume,
+    /rejected only because it changes files outside the work order's write scope/,
+  );
+  assert.match(resume, /Drop exactly these paths from your work: docs\/notes\.md\./);
+  assert.match(resume, /git checkout [0-9a-f]{40} -- <path>/);
+  assert.match(resume, /You do not need to rerun the gates for this/);
+  assert.doesNotMatch(resume, /rerun your gates in this worktree until they pass/);
+  assert.throws(() => ctx.repo.git('show', `${second!.integrationSha}:docs/notes.md`));
 });

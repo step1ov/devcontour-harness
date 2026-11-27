@@ -1,6 +1,7 @@
 // Поток сдачи тонкого режима (alpha.73). Сдача — одна попытка:
 //   1. дерево работы (одно на все сдачи) и окружение в нём;
-//   2. writer: новая сессия на первой сдаче, продолжение — на следующих;
+//   2. writer: новая сессия на первой сдаче, продолжение — на следующих (и
+//      после разбора ведущего — с его текстом, R4);
 //   3. коммит дерева — кандидат;
 //   4. дерево интеграции: чистый checkout цели + слияние кандидата;
 //   5. gates поручения, проверки потребителей, требования, одно ревью;
@@ -28,9 +29,10 @@ import {
 import { gateFeedback } from '../engine/gate-feedback.ts';
 import { countedFailure } from '../projections/lead-recovery.ts';
 import { evaluateInput, normalizeImplementation } from '../engine/input-policy.ts';
-import { attemptSecretsNote, prompt } from '../engine/prompt.ts';
+import { attemptSecretsNote, leadDiagnosisNote, prompt } from '../engine/prompt.ts';
 import { git } from '../environment/process.ts';
 import { redactDeep } from '../environment/redaction.ts';
+import { scopeRejectedPaths } from '../engine/scope.ts';
 import { orderedScope } from '../verification/gate-scope.ts';
 import { gateOutputPaths } from '../verification/gate-outputs.ts';
 import { generatorNote, selectGenerators } from '../verification/generators.ts';
@@ -45,7 +47,7 @@ import {
   type ThinDelta,
 } from './prompt.ts';
 import { thinEnvironment, thinGate } from './rerun.ts';
-import { intervention, lostSession, planSession, sessionHome } from './session.ts';
+import { diagnosisSince, intervention, lostSession, planSession, sessionHome } from './session.ts';
 import { commitWork, ensureWorkTree, integrationTree, mergeBase, mergeTarget } from './tree.ts';
 
 const text = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -102,8 +104,19 @@ async function writer(
   const feedback = failedGates
     ? (await gateFeedback(failedGates, execution.redact).catch(() => undefined))?.text
     : undefined;
+  // Отказ только областью (R1): пути и база работы — убрать или вернуть их.
+  const outside =
+    previous?.failureKind === 'scope-violation' ? scopeRejectedPaths(previous.error) : undefined;
   const delta: ThinDelta = {
     ...(previous?.error ? { reason: previous.error } : {}),
+    ...(outside
+      ? {
+          scope: {
+            paths: outside,
+            base: await mergeBase(tree, base, 'HEAD').catch(() => base),
+          },
+        }
+      : {}),
     ...(previous &&
     (uncountedStop(previous) || previous.blocked || previous.failureKind === 'environment')
       ? { stopped: true }
@@ -196,8 +209,15 @@ async function writer(
   };
   const plan = await planSession(kit, attempt, work);
   try {
+    // Разбор ведущего после прошлой сессии — в продолжение той же сессии
+    // (R4); новой сессии он приходит заметкой полного запроса.
+    const lead = diagnosisSince(kit, attempt, work);
     return plan.kind === 'resume'
-      ? await invoke(resumePrompt(delta), { kind: 'continue', id: plan.id }, 'resumed')
+      ? await invoke(
+          resumePrompt({ ...delta, ...(lead ? { diagnosis: leadDiagnosisNote(lead) } : {}) }),
+          { kind: 'continue', id: plan.id },
+          'resumed',
+        )
       : await invoke(
           // Новая сессия над деревом прежних сдач — со сводкой того, что в нём.
           previous ? full + '\n\n' + (await summary(plan.reason ?? 'новая сессия')) : full,

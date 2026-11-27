@@ -1,7 +1,6 @@
 import { freshDiagnosis, repeatedDefect } from '../projections/lead-recovery.ts';
 import { silentGateOnSha } from '../verification/gates-at.ts';
 import { controllerTemp } from '../environment/controller-temp.ts';
-import type { LeadDiagnosis } from '../contracts/execution.ts';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
@@ -246,14 +245,16 @@ import {
   type Engine,
 } from './engine.ts';
 import { environmentBlockOf, writerScratch } from './writer-block.ts';
-import { attemptSecretsNote, prompt } from './prompt.ts';
+import { attemptSecretsNote, leadDiagnosisNote, prompt } from './prompt.ts';
+
+export { leadDiagnosisNote };
 import {
   FEEDBACK_CASE_LIMIT,
   FEEDBACK_TOTAL_LIMIT,
   gateFeedback,
   type GateFeedback,
 } from './gate-feedback.ts';
-import { scopeViolations } from './scope.ts';
+import { SCOPE_PATHS_TEXT, scopeViolations } from './scope.ts';
 import { dropGateOutputs, gateOutputPaths } from '../verification/gate-outputs.ts';
 import { generatorNote, runGenerators, selectGenerators } from '../verification/generators.ts';
 import {
@@ -1248,10 +1249,7 @@ export class Runner {
       ...(infraPaths.length || kind === 'infra' ? { infra: { kind, paths: infraPaths } } : {}),
     });
     if (forbidden.length)
-      throw new TaskFailure(
-        'scope-violation',
-        `Изменены защищённые файлы: ${forbidden.join(', ')}`,
-      );
+      throw new TaskFailure('scope-violation', SCOPE_PATHS_TEXT.forbidden + forbidden.join(', '));
     // Работа инфраструктуры (docs/infra-works.md): файлы шагов на хосте она не
     // меняет вовсе, а файлы gates доверенной базы — только согласованные
     // планом (`gateChanges`): её gates исполняются по определению базы.
@@ -1312,10 +1310,7 @@ export class Runner {
       );
     }
     if (outside.length)
-      throw new TaskFailure(
-        'scope-violation',
-        'Изменены файлы вне области поручения/роли: ' + outside.join(', '),
-      );
+      throw new TaskFailure('scope-violation', SCOPE_PATHS_TEXT.outside + outside.join(', '));
     return false;
   }
 
@@ -5795,34 +5790,4 @@ function inputClassesOf(
     return c ? [c.slice(0, 500)] : [];
   });
   return [...new Set(classes)].slice(0, 20);
-}
-
-/**
- * Разбор ведущего — исполнителю: что не так с прежними попытками и что
- * сделать иначе. `coverage` — добавить случаи, `approach` — сменить подход
- * по гипотезе; гипотеза — проверяемое утверждение ведущего.
- */
-export function leadDiagnosisNote(d: LeadDiagnosis) {
-  const action: Record<LeadDiagnosis['cause'], string> = {
-    coverage:
-      'Weak coverage: add test cases (добавить случаи) for the failing class of inputs and strengthen the check before changing the implementation.',
-    approach: 'Wrong approach: change the implementation approach as the hypothesis says.',
-    split: 'The task is too big: do only the part the current order still asks for.',
-    contradiction: 'The promise is contradictory: do not guess; stop and ask (needs-input).',
-    environment: 'The cause is in the environment, not in the code: do not rewrite working code.',
-    other: 'See the hypothesis.',
-  };
-  return [
-    `Lead diagnosis ${d.id} of the previous failed attempts (${d.failures.join(', ')}): cause ${d.cause}. ${action[d.cause]}`,
-    d.hypothesis ? `Hypothesis to test in this attempt: ${d.hypothesis}` : '',
-    d.evidence.length ? `Evidence: ${JSON.stringify(d.evidence)}` : '',
-    ...(d.addenda ?? []).map(
-      (a, i) =>
-        `Lead addendum ${i + 1} to ${d.id} (${a.at}): ${a.text}` +
-        (a.evidence.length ? ` Evidence: ${JSON.stringify(a.evidence)}` : ''),
-    ),
-    'Do not repeat the approach of the failed attempts.',
-  ]
-    .filter(Boolean)
-    .join(' ');
 }
