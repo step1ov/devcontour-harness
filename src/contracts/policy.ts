@@ -1560,6 +1560,25 @@ export function expandGateRefs(
   return out;
 }
 
+/**
+ * Область gates поручения по фазам (0.1.0-alpha.76, R3): `own` — проверки
+ * того, что меняет работа (поле `gates`; нет поля — все gates репозитория,
+ * кроме регрессионных), `regression` — остальные проверки цели
+ * (`regressionGates`, без повторов `own`). Тонкий режим исполняет `own` до
+ * ревью, `regression` — после одобрения и до CAS; облегчённый и строгий —
+ * обе вместе. Без `regressionGates` — прежняя область одной фазой.
+ */
+export function orderGateScope(
+  repo: Pick<z.infer<typeof repositoryPolicySchema>, 'gates' | 'gateGroups' | 'id'>,
+  order: { gates?: string[] | undefined; regressionGates?: string[] | undefined },
+): { own: string[]; regression: string[] } {
+  const listed = order.regressionGates?.length ? expandGateRefs(repo, order.regressionGates) : [];
+  const own = order.gates?.length
+    ? expandGateRefs(repo, order.gates)
+    : repo.gates.map((g) => g.id).filter((id) => !listed.includes(id));
+  return { own, regression: listed.filter((id) => !own.includes(id)) };
+}
+
 /** Имена переменных, которые MCP-серверы профиля получают по имени от CLI. */
 export const mcpEnvironment = (profile?: { mcp: Record<string, McpServer> }) => ({
   inherit: [

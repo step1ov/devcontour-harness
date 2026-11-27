@@ -117,6 +117,8 @@ export function planDraft<E extends z.ZodRawShape = Record<never, never>>(
 /** Draft самостоятельного проекта: общие поля и проверка потребителей библиотеки. */
 export const planDraftSchema = planDraft({
   consumers: z.array(consumerSchema).max(10).optional(),
+  /** Регрессионные gates (alpha.76, R3): проверки цели, которые работа не меняет; тонкий режим — после ревью. */
+  regressionGates: gateScopeSchema(gateRefSchema).min(1).optional(),
   /** Работа инфраструктуры harness (alpha.67, docs/infra-works.md); нет — продуктовая. */
   kind: workKindSchema.optional(),
   /** Только `infra`: файлы gates доверенной базы, которые работа меняет. */

@@ -173,6 +173,15 @@
                         "pattern": "^@?[A-Za-z0-9_-]{1,80}$"
                       }
                     },
+                    "regressionGates": {
+                      "minItems": 1,
+                      "maxItems": 100,
+                      "type": "array",
+                      "items": {
+                        "type": "string",
+                        "pattern": "^@?[A-Za-z0-9_-]{1,80}$"
+                      }
+                    },
                     "consumers": {
                       "maxItems": 10,
                       "type": "array",
@@ -695,6 +704,15 @@
                 }
               },
               "gates": {
+                "maxItems": 100,
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "pattern": "^@?[A-Za-z0-9_-]{1,80}$"
+                }
+              },
+              "regressionGates": {
+                "minItems": 1,
                 "maxItems": 100,
                 "type": "array",
                 "items": {
@@ -1736,6 +1754,15 @@
                       "pattern": "^@?[A-Za-z0-9_-]{1,80}$"
                     }
                   },
+                  "regressionGates": {
+                    "minItems": 1,
+                    "maxItems": 100,
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "pattern": "^@?[A-Za-z0-9_-]{1,80}$"
+                    }
+                  },
                   "consumers": {
                     "maxItems": 10,
                     "type": "array",
@@ -2699,6 +2726,13 @@
             "type": "string"
           },
           "requiredGates": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_-]{1,80}$"
+            }
+          },
+          "regressionGates": {
             "type": "array",
             "items": {
               "type": "string",

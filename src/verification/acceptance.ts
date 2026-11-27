@@ -7,6 +7,7 @@ import {
   integrationReuseOn,
   acceptancePhases,
   expandGateRefs,
+  orderGateScope,
   selectReviewer,
   vendorOf,
   type CheckSuite,
@@ -745,7 +746,8 @@ export function resultProblems(result: RunResult, context: ReceiverContext): str
   // обязан быть ровно ею (без повторов), имя группы не принимается за проверку.
   let own: string[];
   try {
-    own = expandGateRefs(repo, order.gates);
+    const scope = orderGateScope(repo, order);
+    own = [...scope.own, ...scope.regression];
   } catch (error) {
     return ['область gates поручения: ' + (error as Error).message];
   }

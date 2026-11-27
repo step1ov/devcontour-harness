@@ -196,6 +196,15 @@
               "additionalProperties": false
             }
           },
+          "regressionGates": {
+            "minItems": 1,
+            "maxItems": 100,
+            "type": "array",
+            "items": {
+              "type": "string",
+              "pattern": "^@?[A-Za-z0-9_-]{1,80}$"
+            }
+          },
           "kind": {
             "type": "string",
             "enum": [

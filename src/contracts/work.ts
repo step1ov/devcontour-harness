@@ -100,6 +100,14 @@ export const workOrderSchema = z.strictObject({
   dependsOn: z.array(idSchema).max(100).default([]),
   /** Область доказательства: подмножество gates/групп политики. Нет поля — все gates репозитория. */
   gates: gateScopeSchema(gateRefSchema).optional(),
+  /**
+   * Регрессионные gates (0.1.0-alpha.76, R3): проверки цели, которые работа
+   * не меняет (сценарии других работ). Тонкий режим исполняет их после
+   * одобренного ревью, до CAS; исполнитель их не гоняет. Облегчённый и
+   * строгий режимы — вместе с `gates`. Нет поля — все gates одной фазой;
+   * необязательное поле без умолчания сохраняет digest прежних поручений.
+   */
+  regressionGates: gateScopeSchema(gateRefSchema).min(1).optional(),
   consumers: z.array(consumerSchema).max(10).optional(),
   /** Свойства договора проверки, которые поручение подтверждает сейчас. */
   properties: z.array(propertyIdSchema).max(30).optional(),
