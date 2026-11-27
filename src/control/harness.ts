@@ -2,6 +2,7 @@ import { unsourcedCriteriaNote } from '../planning/sources.ts';
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
+import { markReleaseReview } from './detach.ts';
 import {
   executionDigest,
   API_VERSION,
@@ -458,8 +459,18 @@ export class Harness {
    * Ревью выпуска (`harness review-release`, alpha.69): принятая цель против
    * договора выпуска; запись `code-reviews` с `kind: release`.
    */
-  reviewRelease(input: ReleaseReviewInput) {
+  async reviewRelease(input: ReleaseReviewInput) {
     this.engine.assertNotUpdating();
+    // Метка идущего ревью — для `lead drive` (P10-8).
+    const unmark = markReleaseReview(this.options.stateDir);
+    try {
+      return await this.reviewReleaseRun(input);
+    } finally {
+      unmark();
+    }
+  }
+
+  private reviewReleaseRun(input: ReleaseReviewInput) {
     return reviewRelease(
       {
         engine: this.engine,

@@ -276,6 +276,31 @@ test('lead drive: каталога состояния ещё нет — веду
   assert.match((await sessionRecord(agentDir, 1)).stdin, /каталог состояния ещё не создан/);
 });
 
+test('lead drive: новое состояние (пауза первого запуска без причины) — сессия ведущего, не выход owner; пауза оператора — выход owner (20)', async () => {
+  const fresh = engineOf();
+  assert.equal(
+    fresh.engine.read((v) => v.control().paused),
+    true,
+    'новое состояние стоит на паузе первого запуска',
+  );
+  const { promise } = driveOf(fresh, {}, { idleSessions: 1 });
+  const data = await promise;
+  assert.notEqual(data.outcome, 'owner', data.message);
+  assert.equal(data.sessions.length, 1);
+  assert.equal(data.sessions[0]!.kind, 'stopped');
+  fresh.store.close();
+
+  const paused = engineOf();
+  ready(paused.engine, graphOf({ a: [] }));
+  paused.engine.pause('operator');
+  const { dir, promise: p2 } = driveOf(paused, {}, { idleSessions: 1 });
+  const owner = await p2;
+  assert.equal(owner.outcome, 'owner');
+  assert.match(owner.message, /паузе оператора/);
+  assert.equal(sessionFiles(dir).length, 0);
+  paused.store.close();
+});
+
 const ownerPolicy = () =>
   policyOf((p: Record<string, unknown>) => {
     p.inputPolicy = { threshold: 7 };
@@ -997,6 +1022,83 @@ test('ревью 3: записи начала и конца run в журнал�
   go(dir, 1);
   const data = await promise;
   assert.equal(data.sessions[0]!.progressed, false);
+  assert.equal(data.outcome, 'no-progress');
+  env.store.close();
+});
+
+test('P10-8: весь код принят, но review-release идёт — ведущего не будим до конца ревью; метка умершего процесса не действует', async () => {
+  const { markReleaseReview, activeReleaseReview } = await import('../src/control/detach.ts');
+  const env = engineOf();
+  ready(env.engine, graphOf({ a: [] }));
+  const a = env.engine.claim('c1')!;
+  accept(env.engine, a.id, a.token);
+  // Идущее ревью — метка с живым pid (этот процесс теста).
+  const unmark = markReleaseReview(env.dir);
+  assert.equal(activeReleaseReview(env.dir)?.pid, process.pid);
+  const { dir, promise } = driveOf(env, {}, { idleSessions: 1 });
+  await new Promise((r) => setTimeout(r, 800));
+  assert.deepEqual(sessionFiles(dir), [], 'пока ревью идёт — ни одной сессии');
+  unmark();
+  assert.equal(activeReleaseReview(env.dir), undefined);
+  const rec = await sessionRecord(dir, 1);
+  assert.equal(rec.env.HARNESS_LEAD_DRIVE_EVENT, 'release-ready');
+  await promise;
+  env.store.close();
+});
+
+test('ревью P10-8: метки ревью выпуска — у каждого прогона своя; умерший pid и устаревшая метка не действуют и убираются; чужой живой процесс (EPERM) — жив', async () => {
+  const { markReleaseReview, activeReleaseReview, REVIEW_MARKER_STALE_MS } =
+    await import('../src/control/detach.ts');
+  const dir = mkdtempSync(join(tmpdir(), 'harness-review-marker-'));
+  const markers = join(dir, 'review-release-active');
+  // Два прогона одновременно: конец первого не снимает метку второго.
+  const first = markReleaseReview(dir);
+  const second = markReleaseReview(dir);
+  first();
+  assert.equal(activeReleaseReview(dir)?.pid, process.pid);
+  second();
+  assert.equal(activeReleaseReview(dir), undefined);
+  // Процесса нет — метка не действует и убрана.
+  const dead = join(markers, 'dead.json');
+  writeFileSync(
+    dead,
+    JSON.stringify({ pid: 2 ** 22 + 12345, startedAt: new Date().toISOString() }),
+  );
+  assert.equal(activeReleaseReview(dir), undefined);
+  assert.equal(existsSync(dead), false);
+  // Живой pid (занят другим процессом после падения), но метка давно не обновлялась.
+  const stale = join(markers, 'stale.json');
+  writeFileSync(stale, JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString() }));
+  assert.equal(activeReleaseReview(dir, Date.now() + REVIEW_MARKER_STALE_MS + 1000), undefined);
+  assert.equal(existsSync(stale), false);
+  // Процесс другого пользователя (pid 1: kill(0) — EPERM) — жив.
+  if (process.getuid?.() !== 0) {
+    writeFileSync(
+      join(markers, 'root.json'),
+      JSON.stringify({ pid: 1, startedAt: new Date().toISOString() }),
+    );
+    assert.equal(activeReleaseReview(dir)?.pid, 1);
+  }
+});
+
+test('ревью P10-8: метка ревью появилась после конца сессии — второй сессии нет, пока ревью идёт', async () => {
+  const { markReleaseReview } = await import('../src/control/detach.ts');
+  const env = engineOf();
+  ready(env.engine, graphOf({ a: [] }));
+  const a = env.engine.claim('c1')!;
+  accept(env.engine, a.id, a.token);
+  const { dir, promise } = driveOf(env, { mode: 'wait-go' }, { idleSessions: 2, graceMs: 600 });
+  await sessionRecord(dir, 1);
+  go(dir, 1);
+  // Сессия закончилась; метку ревью фоновый процесс ставит чуть позже.
+  await new Promise((r) => setTimeout(r, 200));
+  const unmark = markReleaseReview(env.dir);
+  await new Promise((r) => setTimeout(r, 1200));
+  assert.deepEqual(sessionFiles(dir).length, 1, 'пока ревью идёт — второй сессии нет');
+  unmark();
+  const data = await promise;
+  // После ревью то же состояние без решения ведущего — не новая сессия, а no-progress.
+  assert.equal(data.sessions.length, 1, JSON.stringify(data.sessions));
   assert.equal(data.outcome, 'no-progress');
   env.store.close();
 });

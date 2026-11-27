@@ -82,8 +82,9 @@ export function reviewSummaryRows(
  * Раунды ревью без предела — облегчённый режим (0.1.0-alpha.69): счёта нет,
  * бюджет выпуска — время и стоимость (`budgets.group`/`total`).
  */
-export const LIGHT_ROUNDS_RU = 'без предела (облегчённый режим; бюджет — время/стоимость выпуска)';
-export const LIGHT_ROUNDS_EN = 'no limit (light mode; the budget is release time/cost)';
+export const LIGHT_ROUNDS_RU =
+  'без предела (облегчённый и тонкий режимы; бюджет — время/стоимость выпуска)';
+export const LIGHT_ROUNDS_EN = 'no limit (light and thin modes; the budget is release time/cost)';
 
 /** Сводка одного предмета по его последнему раунду. */
 export function reviewSubjectSummary(

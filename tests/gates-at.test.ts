@@ -347,3 +347,56 @@ test('gates на SHA: прерывание сигналом или предел�
     /исчерпан предел проверки runTimeoutMs \(3 с\)/,
   );
 });
+
+// P10-6: прогон вне попытки (полный прогон выпуска, `harness gates`) в
+// облегчённом и тонком режимах даёт gates тот же файл окружения, что и
+// попытка: тестовые помощники продукта читают HARNESS_ATTEMPT_ENV_FILE.
+const envFileGate = `
+const fs = require('fs');
+const e = process.env;
+const problems = [];
+try {
+  const file = JSON.parse(fs.readFileSync(e.HARNESS_ATTEMPT_ENV_FILE, 'utf8'));
+  if (file.API_PORT !== e.API_PORT || !/^\\d+$/.test(file.API_PORT || '')) problems.push('port ' + file.API_PORT);
+  if (file.COMPOSE_PROJECT_NAME !== e.COMPOSE_PROJECT_NAME) problems.push('compose');
+  if (file.HARNESS_ATTEMPT_ID !== e.DEVCONTOUR_RUN_ID) problems.push('id');
+  if ((fs.statSync(e.HARNESS_ATTEMPT_ENV_FILE).mode & 0o077) !== 0) problems.push('mode');
+} catch (x) { problems.push('env-file ' + x.message); }
+fs.writeFileSync(e.DEVCONTOUR_REPORT_PATH,
+  '<testsuite><testcase classname="env" name="file">' + (problems.length ? '<failure message="' + problems.join(';').replace(/[<&"]/g, '') + '"/>' : '') + '</testcase></testsuite>');
+`;
+
+for (const mode of ['light', 'thin'] as const)
+  test(`gates на SHA в режиме ${mode}: файл окружения прогона с портами и именем compose, только владельцу`, async () => {
+    const ctx = setup({
+      scenario: {},
+      files: { 'test/env-file.js': envFileGate },
+      policy: (p) => {
+        p.harnessMode = mode;
+        p.attemptEnv = { ports: ['API_PORT'], portRange: { from: 33000, to: 33999 } };
+        const repo = (p.repositories as { gates: unknown[] }[])[0]!;
+        repo.gates.push({
+          id: 'env-file',
+          kind: 'test',
+          command: [process.execPath, 'test/env-file.js'],
+          report: { type: 'junit', path: 'test-results/env-file.xml' },
+        });
+      },
+    });
+    const context: GatesAtContext = {
+      policy: ctx.policy,
+      stateDir: ctx.state,
+      repoPath: () => ctx.repo.dir,
+      boundary: () => ({ hidden: [ctx.state], readable: [join(ctx.repo.dir, '.git')] }),
+      resourceDatabase: join(ctx.state, 'resources.sqlite'),
+    };
+    const result = await runGatesAt(context, {
+      id: 'GA-env',
+      repositoryId: 'app',
+      sha: ctx.repo.head(),
+      gates: ['env-file'],
+      record: () => {},
+    });
+    const gate = result.evidence.find((e) => e.gate === 'env-file');
+    assert.equal(gate?.passed, true, gate?.summary ?? JSON.stringify(result.failures));
+  });

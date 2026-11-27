@@ -56,7 +56,7 @@ import type { NotPromise } from '../contracts/ports.ts';
 import { diagnoseState } from '../explain/diagnose.ts';
 import { SqliteExecutionStore } from '../storage/sqlite.ts';
 import { LEAD_WAITING_OWNER } from './lead.ts';
-import { lastDetachedRun, logTail } from './detach.ts';
+import { activeReleaseReview, lastDetachedRun, logTail } from './detach.ts';
 import { pendingKind, releaseReady, waitForEvents, waitStatusLine, type WaitData } from './wait.ts';
 
 /** Исходы драйвера и их коды выхода (коды `wait` 10–16 не пересекаются, кроме aborted). */
@@ -300,10 +300,14 @@ const ownerQuestions = (view: ExecutionView, policy: ExecutionPolicy) =>
     .map((r) => r.value)
     .filter((r) => r.lifecycle === 'pending' && ownerOnly(r, policy));
 
-/** Пауза оператора: снять её решает человек. */
+/**
+ * Пауза оператора: снять её решает человек. Пауза без причины — состояние
+ * первого запуска (emptyDocument), её снимает run, как и в explain; это не
+ * решение человека.
+ */
 const operatorPause = (view: ExecutionView) => {
   const control = view.control();
-  return control.paused && (control.pauseReason ?? 'operator') === 'operator'
+  return control.paused && control.pauseReason === 'operator'
     ? 'очередь на паузе оператора: снять паузу решает человек (harness resume)'
     : undefined;
 };
@@ -671,6 +675,8 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
   const idleLimit = input.idleSessions ?? 3;
   const graceMs = input.graceMs ?? 30_000;
   const pollMs = input.pollMs ?? 1000;
+  /** pid ревью выпуска, о котором драйвер уже написал «жду». */
+  let reviewWaitLogged: number | undefined;
   const log = input.onLog ?? (() => {});
   const sessions: DriveSession[] = [];
   const notices: DriveNotice[] = [];
@@ -862,9 +868,10 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
         });
         continue;
       }
-      // Только что закончившаяся сессия могла запустить run в фоне: метка
-      // запуска появится не сразу — `stopped` перепроверяется после паузы.
-      if (w.kind === 'stopped' && lastAgentEnd !== undefined) {
+      // Только что закончившаяся сессия могла запустить run или review-release
+      // в фоне: их метка появится не сразу — `stopped` и `release-ready`
+      // перепроверяются после паузы.
+      if ((w.kind === 'stopped' || w.kind === 'release-ready') && lastAgentEnd !== undefined) {
         const left = lastAgentEnd + graceMs - Date.now();
         if (left > 0) {
           await sleep(left, input.signal);
@@ -874,6 +881,19 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
       }
       if (w.kind === 'release-ready' && readState(input.stateDir, releaseDone))
         return result('release-done', 'выпуск закончен: release done записан, весь код принят');
+      // Ревью выпуска ещё идёт (P10-8): ведущему решать нечего — ждём его конца,
+      // не тратя сессии и счёт простоя.
+      if (w.kind === 'release-ready') {
+        const review = activeReleaseReview(input.stateDir);
+        if (review) {
+          if (reviewWaitLogged !== review.pid)
+            log(`идёт review-release (pid ${review.pid}, с ${review.startedAt}) — жду его конца`);
+          reviewWaitLogged = review.pid;
+          // Реже обычного опроса: ревью идёт минуты, а каждый круг открывает хранилище.
+          await sleep(Math.min(pollMs * 10, 10_000), input.signal);
+          continue;
+        }
+      }
       if (w.kind === 'stopped' && existsSync(stateFile(input.stateDir))) {
         // Run не идёт: если идти дальше нечему, кроме решения владельца, — выход.
         const pending = await scanPending(input, w.cursor);
