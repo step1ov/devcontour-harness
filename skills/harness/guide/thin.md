@@ -79,7 +79,10 @@ loop). Under the lead driver (`HARNESS_LEAD_DRIVE=1`, `$H lead drive`, see
   order of the works.
 - **Questions** from the writer: technical ones are yours (`input-answer
 --actor lead --reason …`), product ones go to the owner, as in
-  `guide recovery`. The answer reaches the same session.
+  `guide recovery`. A technical question rated 10 is still yours when every
+  area it names is `internal` or `migration`; `contract`, `api`, `product`,
+  `acceptance`, no area or a critical path go to the owner. The answer
+  reaches the same session.
 - **Release ready**: all works accepted.
 
 The target moving between the review and the CAS is not your event. The

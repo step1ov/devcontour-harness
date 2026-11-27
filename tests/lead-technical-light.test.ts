@@ -86,13 +86,13 @@ const strict = (inputPolicy?: Record<string, unknown>) =>
 test('alpha.72: облегчённый режим — умолчание ответов ведущего; явное правило и строгий режим главнее', () => {
   assert.deepEqual(inputPolicyOf(light()).leadAnswers, {
     technical: true,
-    technicalAreas: ['internal'],
+    technicalAreas: ['internal', 'migration'],
   });
   assert.equal(leadAnswersSourceOf(light()), 'light-default');
   // Явное `technical: true` без областей получает области облегчённого режима.
   assert.deepEqual(
     inputPolicyOf(light({ leadAnswers: { technical: true, maxSeverity: 9 } })).leadAnswers,
-    { technical: true, maxSeverity: 9, technicalAreas: ['internal'] },
+    { technical: true, maxSeverity: 9, technicalAreas: ['internal', 'migration'] },
   );
   assert.deepEqual(
     inputPolicyOf(light({ leadAnswers: { technical: true, technicalAreas: [] } })).leadAnswers,
@@ -158,15 +158,12 @@ test('alpha.72: вопросы пилота 9 — договор и API у вл�
     basis(internal, light({ leadAnswers: { technical: true, technicalAreas: [] } })),
     null,
   );
-  // Миграция — только если её назвали в областях.
+  // Миграция (alpha.74, P10-5) — у ведущего по умолчанию; явный список без неё — владелец.
   const migration = secretsQuestion({ affects: ['migration'] });
-  assert.equal(basis(migration, light()), null);
+  assert.equal(basis(migration, light()), 'technical');
   assert.equal(
-    basis(
-      migration,
-      light({ leadAnswers: { technical: true, technicalAreas: ['contract', 'migration'] } }),
-    ),
-    'technical',
+    basis(migration, light({ leadAnswers: { technical: true, technicalAreas: ['internal'] } })),
+    null,
   );
   // Запрос writer объясняет область internal рядом с критическими.
   const text = inputPolicyText({ threshold: 7, criticalPaths: [] });
@@ -311,4 +308,53 @@ test('alpha.72: floors без affects (вызов прежней версии) �
     ),
     null,
   );
+});
+
+test('alpha.74, P10-5: технический вопрос о миграции с самооценкой 10 — ведущему в облегчённом и тонком режимах', () => {
+  const thin = (inputPolicy?: Record<string, unknown>) =>
+    policyOf((p) => {
+      p.harnessMode = 'thin';
+      if (inputPolicy) p.inputPolicy = inputPolicy;
+    });
+  // Вопрос пилота 10: impact technical, severity 10, affects migration — минимум declared.
+  const migration = secretsQuestion({
+    question: 'Как перенести старые записи в новую таблицу?',
+    rationale: 'Миграция внутренняя: формат для пользователя не меняется.',
+    affects: ['migration'],
+  });
+  assert.deepEqual(rated(migration).floors, ['declared']);
+  for (const p of [light(), thin(), thin({ leadAnswers: { technical: true } })])
+    assert.equal(basis(migration, p), 'technical');
+  assert.equal(basis(secretsQuestion({ affects: ['internal', 'migration'] }), thin()), 'technical');
+  // Договор, API, продукт, приёмка, видимое пользователю, критический путь — владельцу.
+  for (const affects of [
+    ['migration', 'contract'],
+    ['migration', 'api'],
+    ['migration', 'product'],
+    ['acceptance'],
+  ] as const)
+    assert.equal(basis(secretsQuestion({ affects: [...affects] }), thin()), null, affects.join());
+  assert.equal(
+    basis(secretsQuestion({ affects: ['migration'], impact: 'user-visible' }), thin()),
+    null,
+  );
+  assert.equal(basis(migration, thin(), ['db/schema.sql'], ['db']), null);
+  // Строгий режим и явный отказ не меняются.
+  assert.equal(basis(migration, strict({ leadAnswers: { technical: true } })), null);
+  assert.equal(basis(migration, thin({ leadAnswers: { technical: false } })), null);
+  // Движок принимает ответ ведущего с причиной.
+  const env = stopped(migration, thin());
+  const r = env.engine.answerInput(
+    env.request.id,
+    {
+      text: 'Перенести записи одним шагом миграции',
+      optionId: 'controller_secrets',
+      actor: { kind: 'lead' },
+      reason: 'миграция внутренняя, пользователь видит те же данные',
+    },
+    1,
+  );
+  assert.equal(r.request.answers[0]!.basis, 'technical');
+  env.store.close();
+  assert.match(leadAnswersRule(inputPolicyOf(thin())).ru, /миграции данных/);
 });

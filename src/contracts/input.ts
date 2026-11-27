@@ -218,12 +218,12 @@ export const inputPolicySchema = z.strictObject({
         technical: z.literal(true),
         /**
          * Области (alpha.72), в которых технический вопрос остаётся у
-         * ведущего и с минимумом `declared`: `internal` (развилка внутри
-         * кода), а также `contract`, `api`, `migration`, если владелец
-         * назвал их явно. Нет поля — в облегчённом режиме `internal`
-         * (`LIGHT_LEAD_TECHNICAL_AREAS`), в строгом — ни одной (прежнее
-         * правило: только без минимумов); `[]` — прежнее правило и в
-         * облегчённом режиме.
+         * ведущего и с минимумом `declared`. Нет поля — в облегчённом и
+         * тонком режимах `internal` (развилка внутри кода) и `migration`
+         * (`LIGHT_LEAD_TECHNICAL_AREAS`, alpha.74); `contract` и `api` —
+         * только если владелец назвал их явно; в строгом режиме — ни одной
+         * (прежнее правило: только без минимумов); `[]` — прежнее правило и
+         * в облегчённом режиме.
          */
         technicalAreas: z
           .array(z.enum(leadTechnicalAreas))

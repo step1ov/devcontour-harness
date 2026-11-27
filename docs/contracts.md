@@ -1283,10 +1283,13 @@ JSON Schema — `anyOf`). С `technical: true` вопрос, меняющий р
 (`internal`, `contract`, `api`, `migration`): технический вопрос с минимумом
 `declared` тоже у ведущего, если он называет области и каждая — из списка;
 самооценка 10 без названной области, минимум `critical-path`, области
-`product` и `acceptance` — всегда человеку. В облегчённом режиме без поля
-`leadAnswers` действует `{technical: true, technicalAreas: [internal]}`
-(`inputPolicyOf`), и `technical: true` без `technicalAreas` получает ту же
-область; `contract` и `api` остаются у владельца, пока он не назовёт их
+`product` и `acceptance` — всегда человеку. В облегчённом и тонком режимах
+без поля `leadAnswers` действует `{technical: true, technicalAreas:
+[internal, migration]}` (`inputPolicyOf`; `migration` — с alpha.74), и
+`technical: true` без `technicalAreas` получает те же области: технический
+вопрос (`impact: technical`), все области которого — `internal` или
+`migration`, ведущий решает с причиной и при самооценке 10 (минимум
+`declared`); `contract` и `api` остаются у владельца, пока он не назовёт их
 явно; `{technical: false}` — явный отказ (блокирующие вопросы — человеку),
 `technicalAreas: []` — прежнее правило без минимумов. Строгий режим не
 меняется: без поля ответы ведущего не разрешены. Согласие действует по текущей политике

@@ -44,6 +44,15 @@ production — `harnessMode: strict` (решение владельца).
 инфраструктуры (C1), правила чистого дерева (C3), черновиков, второго прохода
 ревью сдачи. Ведущему — `harness guide thin`.
 
+**Вопросы исполнителя** (0.1.0-alpha.74). Как в облегчённом режиме,
+технические вопросы (`impact: technical`) решает ведущий с причиной
+(`input-answer --actor lead --reason …`). С минимумом `declared`
+(самооценка 10 или названная критическая область) вопрос остаётся у ведущего,
+если каждая область `affects` — `internal` или `migration`; `contract`, `api`,
+`product`, `acceptance`, вопрос без области, `impact: user-visible` (или без
+поля) и минимум `critical-path` — у владельца. Явный
+`leadAnswers.technicalAreas` главнее умолчания.
+
 `init --harness-mode thin` записывает режим и `review.passes: { code: off }`;
 doctor называет режим и предупреждает, если CLI исполнителя не умеет
 продолжить сессию (`THIN_NO_RESUME`) или включён второй проход ревью
