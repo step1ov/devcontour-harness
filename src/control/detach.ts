@@ -7,6 +7,11 @@
 // отказывает), ни `setsid` (нет в macOS), ни `nohup` не нужны. Запись о
 // запуске (`<state>/run-detach.json`) — для сводки `lead drive`: путь и
 // хвост журнала последнего run, когда очередь стоит.
+//
+// `harness review-release --detach --log <файл>` (alpha.77, P12-4) — так же:
+// ревью выпуска переживает сессию ведущего (драйвер убивает группу её
+// процессов); запуск подтверждает метка идущего ревью (`markReleaseReview`)
+// дочернего процесса, и `lead drive` ждёт ревью по ней же.
 
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
@@ -44,7 +49,11 @@ export interface DetachedRun {
   exitCode?: number;
 }
 
-const recordFile = (stateDir: string) => join(resolve(stateDir), 'run-detach.json');
+/** Команды, которые запускаются отдельным процессом. */
+export type DetachedCommand = 'run' | 'review-release';
+
+const recordFile = (stateDir: string, command: DetachedCommand = 'run') =>
+  join(resolve(stateDir), `${command}-detach.json`);
 
 /**
  * Вызов этого CLI для дочернего процесса и обёртки `H`: `HARNESS_BIN` —
@@ -117,27 +126,43 @@ function started(stateDir: string, pid: number): boolean {
   }
 }
 
+/** Ревью выпуска этого процесса поставило метку (или живую метку после `since`). */
+function reviewStarted(stateDir: string, pid: number, since: number): boolean {
+  if (
+    existsSync(reviewMarkers(stateDir)) &&
+    readdirSync(reviewMarkers(stateDir)).some((n) => n.startsWith(`${pid}-`))
+  )
+    return true;
+  // Обёртка (HARNESS_BIN — скрипт оболочки) может запустить ревью другим pid.
+  const live = activeReleaseReview(stateDir);
+  return !!live && Date.parse(live.startedAt) >= since - 1000;
+}
+
 /**
- * Запустить `harness run` отдельным процессом и дождаться подтверждения
- * запуска (не дольше `waitMs`, по умолчанию 30 с). Процесс вышел с ошибкой —
- * отказ `NOT_READY` с кодом выхода и последними 40 строками журнала.
+ * Запустить `harness run` (или `review-release`, `command`) отдельным
+ * процессом и дождаться подтверждения запуска (не дольше `waitMs`, по
+ * умолчанию 30 с). Процесс вышел с ошибкой — отказ `NOT_READY` с кодом
+ * выхода и последними 40 строками журнала.
  */
 export async function detachRun(input: {
   stateDir: string;
   args: string[];
   log: string;
+  command?: DetachedCommand;
   cwd?: string;
   invocation?: string[];
   waitMs?: number;
   pollMs?: number;
 }): Promise<DetachedRun> {
+  const command = input.command ?? 'run';
   const invocation = input.invocation ?? harnessInvocation();
+  const since = Date.now();
   const log = resolve(input.log);
   mkdirSync(dirname(log), { recursive: true });
   const fd = openSync(log, 'a', 0o600);
   let child: ReturnType<typeof spawn>;
   try {
-    child = spawn(invocation[0]!, [...invocation.slice(1), 'run', ...input.args], {
+    child = spawn(invocation[0]!, [...invocation.slice(1), command, ...input.args], {
       cwd: input.cwd ?? process.cwd(),
       env: process.env,
       detached: true,
@@ -153,7 +178,12 @@ export async function detachRun(input: {
   const deadline = Date.now() + (input.waitMs ?? 30_000);
   let confirmed = false;
   while (!state.exited && Date.now() < deadline) {
-    if (child.pid && started(input.stateDir, child.pid)) {
+    if (
+      child.pid &&
+      (command === 'run'
+        ? started(input.stateDir, child.pid)
+        : reviewStarted(input.stateDir, child.pid, since))
+    ) {
       confirmed = true;
       break;
     }
@@ -164,7 +194,7 @@ export async function detachRun(input: {
   if (done && done.code !== 0)
     throw new HarnessError(
       'NOT_READY',
-      `harness run --detach: run вышел ${done.error ? `с ошибкой запуска (${done.error})` : `с кодом ${done.code ?? 'сигнал'}`}; журнал ${log}, последние строки:\n${logTail(log, 40)}`,
+      `harness ${command} --detach: ${command} вышел ${done.error ? `с ошибкой запуска (${done.error})` : `с кодом ${done.code ?? 'сигнал'}`}; журнал ${log}, последние строки:\n${logTail(log, 40)}`,
       [{ path: ['--log'], message: log }],
     );
   const record: DetachedRun = {
@@ -178,7 +208,9 @@ export async function detachRun(input: {
     ...(done ? { exitCode: 0 } : {}),
   };
   mkdirSync(resolve(input.stateDir), { recursive: true });
-  writeFileSync(recordFile(input.stateDir), JSON.stringify(record, null, 2), { mode: 0o600 });
+  writeFileSync(recordFile(input.stateDir, command), JSON.stringify(record, null, 2), {
+    mode: 0o600,
+  });
   return record;
 }
 

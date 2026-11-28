@@ -462,7 +462,7 @@ export function eventSummary(
       `$H lead end --state ${S} --waiting owner --reason "…"   # если дальше ждёте только владельца`,
     ],
     'release-ready': [
-      `$H review-release --state ${S} --policy ${P}`,
+      `$H review-release --detach --log <журнал ревью> --state ${S} --policy ${P}   # только отдельным процессом: lead drive ждёт его конца`,
       `$H release done --state ${S} --summary "…"`,
     ],
     stopped: [

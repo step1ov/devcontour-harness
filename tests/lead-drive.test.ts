@@ -1158,6 +1158,81 @@ test('ревью 3: исправный run --detach — подтверждён �
   env.store.close();
 });
 
+const HEALTHY_REVIEW = fileURLToPath(
+  new URL('./fixtures/lead-drive/healthy-review.ts', import.meta.url),
+);
+
+// P12-4: ведущий запускал review-release через nohup в своей сессии, и
+// драйвер, остановив группу процессов сессии, убивал и ревью.
+test(
+  'P12-4: review-release --detach — ревью в своей группе переживает остановку группы сессии ведущего, метка для drive — его',
+  { timeout: 90_000 },
+  async () => {
+    const { spawn } = await import('node:child_process');
+    const { activeReleaseReview } = await import('../src/control/detach.ts');
+    const root = mkdtempSync(join(tmpdir(), 'harness-review-detach-'));
+    const state = join(root, 'state');
+    const log = join(root, 'review.log');
+    const bin = join(root, 'fake-harness');
+    writeFileSync(
+      bin,
+      `#!/bin/sh\nexec '${process.execPath}' --import '${import.meta.resolve('tsx')}' '${HEALTHY_REVIEW}' "$@"\n`,
+      { mode: 0o755 },
+    );
+    // «Сессия ведущего»: своя группа процессов, как её запускает lead drive.
+    const session = spawn(
+      process.execPath,
+      [
+        '--import',
+        import.meta.resolve('tsx'),
+        cli,
+        'review-release',
+        '--detach',
+        '--log',
+        log,
+        '--state',
+        state,
+      ],
+      {
+        detached: true,
+        env: { ...process.env, HARNESS_BIN: bin },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    let stdout = '';
+    let stderr = '';
+    session.stdout.on('data', (d: Buffer) => (stdout += d.toString()));
+    session.stderr.on('data', (d: Buffer) => (stderr += d.toString()));
+    const code = await new Promise<number | null>((r) => session.on('exit', r));
+    assert.equal(code, 0, stderr);
+    const envelope = JSON.parse(stdout) as {
+      command: string;
+      data: { pid: number; log: string; confirmed: boolean };
+    };
+    assert.equal(envelope.command, 'review-release-detach');
+    assert.equal(envelope.data.confirmed, true, 'ревью поставило метку');
+    const pgid = spawnSync('ps', ['-o', 'pgid=', '-p', String(envelope.data.pid)], {
+      encoding: 'utf8',
+    }).stdout.trim();
+    assert.equal(pgid, String(envelope.data.pid), 'ревью — лидер своей группы');
+    // Драйвер останавливает группу сессии ведущего — ревью в ней нет.
+    try {
+      process.kill(-session.pid!, 'SIGKILL');
+    } catch {
+      /* группа уже пуста */
+    }
+    assert.equal(activeReleaseReview(state)?.pid, envelope.data.pid, 'drive ждёт по метке ревью');
+    writeFileSync(join(state, 'release-go'), '');
+    const done = join(state, 'review-done');
+    for (let i = 0; i < 400 && !existsSync(done); i++) await new Promise((r) => setTimeout(r, 50));
+    assert.equal(readFileSync(done, 'utf8'), String(envelope.data.pid), 'ревью дошло до конца');
+    assert.match(readFileSync(log, 'utf8'), /fake review started/);
+    for (let i = 0; i < 100 && activeReleaseReview(state); i++)
+      await new Promise((r) => setTimeout(r, 50));
+    assert.equal(activeReleaseReview(state), undefined, 'метка снята');
+  },
+);
+
 test('ревью 3: записи начала и конца run в журнале ведущего — не решение', async () => {
   const env = engineOf();
   ready(env.engine, graphOf({ a: [] }));
