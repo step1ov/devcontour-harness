@@ -15,6 +15,7 @@ import {
 import { livenessPayload, superviseStalls } from '../engine/stall-sweep.ts';
 import { TaskFailure } from '../engine/failure.ts';
 import { git } from '../environment/process.ts';
+import { composeProjectDown } from '../environment/compose-env.ts';
 import {
   allocateAttemptPorts,
   attemptEnvFile,
@@ -291,6 +292,8 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
   let snapshots: DependencySnapshot[] = [];
   let added = false;
   let ports: AttemptPorts | undefined;
+  /** Проект compose прогона (облегчённый и тонкий режимы): снимается после прогона. */
+  let compose: { project: string; env: NodeJS.ProcessEnv } | undefined;
   const boundaryOf = ctx.boundary();
   const store: StoreContext = {
     policy: ctx.policy,
@@ -394,6 +397,8 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
           source,
           ctx.policy.toolchain,
         );
+        if (variables.COMPOSE_PROJECT_NAME)
+          compose = { project: variables.COMPOSE_PROJECT_NAME, env: execution.env };
         if (input.onStep) execution.onStep = (step) => input.onStep!(step);
         const boundary = ctx.boundary();
         const prepared = preparation.guard(
@@ -559,6 +564,19 @@ async function gatesAt(ctx: GatesAtContext, input: GatesAtInput): Promise<GatesA
     if (!reason) throw error;
     if (!interrupted) throw new HarnessError('CANCELLED', 'Проверка gates прервана: ' + reason);
   } finally {
+    // Стек, который gate поднял под именем проекта прогона (P12-6), — на
+    // любом исходе: успех, провал, прерывание.
+    if (compose) {
+      const down = await composeProjectDown(compose.project, { env: compose.env, cwd: path }).catch(
+        (error: unknown) => ({ present: true, ok: false, error: String(error) }),
+      );
+      if (down.present)
+        warnings.push(
+          down.ok
+            ? `снят стек docker compose ${compose.project}, который gates прогона оставили поднятым`
+            : `стек docker compose ${compose.project}, оставленный gates прогона, не снят: ${(down.error ?? '').slice(0, 300)}`,
+        );
+    }
     try {
       ports?.release();
     } catch {

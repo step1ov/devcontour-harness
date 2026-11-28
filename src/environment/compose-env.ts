@@ -304,6 +304,39 @@ export async function composeDown(options: ComposeOptions) {
 }
 
 /**
+ * Стек compose прогона вне попытки (`gates --sha`, полный прогон выпуска;
+ * alpha.77, P12-6): тестовый помощник продукта внутри gate поднимает
+ * `docker compose` под именем проекта прогона (`COMPOSE_PROJECT_NAME` —
+ * его задаёт harness), и после прогона его никто не снимал. Снимается только
+ * этот проект `hx-*` и только если у него есть контейнеры; docker не
+ * отвечает — ничего не делается.
+ */
+export async function composeProjectDown(
+  project: string,
+  options: { env: NodeJS.ProcessEnv; cwd: string; docker?: DockerRun },
+): Promise<{ project: string; present: boolean; ok: boolean; error?: string }> {
+  if (!/^hx-[a-z0-9_-]+$/.test(project)) return { project, present: false, ok: true };
+  const docker = options.docker ?? dockerRun;
+  const ls = await docker(
+    ['ps', '-a', '-q', '--filter', `label=com.docker.compose.project=${project}`],
+    // Короткий срок: демон не отвечает — прогон не ждёт его минуту.
+    { env: options.env, cwd: options.cwd, timeoutMs: 15_000 },
+  );
+  if (ls.code !== 0 || !ls.stdout.trim()) return { project, present: false, ok: true };
+  const r = await docker(['compose', '-p', project, 'down', '-v', '--remove-orphans', '-t', '2'], {
+    env: options.env,
+    cwd: options.cwd,
+    timeoutMs: 120_000,
+  });
+  return {
+    project,
+    present: true,
+    ok: r.code === 0,
+    ...(r.code ? { error: r.stderr.slice(-2000) } : {}),
+  };
+}
+
+/**
  * Уборка по метке: проекты compose `hx-*`, которых нет среди `keep`
  * (имена проектов идущих попыток), снимаются `down -v --remove-orphans`.
  * `dryRun` — только список.
