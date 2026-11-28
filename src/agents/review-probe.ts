@@ -5,6 +5,7 @@ import { closeSync, fsyncSync, mkdirSync, openSync, writeSync } from 'node:fs';
 import {
   appendFile,
   chmod,
+  copyFile,
   lstat,
   mkdir,
   mkdtemp,
@@ -364,6 +365,22 @@ async function inspectReport(
   }
 }
 
+/**
+ * Отчёт, который gate записал по пути из argv в одноразовой копии дерева
+ * (P11-4): копируется в scratch, только если это обычный файл внутри копии
+ * (не symlink, не жёсткая ссылка) и он записан этим запуском; иначе отчёта
+ * нет, и проверка отчёта назовёт это сама.
+ */
+async function adoptTreeReport(path: string, root: string, target: string, started: number) {
+  const stat = await lstat(path).catch(() => undefined);
+  if (!stat?.isFile() || stat.nlink > 1 || stat.size > REPORT_LIMIT) return;
+  if (stat.mtimeMs < started - 1000) return;
+  const real = await realpath(path).catch(() => undefined);
+  if (!real || !within(real, root)) return;
+  if (await lstat(target).catch(() => undefined)) return;
+  await copyFile(real, target).catch(() => undefined);
+}
+
 /** Временный каталог убирается и тогда, когда проверка сняла с него права. */
 async function removeScratch(dir: string) {
   try {
@@ -695,11 +712,14 @@ export class ReviewProbes {
     if (!gateCwd) return environment(`Каталог gate ${meta.cwd} отсутствует в проверяемом дереве.`);
     if (!within(gateCwd, root))
       return { ...empty, status: 'rejected', note: 'Gate cwd выходит из worktree.' };
+    // Путь JUnit, зашитый в argv: в одноразовой копии (`writable`) gate
+    // пишет отчёт туда, и controller переносит его в scratch (P11-4).
+    const treeReport = gate.report ? resolve(root, gate.report.path) : undefined;
+    const fixed = treeReport ? fixedReportArgument(gate.command, gateCwd, treeReport) : undefined;
     if (gate.report) {
-      const fixed = fixedReportArgument(gate.command, gateCwd, resolve(root, gate.report.path));
       // Такой gate в дереве только для чтения упал бы с EPERM: не запускаем
       // и называем аргумент, а не переписываем его.
-      if (fixed)
+      if (fixed && !this.spec.writable)
         return environment(
           `Gate ${gate.id} задаёт путь JUnit в argv (аргумент ${fixed.index}: ${redact(fixed.token)}) внутри проверяемого дерева, а в probe дерево только для чтения; controller не подменяет argv. ${reportRecipe}`,
         );
@@ -777,6 +797,7 @@ export class ReviewProbes {
       );
       finished = r;
       output = r.stdout + '\n' + r.stderr;
+      if (fixed && treeReport) await adoptTreeReport(treeReport, root, reportPath, started);
       // Отчёт читается и сохраняется до удаления scratch — при любом исходе.
       const read = gate.report
         ? await inspectReport(reportPath, scratch, started, redact)

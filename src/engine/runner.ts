@@ -3962,7 +3962,8 @@ export class Runner {
    * проверяемого репозитория, своя `.git`) во временном каталоге controller,
    * detached на `sha` и сверенный (HEAD — `sha`, чистое дерево). Каждый
    * игнорируемый элемент проверяемого дерева (`node_modules`, `.env`,
-   * `vendor/`, `dist/` …) — ссылка на него, и ссылка записана в
+   * `vendor/`, `dist/` …) — ссылка на него (`node_modules` — настоящий
+   * каталог со ссылками на каждый элемент, alpha.77), и ссылка записана в
    * `.git/info/exclude` копии: `git status` копии чист, как у кандидата.
    * Подмодули копия не повторяет — тогда копии нет, проверки идут в
    * проверяемом дереве только для чтения, причина — в `skipped`. Отказ
@@ -4009,16 +4010,25 @@ export class Runner {
         .map((p) => p.replace(/\/$/, ''))
         .filter((p) => p && !p.split('/').includes('.git'));
       const linked: string[] = [];
+      const link = (from: string, to: string) =>
+        symlink(from, to).then(
+          () => true,
+          () => false,
+        );
       for (const m of links) {
         if (existsSync(join(checkout, m))) continue;
         await mkdir(dirname(join(checkout, m)), { recursive: true });
-        if (
-          await symlink(join(cwd, m), join(checkout, m)).then(
-            () => true,
-            () => false,
-          )
-        )
+        // `node_modules` — настоящий каталог со ссылками на каждый элемент
+        // (P11-4): pnpm отказывается работать, когда сам `node_modules` —
+        // symlink (ERR_PNPM_UNSAFE_TASK_RUN_STATE_PATH), а свои файлы
+        // состояния проверки пишет в копию, не в кандидата.
+        const st = basename(m) === 'node_modules' ? await lstat(join(cwd, m)) : undefined;
+        if (st?.isDirectory()) {
+          await mkdir(join(checkout, m));
+          for (const entry of await readdir(join(cwd, m)))
+            await link(join(cwd, m, entry), join(checkout, m, entry));
           linked.push(m);
+        } else if (await link(join(cwd, m), join(checkout, m))) linked.push(m);
       }
       if (linked.length)
         await writeFile(

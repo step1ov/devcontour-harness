@@ -1,7 +1,15 @@
 import './temp-scope.ts';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, utimesSync } from 'node:fs';
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  realpathSync,
+  utimesSync,
+} from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -83,6 +91,75 @@ test('A4, ревью A1 M3: копия коммита чиста для git stat
   await copy.dispose();
   assert.ok(!existsSync(copy.cwd), 'копия убрана');
   assert.doesNotMatch(ctx.repo.git('worktree', 'list'), /hx-probe-/);
+  ctx.store.close();
+});
+
+// P11-4: в пилоте 12 ни одно ревью не смогло повторить gates в копии:
+// pnpm отказывался от `node_modules`-ссылки (ERR_PNPM_UNSAFE_TASK_RUN_STATE_PATH),
+// а gate с путём JUnit в argv отклонялся как «запись в дерево только для чтения».
+test('P11-4: в копии проверок node_modules — настоящий каталог; gate с путём JUnit в argv исполняется, отчёт перенесён в scratch', async () => {
+  const ctx = setup({ scenario: { writer: implement(), reviewer: approve() } });
+  write(ctx.repo.dir, {
+    '.gitignore': 'node_modules/\npackages/a/node_modules/\n',
+    'node_modules/dep/index.js': 'module.exports = 1;\n',
+    'node_modules/.modules.yaml': 'layout: 5\n',
+    'packages/a/package.json': '{}\n',
+    'packages/a/node_modules/inner/index.js': 'module.exports = 2;\n',
+  });
+  ctx.repo.git('add', '-A');
+  ctx.repo.git('commit', '-q', '-m', 'workspace');
+  const sha = ctx.repo.git('rev-parse', 'HEAD');
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'harness-probe-copy-')));
+  const copy = made(await ctx.runner.probeCopy(ctx.repo.dir, sha, dir));
+  for (const m of ['node_modules', 'packages/a/node_modules']) {
+    const st = lstatSync(join(copy.cwd, m));
+    assert.ok(st.isDirectory() && !st.isSymbolicLink(), `${m} — каталог, не ссылка`);
+  }
+  assert.ok(lstatSync(join(copy.cwd, 'node_modules/dep')).isSymbolicLink());
+  assert.ok(existsSync(join(copy.cwd, 'node_modules/dep/index.js')));
+  assert.ok(existsSync(join(copy.cwd, 'node_modules/.modules.yaml')));
+  assert.ok(existsSync(join(copy.cwd, 'packages/a/node_modules/inner/index.js')));
+  assert.equal(ctx.repo.git('-C', copy.cwd, 'status', '--porcelain', '--untracked-files=all'), '');
+  const script = [
+    "const fs = require('fs');",
+    // Файл состояния в node_modules копии (как каталог состояния задач pnpm).
+    "if (fs.lstatSync('node_modules').isSymbolicLink()) { console.error('node_modules is a symbolic link'); process.exit(1); }",
+    "fs.writeFileSync('node_modules/.task-state', 'x');",
+    "const dest = process.argv.find((a) => a.startsWith('--dest=')).slice(7);",
+    "fs.mkdirSync(require('path').dirname(dest), { recursive: true });",
+    'fs.writeFileSync(dest, \'<testsuite tests="1"><testcase classname="a" name="b"/></testsuite>\');',
+  ].join('\n');
+  const spec: ProbeSpec = {
+    cwd: copy.cwd,
+    controller: [],
+    readable: [copy.cwd, ctx.repo.dir],
+    isolation: { mode: 'none', domains: [] },
+    harnessMode: 'light',
+    commandTimeoutMs: 30000,
+    budgetMs: 120000,
+    deadline: Date.now() + 600000,
+    env: ['PATH', 'HOME'],
+    secrets: [],
+    settingsDir: join(dir, 'settings'),
+    log: join(dir, 'probes.jsonl'),
+    writable: true,
+    gates: [
+      {
+        id: 'unit',
+        kind: 'test',
+        command: [process.execPath, '-e', script, '--', '--dest=reports/junit.xml'],
+        timeoutMs: 30000,
+        report: { type: 'junit', path: 'reports/junit.xml' },
+      },
+    ],
+  };
+  const r = await new ReviewProbes(spec).run({ gate: 'unit' });
+  assert.equal(r.status, 'passed', `${r.note}\n${r.stdout}\n${r.stderr}`);
+  assert.equal(r.gate?.report?.status, 'fresh');
+  assert.equal(r.gate?.report?.tests, 1);
+  assert.ok(!existsSync(join(ctx.repo.dir, 'node_modules/.task-state')), 'кандидат не тронут');
+  assert.ok(!existsSync(join(ctx.repo.dir, 'reports')));
+  await copy.dispose();
   ctx.store.close();
 });
 
