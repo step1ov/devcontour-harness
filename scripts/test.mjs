@@ -62,6 +62,8 @@ const slowTests = [
   // roles.test.ts
   'S2.2/T31: четыре пары writer → reviewer',
 ];
+// Per-test limit: the slowest tests take about 2 min under load.
+const testTimeoutMs = 10 * 60_000;
 const escape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 const slowPatterns = slowTests.map((s) => new RegExp('^' + escape(s)));
 
@@ -145,7 +147,10 @@ if (flags.list) {
   const results = run({
     files,
     concurrency: 4,
-    execArgv: ['--import', 'tsx'],
+    // A hung test fails under its own name instead of stalling the whole run
+    // (a full check once hung for 44 min with no child process). Force exit
+    // ends a file whose finished tests left a handle open.
+    execArgv: ['--import', 'tsx', `--test-timeout=${testTimeoutMs}`, '--test-force-exit'],
     signal: controller.signal,
     ...(flags.fast ? { testSkipPatterns: slowPatterns } : {}),
   });
