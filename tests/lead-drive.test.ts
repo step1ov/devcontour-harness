@@ -1371,7 +1371,7 @@ test('ревью a74 M1: сессия goals-changed упала или снята
   env.store.close();
 });
 
-test('ревью a74 M2: событие первого ожидания пропущено (ответ ведущего уже записан) — новые цели всё равно доходят сессией goals-changed', async () => {
+test('ревью a74 M2 / P12-1: ответ ведущего записан, но не применён — первая сессия «примените ответ», новые цели доходят в ней же', async () => {
   const env = engineOf(
     policyOf(
       (p: Record<string, unknown>) =>
@@ -1383,7 +1383,7 @@ test('ревью a74 M2: событие первого ожидания проп
   env.engine.claim('c1');
   env.engine.fail(x.id, x.token, 'вопрос', { kind: 'needs-input', input: questionOutcome() });
   const request = env.engine.read((v) => v.locals('input-requests'))[0]!.value;
-  // Ведущий уже ответил сам: применить ответ — его шаг, но драйвер такой вопрос пропускает.
+  // Ведущий уже ответил сам, но не применил (P12-1): драйвер будит его применить ответ.
   env.engine.answerInput(
     request.id,
     { text: 'Hello', optionId: 'hello', actor: { kind: 'lead' }, reason: 'технический выбор' },
@@ -1393,11 +1393,11 @@ test('ревью a74 M2: событие первого ожидания проп
   const { dir, promise } = driveOf(env, { goalsRecord: false }, { signal: abort.signal });
   setTimeout(() => abort.abort(), 1500);
   const data = await promise;
-  assert.deepEqual(
-    data.sessions.map((s) => s.kind),
-    ['goals-changed'],
-  );
-  assert.equal((await sessionRecord(dir, 1)).env.HARNESS_LEAD_DRIVE_EVENT, 'goals-changed');
+  assert.equal(data.sessions[0]?.kind, 'question');
+  const first = await sessionRecord(dir, 1);
+  assert.equal(first.env.HARNESS_LEAD_DRIVE_EVENT, 'question');
+  assert.match(first.stdin, /input-resolve/);
+  assert.match(first.stdin, /оператор изменил цели драйвера/);
   env.store.close();
 });
 
@@ -1415,3 +1415,44 @@ test('ревью a74 L2: запись целей атомарна — без в�
   );
   env.store.close();
 });
+
+test(
+  'P12-1/P12-2: ведущий ответил, но не применил ответ — сессия «примените ответ»; то же состояние без решения — драйвер не крутится и слышит сигнал',
+  { timeout: 20_000 },
+  async () => {
+    const env = engineOf(
+      policyOf(
+        (p: Record<string, unknown>) =>
+          (p.inputPolicy = { threshold: 7, leadAnswers: { maxSeverity: 10 } }),
+      ),
+    );
+    ready(env.engine, graphOf({ a: [], b: [] }));
+    const x = env.engine.claim('c1')!;
+    env.engine.claim('c1');
+    env.engine.fail(x.id, x.token, 'вопрос', { kind: 'needs-input', input: questionOutcome() });
+    const request = env.engine.read((v) => v.locals('input-requests'))[0]!.value;
+    // Ответ ведущего записан до запуска драйвера и не применён.
+    env.engine.answerInput(
+      request.id,
+      { text: 'Hello', optionId: 'hello', actor: { kind: 'lead' }, reason: 'текст по критериям' },
+      request.version,
+    );
+    const abort = new AbortController();
+    const { dir, promise } = driveOf(
+      env,
+      { mode: 'exit' },
+      { signal: abort.signal, idleSessions: 5 },
+    );
+    const first = await sessionRecord(dir, 1);
+    assert.equal(first.env.HARNESS_LEAD_DRIVE_EVENT, 'question');
+    assert.match(first.stdin, /input-resolve/);
+    // Сессия ничего не решила: драйвер ждёт изменений, а не крутится — сигнал доходит.
+    await new Promise((r) => setTimeout(r, 400));
+    const t0 = Date.now();
+    abort.abort();
+    const data = await promise;
+    assert.ok(Date.now() - t0 < 3000, `остановка по сигналу за ${Date.now() - t0} мс`);
+    assert.equal(data.outcome, 'aborted');
+    env.store.close();
+  },
+);

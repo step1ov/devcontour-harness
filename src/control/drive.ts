@@ -877,7 +877,11 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
       return { skip: true };
     }
     if (request.lifecycle === 'answered') {
-      if (request.answers.at(-1)?.actor.kind === 'lead') return { skip: true };
+      // Ответ ведущего записан, но не применён (P12-1): работа стоит с
+      // INPUT_REQUIRED «ход ведущего: применить ответ» — будим применить его.
+      // Повтор того же состояния без решения ведущего гасит правило уровня.
+      if (request.answers.at(-1)?.actor.kind === 'lead')
+        return { skip: false, request, mode: 'answered' };
       notice({
         kind: 'owner-answered',
         requestId: request.id,
@@ -893,8 +897,17 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
     }
     return { skip: false, request, mode: 'lead' };
   };
+  /**
+   * Круг без ожидания и без сессии (P12-2): уровневое состояние, которое
+   * драйвер пропускает, вернётся сразу же, и цикл крутился бы, не отдавая
+   * управление (сигналы не обрабатывались, процессор занят). Следующий такой
+   * круг начинается с паузы опроса.
+   */
+  let spun = false;
   try {
     for (;;) {
+      if (spun) await sleep(pollMs, input.signal);
+      spun = true;
       if (input.signal?.aborted) return result('aborted', 'драйвер остановлен сигналом');
       if (readState(input.stateDir, releaseDone))
         return result('release-done', 'выпуск закончен: release done записан, весь код принят');
@@ -951,6 +964,7 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
         });
         cursor = w.cursor;
         level = !w.event;
+        if (w.waitedMs > 0) spun = false;
       }
       if (w.kind === 'aborted') return result('aborted', 'драйвер остановлен сигналом');
       // Новые цели и пропуск события первого ожидания (вопрос уже закрыт,
@@ -1156,6 +1170,7 @@ export async function driveLead(input: DriveInput): Promise<DriveData> {
         killGraceMs: input.killGraceMs ?? 10_000,
       });
       lastAgentEnd = Date.now();
+      spun = false;
       const waiting = readState(input.stateDir, waitingOwnerOf);
       if (waiting?.at && waiting.at !== waitingBefore) {
         ownerWait = waiting.plain ?? 'ведущий ждёт решения владельца';
