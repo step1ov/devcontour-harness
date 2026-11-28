@@ -489,6 +489,9 @@ test('alpha.75 R2: тонкий запрос плана — dependsOn тольк
   assert.match(THIN_TASK_SIZE_SECTION, /earliest contract task/);
   assert.match(THIN_TASK_SIZE_SECTION, /never let two tasks that may run in parallel own/);
   assert.match(THIN_TASK_SIZE_SECTION, /the release's job/);
+  // P12-5: общий файл браузерной настройки вне областей обеих работ.
+  assert.match(THIN_TASK_SIZE_SECTION, /Playwright config, its global setup/);
+  assert.match(THIN_TASK_SIZE_SECTION, /a shared file in no task's writePaths is invisible/);
 });
 
 test('alpha.75 R2: plan-check советует THIN_CHAIN для цепочки при раздельных областях и THIN_SCOPE_OVERLAP для параллельных работ с общей областью', async () => {
