@@ -8,6 +8,7 @@ import {
   mkdtempSync,
   readdirSync,
   realpathSync,
+  symlinkSync,
   utimesSync,
 } from 'node:fs';
 import { readFile } from 'node:fs/promises';
@@ -159,6 +160,97 @@ test('P11-4: в копии проверок node_modules — настоящий 
   assert.equal(r.gate?.report?.tests, 1);
   assert.ok(!existsSync(join(ctx.repo.dir, 'node_modules/.task-state')), 'кандидат не тронут');
   assert.ok(!existsSync(join(ctx.repo.dir, 'reports')));
+  await copy.dispose();
+  ctx.store.close();
+});
+
+// Ревью alpha.77 H1: writer тонкого режима уже прогнал gates, и `reports/`
+// кандидата существует (игнорируемый). Ссылка на него в копии уводила отчёт
+// gate копии в кандидата: EPERM под write guard (пилот) или перезапись.
+const junitGate = (id: string, path: string): NonNullable<ProbeSpec['gates']>[number] => ({
+  id,
+  kind: 'test',
+  command: [
+    process.execPath,
+    '-e',
+    [
+      "const fs = require('fs');",
+      "const dest = process.argv.find((a) => a.startsWith('--dest=')).slice(7);",
+      "fs.mkdirSync(require('path').dirname(dest), { recursive: true });",
+      'fs.writeFileSync(dest, \'<testsuite tests="1"><testcase classname="a" name="b"/></testsuite>\');',
+    ].join('\n'),
+    '--',
+    '--dest=' + path,
+  ],
+  timeoutMs: 30000,
+  report: { type: 'junit', path },
+});
+const lightSpec = (
+  cwd: string,
+  candidate: string,
+  dir: string,
+  gates: ProbeSpec['gates'],
+): ProbeSpec => ({
+  cwd,
+  controller: [],
+  readable: [cwd, candidate],
+  isolation: { mode: 'none', domains: [] },
+  harnessMode: 'light',
+  commandTimeoutMs: 30000,
+  budgetMs: 120000,
+  deadline: Date.now() + 600000,
+  env: ['PATH', 'HOME'],
+  secrets: [],
+  settingsDir: join(dir, 'settings'),
+  log: join(dir, 'probes.jsonl'),
+  writable: true,
+  gates,
+});
+
+test('ревью alpha.77 H1: существующий игнорируемый reports/ кандидата — в копии настоящий каталог; отчёт gate пишется в копию, кандидат не тронут', async () => {
+  const ctx = setup({ scenario: { writer: implement(), reviewer: approve() } });
+  write(ctx.repo.dir, {
+    '.gitignore': 'reports/\ncoverage/\n',
+    'reports/junit.xml': '<testsuite tests="9"/>',
+    'reports/other.txt': 'keep\n',
+    'coverage/lcov.info': 'TN:\n',
+  });
+  ctx.repo.git('add', '.gitignore');
+  ctx.repo.git('commit', '-q', '-m', 'ignore reports');
+  const sha = ctx.repo.git('rev-parse', 'HEAD');
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'harness-probe-copy-')));
+  const copy = made(await ctx.runner.probeCopy(ctx.repo.dir, sha, dir, ['reports/junit.xml']));
+  const st = lstatSync(join(copy.cwd, 'reports'));
+  assert.ok(st.isDirectory() && !st.isSymbolicLink(), 'reports — каталог копии, не ссылка');
+  assert.ok(lstatSync(join(copy.cwd, 'reports/other.txt')).isSymbolicLink(), 'прочее — ссылки');
+  assert.ok(!existsSync(join(copy.cwd, 'reports/junit.xml')), 'прежний отчёт не повторён');
+  assert.ok(lstatSync(join(copy.cwd, 'coverage')).isSymbolicLink(), 'не отчётный каталог — ссылка');
+  assert.equal(ctx.repo.git('-C', copy.cwd, 'status', '--porcelain', '--untracked-files=all'), '');
+  const r = await new ReviewProbes(
+    lightSpec(copy.cwd, ctx.repo.dir, dir, [junitGate('unit', 'reports/junit.xml')]),
+  ).run({ gate: 'unit' });
+  assert.equal(r.status, 'passed', `${r.note}\n${r.stdout}\n${r.stderr}`);
+  assert.equal(r.gate?.report?.status, 'fresh');
+  assert.equal(
+    await readFile(join(ctx.repo.dir, 'reports/junit.xml'), 'utf8'),
+    '<testsuite tests="9"/>',
+    'отчёт кандидата не перезаписан',
+  );
+  await copy.dispose();
+  ctx.store.close();
+});
+
+test('ревью alpha.77 H1: отчёт, записанный через ссылку внутри копии, не принимается', async () => {
+  const ctx = setup({ scenario: { writer: implement(), reviewer: approve() } });
+  const sha = ctx.repo.git('rev-parse', 'HEAD');
+  const dir = realpathSync(mkdtempSync(join(tmpdir(), 'harness-probe-copy-')));
+  const copy = made(await ctx.runner.probeCopy(ctx.repo.dir, sha, dir));
+  mkdirSync(join(copy.cwd, 'elsewhere'));
+  symlinkSync('elsewhere', join(copy.cwd, 'rep'));
+  const r = await new ReviewProbes(
+    lightSpec(copy.cwd, ctx.repo.dir, dir, [junitGate('unit', 'rep/junit.xml')]),
+  ).run({ gate: 'unit' });
+  assert.equal(r.gate?.report?.status, 'missing', JSON.stringify(r.gate?.report));
   await copy.dispose();
   ctx.store.close();
 });

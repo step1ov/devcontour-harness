@@ -14,7 +14,7 @@ import {
   rm,
   writeFile,
 } from 'node:fs/promises';
-import { dirname, join, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
@@ -372,6 +372,14 @@ async function inspectReport(
  * нет, и проверка отчёта назовёт это сама.
  */
 async function adoptTreeReport(path: string, root: string, target: string, started: number) {
+  // Ни один каталог между корнем копии и отчётом не ссылка (ревью alpha.77
+  // H1): иначе это файл, записанный через ссылку, а не отчёт копии.
+  const parts = relative(root, path).split(sep);
+  if (!parts[0] || parts[0] === '..' || isAbsolute(parts[0])) return;
+  for (let i = 1; i < parts.length; i++) {
+    const dir = await lstat(join(root, ...parts.slice(0, i))).catch(() => undefined);
+    if (!dir?.isDirectory()) return;
+  }
   const stat = await lstat(path).catch(() => undefined);
   if (!stat?.isFile() || stat.nlink > 1 || stat.size > REPORT_LIMIT) return;
   if (stat.mtimeMs < started - 1000) return;

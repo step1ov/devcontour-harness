@@ -16,7 +16,7 @@ import {
   symlink,
   writeFile,
 } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
   roleBinding,
   WORKSPACE_OWNER,
@@ -3963,7 +3963,8 @@ export class Runner {
    * detached на `sha` и сверенный (HEAD — `sha`, чистое дерево). Каждый
    * игнорируемый элемент проверяемого дерева (`node_modules`, `.env`,
    * `vendor/`, `dist/` …) — ссылка на него (`node_modules` — настоящий
-   * каталог со ссылками на каждый элемент, alpha.77), и ссылка записана в
+   * каталог со ссылками на каждый элемент, alpha.77; каталог на пути отчёта
+   * gate — тоже настоящий, без прежнего отчёта), и ссылка записана в
    * `.git/info/exclude` копии: `git status` копии чист, как у кандидата.
    * Подмодули копия не повторяет — тогда копии нет, проверки идут в
    * проверяемом дереве только для чтения, причина — в `skipped`. Отказ
@@ -3973,6 +3974,13 @@ export class Runner {
     cwd: string,
     sha: string,
     dir: string,
+    /**
+     * Пути JUnit gates, которые reviewer может повторить (`report.path`
+     * относительно корня репозитория; путь JUnit в argv совпадает с ним):
+     * игнорируемый элемент на этом пути или над ним — не ссылка на
+     * кандидата, а настоящий каталог копии (ревью alpha.77 H1).
+     */
+    reports: string[] = [],
   ): Promise<{ cwd: string; links: string[]; dispose: () => Promise<void> } | { skipped: string }> {
     let tree: string | undefined;
     const dispose = async () => {
@@ -4015,20 +4023,41 @@ export class Runner {
           () => true,
           () => false,
         );
-      for (const m of links) {
-        if (existsSync(join(checkout, m))) continue;
-        await mkdir(dirname(join(checkout, m)), { recursive: true });
+      // Отчёты gates: в тонком режиме writer уже прогнал gates, и `reports/`,
+      // `test-results/`, `coverage/` кандидата существуют (игнорируемые).
+      // Ссылка на них увела бы запись отчёта gate копии в кандидата (EPERM под
+      // write guard, без него — перезапись файла кандидата). Каталог на пути
+      // отчёта — настоящий, его прочие элементы — ссылки, сам отчёт — нет.
+      const reportPaths = reports
+        .map((r) => relative(cwd, resolve(cwd, r)))
+        .filter((r) => r && !r.startsWith('..') && !isAbsolute(r))
+        .map((r) => r.split(sep).join('/'));
+      const holds = (m: string) => reportPaths.some((r) => r === m || r.startsWith(m + '/'));
+      const place = async (m: string): Promise<boolean> => {
+        if (reportPaths.includes(m)) return false;
+        const st = await lstat(join(cwd, m)).catch(() => undefined);
+        if (!st) return false;
         // `node_modules` — настоящий каталог со ссылками на каждый элемент
         // (P11-4): pnpm отказывается работать, когда сам `node_modules` —
         // symlink (ERR_PNPM_UNSAFE_TASK_RUN_STATE_PATH), а свои файлы
         // состояния проверки пишет в копию, не в кандидата.
-        const st = basename(m) === 'node_modules' ? await lstat(join(cwd, m)) : undefined;
-        if (st?.isDirectory()) {
+        if (st.isDirectory() && (holds(m) || basename(m) === 'node_modules')) {
           await mkdir(join(checkout, m));
-          for (const entry of await readdir(join(cwd, m)))
-            await link(join(cwd, m, entry), join(checkout, m, entry));
-          linked.push(m);
-        } else if (await link(join(cwd, m), join(checkout, m))) linked.push(m);
+          for (const entry of await readdir(join(cwd, m))) {
+            const child = m + '/' + entry;
+            if (holds(child)) await place(child);
+            else await link(join(cwd, child), join(checkout, child));
+          }
+          return true;
+        }
+        // Ссылка (или файл) над путём отчёта не повторяется: отчёт ушёл бы через неё.
+        if (holds(m)) return false;
+        return link(join(cwd, m), join(checkout, m));
+      };
+      for (const m of links) {
+        if (existsSync(join(checkout, m))) continue;
+        await mkdir(dirname(join(checkout, m)), { recursive: true });
+        if (await place(m)) linked.push(m);
       }
       if (linked.length)
         await writeFile(
@@ -4602,7 +4631,12 @@ export class Runner {
       // Бюджет проверок исчерпан — копии не делается (ревью A1 L4).
       const made =
         this.probesWanted(attempt, work) && this.probeBudgetLeft(shared)
-          ? await this.probeCopy(cwd, sha, callDir)
+          ? await this.probeCopy(
+              cwd,
+              sha,
+              callDir,
+              gates.flatMap((g) => (g.report ? [g.report.path] : [])),
+            )
           : undefined;
       const copy = made && 'cwd' in made ? made : undefined;
       const probeCopyNote = made
