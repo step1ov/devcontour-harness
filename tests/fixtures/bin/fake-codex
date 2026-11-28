@@ -330,7 +330,9 @@ if (runtime === 'codex') {
     out({ type: 'turn.started' });
     out({ type: 'item.completed', item: { type: 'reasoning', text: 'fixture' } });
     out({ type: 'error', message: step.providerError });
-    process.stderr.write('ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed\n');
+    process.stderr.write(
+      'ERROR rmcp::transport::worker: worker quit with fatal: Transport channel closed\n',
+    );
     process.exit(1);
   }
   if (started) out({ type: 'item.completed', item: { type: 'agent_message', text: 'fixture' } });
