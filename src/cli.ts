@@ -607,9 +607,9 @@ const flagOwners = {
   'idle-sessions': ['lead-drive'],
   'session-timeout': ['lead-drive'],
   'repeat-wait': ['lead-drive'],
-  detach: ['run-detach'],
+  detach: ['run-detach', 'review-release-detach'],
   waiting: ['lead-end'],
-  log: ['lead-drive', 'run-detach'],
+  log: ['lead-drive', 'run-detach', 'review-release-detach'],
   'as-of': ['report'],
   format: ['report', 'handoff'],
   'no-titles': ['report', 'view'],
@@ -650,7 +650,7 @@ const flagOwners = {
   'lead-resets': ['init'],
   'accept-limitation': ['review-plan', 'review-contract', 'review-accept'],
   'continue-review': ['review-plan', 'review-contract'],
-  'docs-work': ['review-release', 'release-done'],
+  'docs-work': ['review-release', 'review-release-detach', 'release-done'],
   'request-version': ['input-answer', 'input-apply', 'input-cancel', 'input-supersede'],
   'context-digest': ['input-target', 'input-apply'],
   answer: ['input-apply'],
@@ -664,9 +664,9 @@ const flagOwners = {
   'apply-loopback': ['smoke'],
   watch: ['status'],
   interval: ['status'],
-  base: ['review-code', 'review-release'],
-  head: ['review-code', 'review-release'],
-  role: ['review-code', 'review-release'],
+  base: ['review-code', 'review-release', 'review-release-detach'],
+  head: ['review-code', 'review-release', 'review-release-detach'],
+  role: ['review-code', 'review-release', 'review-release-detach'],
   check: ['update'],
   apply: ['update'],
   rollback: ['update'],
@@ -1594,6 +1594,42 @@ async function run(
           args: r.args,
           confirmed: r.confirmed,
           ...(r.exitCode !== undefined ? { exitCode: r.exitCode } : {}),
+        },
+      };
+    }
+    case 'review-release-detach': {
+      // Ревью выпуска отдельным процессом (alpha.77, P12-4): переживает сессию ведущего.
+      const state = need('state');
+      const log = need('log');
+      const args: string[] = [];
+      for (let i = 0; i < rest.length; i++) {
+        const a = rest[i]!;
+        if (a === '--log') i++;
+        else if (!a.startsWith('--log=')) args.push(a);
+      }
+      const r = await detachRun({ stateDir: state, args, log, command: 'review-release' });
+      // Ревью успело закончиться «не одобрено» (код 3) до первой проверки
+      // метки: результат с хвостом журнала, а не отказ запуска (ревью alpha.77 M2).
+      const note = r.confirmed
+        ? ''
+        : r.exitCode === 0
+          ? ' (уже закончился успешно)'
+          : r.exitCode !== undefined
+            ? ` (уже закончился: выпуск не одобрен, код ${r.exitCode}; последние строки журнала:\n${r.logTail ?? ''}\n)`
+            : ' (запуск не подтверждён за 30 с)';
+      process.stderr.write(
+        `harness: review-release запущен отдельным процессом: pid ${r.pid}, журнал ${r.log}${note}\n`,
+      );
+      return {
+        command,
+        data: {
+          pid: r.pid,
+          log: r.log,
+          at: r.at,
+          args: r.args,
+          confirmed: r.confirmed,
+          ...(r.exitCode !== undefined ? { exitCode: r.exitCode } : {}),
+          ...(r.logTail !== undefined ? { logTail: r.logTail } : {}),
         },
       };
     }
@@ -2937,6 +2973,9 @@ function leadAlias(args: string[]): string[] {
   // `run --detach` (alpha.72): отдельная команда договора, прежний run не меняется.
   if (a === 'run' && args.includes('--detach'))
     return ['run-detach', ...args.slice(1).filter((x) => x !== '--detach')];
+  // `review-release --detach` (alpha.77, P12-4): так же.
+  if (a === 'review-release' && args.includes('--detach'))
+    return ['review-release-detach', ...args.slice(1).filter((x) => x !== '--detach')];
   if (a === 'release' && b === 'done') return ['release-done', ...lifted('--summary')];
   if (a === 'guide' && b !== undefined && !b.startsWith('--'))
     return ['guide', '--topic', b, ...rest];

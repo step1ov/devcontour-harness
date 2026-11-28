@@ -127,7 +127,10 @@ async function writer(
         }
       : {}),
     ...(previous &&
-    (uncountedStop(previous) || previous.blocked || previous.failureKind === 'environment')
+    (uncountedStop(previous) ||
+      previous.blocked ||
+      previous.failureKind === 'environment' ||
+      previous.failureKind === 'stalled')
       ? { stopped: true }
       : {}),
     ...(attempt.input ? { answer: attempt.input.requestId } : {}),

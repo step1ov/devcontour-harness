@@ -400,3 +400,81 @@ for (const mode of ['light', 'thin'] as const)
     const gate = result.evidence.find((e) => e.gate === 'env-file');
     assert.equal(gate?.passed, true, gate?.summary ?? JSON.stringify(result.failures));
   });
+
+// P12-6: тестовый помощник продукта внутри gate поднял `docker compose` под
+// именем проекта прогона, и после полного прогона выпуска стек остался.
+// Подставной docker в PATH: `compose up` помечает проект поднятым, `ps -a -q`
+// с фильтром по метке проекта отвечает его контейнером, `down` снимает.
+const composeGate = `
+const fs = require('fs');
+const { execFileSync } = require('child_process');
+execFileSync('docker', ['compose', 'up', '-d'], { stdio: 'ignore' });
+fs.writeFileSync(process.env.FAKE_DOCKER_DIR + '/gate-project', process.env.COMPOSE_PROJECT_NAME);
+fs.writeFileSync(process.env.DEVCONTOUR_REPORT_PATH,
+  '<testsuite><testcase classname="svc" name="up"><failure message="red"/></testcase></testsuite>');
+process.exit(1);
+`;
+const fakeDocker = `#!/bin/sh
+d="$FAKE_DOCKER_DIR"
+echo "$*" >> "$d/calls"
+if [ "$1" = compose ] && [ "$2" = up ]; then touch "$d/up-$COMPOSE_PROJECT_NAME"; exit 0; fi
+if [ "$1" = ps ]; then
+  for f in "$d"/up-*; do
+    [ -e "$f" ] || continue
+    p="\${f##*/up-}"
+    case "$*" in *"label=com.docker.compose.project=$p"*) echo "c0ffee-$p";; esac
+  done
+  exit 0
+fi
+if [ "$1" = compose ] && [ "$2" = -p ] && [ "$4" = down ]; then rm -f "$d/up-$3"; exit 0; fi
+exit 0
+`;
+
+test('P12-6: gates на SHA (light): стек compose, поднятый gate под именем проекта прогона, снят и после провала; чужой проект не тронут', async () => {
+  const { mkdtempSync, writeFileSync, readFileSync, chmodSync } = await import('node:fs');
+  const { tmpdir } = await import('node:os');
+  const dir = mkdtempSync(join(tmpdir(), 'harness-fake-docker-'));
+  writeFileSync(join(dir, 'docker'), fakeDocker, { mode: 0o755 });
+  chmodSync(join(dir, 'docker'), 0o755);
+  // Чужой поднятый проект: его снимать нельзя.
+  writeFileSync(join(dir, 'up-hx-other-0000'), '');
+  const ctx = setup({
+    scenario: {},
+    files: { 'test/compose.js': composeGate },
+    policy: (p) => {
+      p.harnessMode = 'light';
+      p.environment = { values: { FAKE_DOCKER_DIR: dir } };
+      const repo = (p.repositories as { gates: unknown[] }[])[0]!;
+      repo.gates.push({
+        id: 'compose',
+        kind: 'test',
+        command: [process.execPath, 'test/compose.js'],
+        report: { type: 'junit', path: 'test-results/compose.xml' },
+      });
+    },
+  });
+  const context: GatesAtContext = {
+    policy: ctx.policy,
+    stateDir: ctx.state,
+    repoPath: () => ctx.repo.dir,
+    boundary: () => ({ hidden: [ctx.state], readable: [join(ctx.repo.dir, '.git')] }),
+    resourceDatabase: join(ctx.state, 'resources.sqlite'),
+    environment: { ...process.env, PATH: `${dir}:${process.env.PATH}` },
+  };
+  const result = await runGatesAt(context, {
+    id: 'GA-compose',
+    repositoryId: 'app',
+    sha: ctx.repo.head(),
+    gates: ['compose'],
+    record: () => {},
+  });
+  assert.equal(result.failure?.gate, 'compose', JSON.stringify(result.failures));
+  const project = readFileSync(join(dir, 'gate-project'), 'utf8');
+  assert.match(project, /^hx-/);
+  const calls = readFileSync(join(dir, 'calls'), 'utf8');
+  assert.ok(calls.includes(`compose -p ${project} down -v --remove-orphans`), calls);
+  assert.ok(!existsSync(join(dir, `up-${project}`)), 'стек прогона снят');
+  assert.ok(existsSync(join(dir, 'up-hx-other-0000')), 'чужой проект не тронут');
+  assert.ok(!calls.includes('hx-other-0000 down'), calls);
+  assert.ok(result.warnings?.some((w) => w.includes(`снят стек docker compose ${project}`)));
+});

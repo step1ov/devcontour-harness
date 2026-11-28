@@ -466,6 +466,14 @@ export function leadCommandEntry(
             'the lead started harness run as a separate process',
           )
         : undefined;
+    case 'review-release-detach':
+      // Решение ведущего — запуск ревью выпуска (alpha.77); итог — запись ревью.
+      return phase === 'end'
+        ? one(
+            'ведущий запустил ревью выпуска отдельным процессом',
+            'the lead started the release review as a separate process',
+          )
+        : undefined;
     case 'review-plan':
       return one(
         'ведущий отправил план на независимое ревью',
@@ -579,6 +587,7 @@ export function leadCommandEntry(
 export const LEAD_LOGGED_COMMANDS = [
   'run',
   'run-detach',
+  'review-release-detach',
   'review-plan',
   'review-contract',
   'review-accept',

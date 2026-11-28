@@ -111,7 +111,7 @@ not counted.
 
 ### Release
 
-As in `guide release`: `$H review-release --state <state>` runs the full
+As in `guide release`: `$H review-release --detach --log <f> --state <state>` runs the full
 gates on a clean checkout of the target head and the release review against
 the brief, the owner's answers and the failure paths. The review lists every
 blocker in one round and checks the documentation against the target

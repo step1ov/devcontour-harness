@@ -16,7 +16,7 @@ import {
   symlink,
   writeFile,
 } from 'node:fs/promises';
-import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import {
   roleBinding,
   WORKSPACE_OWNER,
@@ -167,11 +167,15 @@ import {
   writerDependencyGates,
   type WriterDependencies,
 } from '../verification/gates.ts';
-import { ActivityScope, activityScope } from '../environment/activity.ts';
+import { ActivityScope, activityScope, type TrackedCommand } from '../environment/activity.ts';
 import {
   StallSweep,
   StalledError,
   stallMessage,
+  agentHasToolChild,
+  writerStallEpisodesOf,
+  isWriterCall,
+  writerStallMessage,
   livenessPayload,
   type ChangeOutcome,
   type LivenessChange,
@@ -408,6 +412,8 @@ export class Runner {
       scope: ActivityScope;
       token: string;
       repositoryId: string;
+      /** Эпизоды зависания текущего вызова writer (P12-3): вызов и номера эпизодов. */
+      writerStalls?: { call: TrackedCommand; episodes: Set<number> };
     }
   >();
   /** Обход зависших попыток (`stallSweep` политики); идёт, пока процесс ведёт очередь. */
@@ -639,6 +645,28 @@ export class Runner {
     const id = change.subject.id;
     const iso = (ms: number) => new Date(ms).toISOString();
     const stalled = change.state === 'stalled';
+    // Облегчённый и тонкий режимы: вызов writer, зависший
+    // WRITER_STALL_EPISODES раз, останавливается и при `report` (P12-3).
+    // Эпизод с живой командой инструмента у агента (ожидание e2e в Docker)
+    // не считается (ревью alpha.77 M1); `writerStallEpisodes: 0` — выкл.
+    let writerEpisodes = 0;
+    const writerLimit = writerStallEpisodesOf(sweep);
+    if (
+      stalled &&
+      sweep.action === 'report' &&
+      writerLimit > 0 &&
+      harnessModeOf(this.policy) !== 'strict' &&
+      change.command &&
+      isWriterCall(change.activity) &&
+      !agentHasToolChild(change)
+    ) {
+      if (job.writerStalls?.call !== change.command)
+        job.writerStalls = { call: change.command, episodes: new Set() };
+      job.writerStalls.episodes.add(change.episode);
+      if (job.writerStalls.episodes.size >= writerLimit)
+        writerEpisodes = job.writerStalls.episodes.size;
+    }
+    const action: 'stop' | 'report' = writerEpisodes ? 'stop' : sweep.action;
     const snapshot = change.snapshot;
     // Снимок пишется до события: событие называет только записанный файл.
     // Один файл на эпизод зависания: повтор незаписанного перехода берёт уже
@@ -664,7 +692,7 @@ export class Runner {
                 lastMovementAt: iso(change.lastMovementAt),
                 idleMs: Math.round(change.idleMs),
                 activity: change.activity,
-                action: sweep.action,
+                action,
                 ...snapshot,
               },
               null,
@@ -677,8 +705,14 @@ export class Runner {
         }
     }
     const stop = () => {
-      if (stalled && sweep.action === 'stop')
-        job.controller.abort(new StalledError(stallMessage(change, sweep, artifact)));
+      if (stalled && action === 'stop')
+        job.controller.abort(
+          new StalledError(
+            writerEpisodes
+              ? writerStallMessage(change, sweep, writerEpisodes, artifact)
+              : stallMessage(change, sweep, artifact),
+          ),
+        );
     };
     try {
       this.engine.liveness(
@@ -689,15 +723,15 @@ export class Runner {
           at: iso(change.at),
           lastMovementAt: iso(change.lastMovementAt),
           ...(change.activity ? { activity: change.activity } : {}),
-          ...(stalled ? { action: sweep.action } : {}),
+          ...(stalled ? { action } : {}),
           ...(artifact ? { artifact } : {}),
         },
-        livenessPayload(change, sweep.action, artifact),
+        livenessPayload(change, action, artifact),
       );
     } catch (error) {
       // Зависшая попытка при `stop` останавливается, что бы ни помешало
       // записи: её job ещё здесь, и причина — в её отказе.
-      if (stalled && sweep.action === 'stop') {
+      if (stalled && action === 'stop') {
         stop();
         return 'dropped';
       }
@@ -709,7 +743,9 @@ export class Runner {
       return 'retry';
     }
     stop();
-    return 'recorded';
+    // Остановленный без `action: stop` вызов больше не оценивается: его
+    // остановка сама выглядела бы движением.
+    return writerEpisodes ? 'dropped' : 'recorded';
   }
 
   /** Освободить роль controller: процесс больше не ведёт очередь. */
@@ -3932,7 +3968,9 @@ export class Runner {
    * проверяемого репозитория, своя `.git`) во временном каталоге controller,
    * detached на `sha` и сверенный (HEAD — `sha`, чистое дерево). Каждый
    * игнорируемый элемент проверяемого дерева (`node_modules`, `.env`,
-   * `vendor/`, `dist/` …) — ссылка на него, и ссылка записана в
+   * `vendor/`, `dist/` …) — ссылка на него (`node_modules` — настоящий
+   * каталог со ссылками на каждый элемент, alpha.77; каталог на пути отчёта
+   * gate — тоже настоящий, без прежнего отчёта), и ссылка записана в
    * `.git/info/exclude` копии: `git status` копии чист, как у кандидата.
    * Подмодули копия не повторяет — тогда копии нет, проверки идут в
    * проверяемом дереве только для чтения, причина — в `skipped`. Отказ
@@ -3942,6 +3980,13 @@ export class Runner {
     cwd: string,
     sha: string,
     dir: string,
+    /**
+     * Пути JUnit gates, которые reviewer может повторить (`report.path`
+     * относительно корня репозитория; путь JUnit в argv совпадает с ним):
+     * игнорируемый элемент на этом пути или над ним — не ссылка на
+     * кандидата, а настоящий каталог копии (ревью alpha.77 H1).
+     */
+    reports: string[] = [],
   ): Promise<{ cwd: string; links: string[]; dispose: () => Promise<void> } | { skipped: string }> {
     let tree: string | undefined;
     const dispose = async () => {
@@ -3979,16 +4024,46 @@ export class Runner {
         .map((p) => p.replace(/\/$/, ''))
         .filter((p) => p && !p.split('/').includes('.git'));
       const linked: string[] = [];
+      const link = (from: string, to: string) =>
+        symlink(from, to).then(
+          () => true,
+          () => false,
+        );
+      // Отчёты gates: в тонком режиме writer уже прогнал gates, и `reports/`,
+      // `test-results/`, `coverage/` кандидата существуют (игнорируемые).
+      // Ссылка на них увела бы запись отчёта gate копии в кандидата (EPERM под
+      // write guard, без него — перезапись файла кандидата). Каталог на пути
+      // отчёта — настоящий, его прочие элементы — ссылки, сам отчёт — нет.
+      const reportPaths = reports
+        .map((r) => relative(cwd, resolve(cwd, r)))
+        .filter((r) => r && !r.startsWith('..') && !isAbsolute(r))
+        .map((r) => r.split(sep).join('/'));
+      const holds = (m: string) => reportPaths.some((r) => r === m || r.startsWith(m + '/'));
+      const place = async (m: string): Promise<boolean> => {
+        if (reportPaths.includes(m)) return false;
+        const st = await lstat(join(cwd, m)).catch(() => undefined);
+        if (!st) return false;
+        // `node_modules` — настоящий каталог со ссылками на каждый элемент
+        // (P11-4): pnpm отказывается работать, когда сам `node_modules` —
+        // symlink (ERR_PNPM_UNSAFE_TASK_RUN_STATE_PATH), а свои файлы
+        // состояния проверки пишет в копию, не в кандидата.
+        if (st.isDirectory() && (holds(m) || basename(m) === 'node_modules')) {
+          await mkdir(join(checkout, m));
+          for (const entry of await readdir(join(cwd, m))) {
+            const child = m + '/' + entry;
+            if (holds(child)) await place(child);
+            else await link(join(cwd, child), join(checkout, child));
+          }
+          return true;
+        }
+        // Ссылка (или файл) над путём отчёта не повторяется: отчёт ушёл бы через неё.
+        if (holds(m)) return false;
+        return link(join(cwd, m), join(checkout, m));
+      };
       for (const m of links) {
         if (existsSync(join(checkout, m))) continue;
         await mkdir(dirname(join(checkout, m)), { recursive: true });
-        if (
-          await symlink(join(cwd, m), join(checkout, m)).then(
-            () => true,
-            () => false,
-          )
-        )
-          linked.push(m);
+        if (await place(m)) linked.push(m);
       }
       if (linked.length)
         await writeFile(
@@ -4562,7 +4637,12 @@ export class Runner {
       // Бюджет проверок исчерпан — копии не делается (ревью A1 L4).
       const made =
         this.probesWanted(attempt, work) && this.probeBudgetLeft(shared)
-          ? await this.probeCopy(cwd, sha, callDir)
+          ? await this.probeCopy(
+              cwd,
+              sha,
+              callDir,
+              gates.flatMap((g) => (g.report ? [g.report.path] : [])),
+            )
           : undefined;
       const copy = made && 'cwd' in made ? made : undefined;
       const probeCopyNote = made

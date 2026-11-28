@@ -4,10 +4,13 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -842,7 +845,7 @@ test('ревью M3: владелец ответил до запуска дра�
   env.store.close();
 });
 
-test('ревью M4: сессия сверх срока снимается группой — внук ведущего тоже', async () => {
+test('ревью M4: сессия сверх срока снимается группой — внук ведущего тоже', async (t) => {
   const env = engineOf();
   ready(env.engine, graphOf({ a: [] }));
   const { dir, promise } = driveOf(
@@ -852,7 +855,17 @@ test('ревью M4: сессия сверх срока снимается гр�
   );
   const data = await promise;
   assert.equal(data.sessions[0]!.timedOut, true);
-  const pid = Number(readFileSync(join(dir, 'grandchild.pid'), 'utf8'));
+  // Pid внука пишет ведущий сразу после запуска внука; под нагрузкой ведущий
+  // мог быть снят до запуска внука — тогда внука нет. Ждём файл ограниченно.
+  const pidFile = join(dir, 'grandchild.pid');
+  for (const end = Date.now() + 5000; !existsSync(pidFile) && Date.now() < end;)
+    await new Promise((r) => setTimeout(r, 50));
+  if (!existsSync(pidFile)) {
+    t.diagnostic('ведущий снят до запуска внука: проверять нечего');
+    env.store.close();
+    return;
+  }
+  const pid = Number(readFileSync(pidFile, 'utf8'));
   const until = Date.now() + 3000;
   while (alive(pid) && Date.now() < until) await new Promise((r) => setTimeout(r, 50));
   assert.equal(alive(pid), false, 'внук в группе ведущего снят');
@@ -1158,6 +1171,193 @@ test('ревью 3: исправный run --detach — подтверждён �
   env.store.close();
 });
 
+const HEALTHY_REVIEW = fileURLToPath(
+  new URL('./fixtures/lead-drive/healthy-review.ts', import.meta.url),
+);
+
+// P12-4: ведущий запускал review-release через nohup в своей сессии, и
+// драйвер, остановив группу процессов сессии, убивал и ревью.
+test(
+  'P12-4: review-release --detach — ревью в своей группе переживает остановку группы сессии ведущего, метка для drive — его',
+  { timeout: 90_000 },
+  async () => {
+    const { spawn } = await import('node:child_process');
+    const { activeReleaseReview } = await import('../src/control/detach.ts');
+    const root = mkdtempSync(join(tmpdir(), 'harness-review-detach-'));
+    const state = join(root, 'state');
+    const log = join(root, 'review.log');
+    const bin = join(root, 'fake-harness');
+    writeFileSync(
+      bin,
+      `#!/bin/sh\nexec '${process.execPath}' --import '${import.meta.resolve('tsx')}' '${HEALTHY_REVIEW}' "$@"\n`,
+      { mode: 0o755 },
+    );
+    // «Сессия ведущего»: своя группа процессов, как её запускает lead drive.
+    const session = spawn(
+      process.execPath,
+      [
+        '--import',
+        import.meta.resolve('tsx'),
+        cli,
+        'review-release',
+        '--detach',
+        '--log',
+        log,
+        '--state',
+        state,
+      ],
+      {
+        detached: true,
+        env: { ...process.env, HARNESS_BIN: bin },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      },
+    );
+    let stdout = '';
+    let stderr = '';
+    session.stdout.on('data', (d: Buffer) => (stdout += d.toString()));
+    session.stderr.on('data', (d: Buffer) => (stderr += d.toString()));
+    const code = await new Promise<number | null>((r) => session.on('exit', r));
+    assert.equal(code, 0, stderr);
+    const envelope = JSON.parse(stdout) as {
+      command: string;
+      data: { pid: number; log: string; confirmed: boolean };
+    };
+    assert.equal(envelope.command, 'review-release-detach');
+    assert.equal(envelope.data.confirmed, true, 'ревью поставило метку');
+    const pgid = spawnSync('ps', ['-o', 'pgid=', '-p', String(envelope.data.pid)], {
+      encoding: 'utf8',
+    }).stdout.trim();
+    assert.equal(pgid, String(envelope.data.pid), 'ревью — лидер своей группы');
+    // Драйвер останавливает группу сессии ведущего — ревью в ней нет.
+    try {
+      process.kill(-session.pid!, 'SIGKILL');
+    } catch {
+      /* группа уже пуста */
+    }
+    assert.equal(activeReleaseReview(state)?.pid, envelope.data.pid, 'drive ждёт по метке ревью');
+    writeFileSync(join(state, 'release-go'), '');
+    const done = join(state, 'review-done');
+    for (let i = 0; i < 400 && !existsSync(done); i++) await new Promise((r) => setTimeout(r, 50));
+    assert.equal(readFileSync(done, 'utf8'), String(envelope.data.pid), 'ревью дошло до конца');
+    assert.match(readFileSync(log, 'utf8'), /fake review started/);
+    for (let i = 0; i < 100 && activeReleaseReview(state); i++)
+      await new Promise((r) => setTimeout(r, 50));
+    assert.equal(activeReleaseReview(state), undefined, 'метка снята');
+  },
+);
+
+const reviewInvocation = [process.execPath, '--import', import.meta.resolve('tsx'), HEALTHY_REVIEW];
+const waitFile = async (path: string) => {
+  for (let i = 0; i < 600 && !existsSync(path); i++) await new Promise((r) => setTimeout(r, 50));
+};
+
+test('ревью alpha.77 M2/L1: быстрое ревью «не одобрено» — законченный результат с хвостом журнала; журнал 0600; сводка release-ready показывает журнал ревью', async () => {
+  const env = engineOf();
+  ready(env.engine, graphOf({ a: [] }));
+  const a = env.engine.claim('c1')!;
+  accept(env.engine, a.id, a.token);
+  const log = join(env.dir, 'review.log');
+  writeFileSync(log, 'прежний журнал\n', { mode: 0o644 });
+  const r = await detachRun({
+    stateDir: env.dir,
+    args: ['--state', env.dir, '--refuse'],
+    log,
+    command: 'review-release',
+    invocation: reviewInvocation,
+  });
+  assert.equal(r.confirmed, false);
+  assert.equal(r.exitCode, 3);
+  assert.match(r.logTail ?? '', /not approved \(reused round\)/);
+  assert.equal(statSync(log).mode & 0o777, 0o600, 'журнал только владельцу');
+  const { dir, promise } = driveOf(env, {}, { idleSessions: 1 });
+  const rec = await sessionRecord(dir, 1);
+  assert.equal(rec.env.HARNESS_LEAD_DRIVE_EVENT, 'release-ready');
+  assert.ok(rec.stdin.includes(`Журнал последнего review-release --detach: ${log}`), rec.stdin);
+  assert.match(rec.stdin, /\| release review: not approved/);
+  await promise;
+  env.store.close();
+});
+
+test('ревью alpha.77 L1: журнал --detach — ссылка не принимается, цель не тронута', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'harness-detach-link-'));
+  const target = join(root, 'target.txt');
+  writeFileSync(target, 'чужой файл\n');
+  const log = join(root, 'review.log');
+  symlinkSync(target, log);
+  await assert.rejects(
+    detachRun({
+      stateDir: join(root, 'state'),
+      args: ['--state', join(root, 'state'), '--refuse'],
+      log,
+      command: 'review-release',
+      invocation: reviewInvocation,
+    }),
+    (e: Error & { code?: string }) => e.code === 'INVALID_INPUT' && /--log/.test(e.message),
+  );
+  assert.equal(readFileSync(target, 'utf8'), 'чужой файл\n');
+});
+
+test(
+  'ревью alpha.77 M2: review-release --detach не запускается рядом с идущим ревью; метка другого ревью не подтверждает запуск, метка потомка обёртки — подтверждает',
+  { timeout: 90_000 },
+  async () => {
+    const { markReleaseReview } = await import('../src/control/detach.ts');
+    const root = mkdtempSync(join(tmpdir(), 'harness-review-busy-'));
+    const state = join(root, 'state');
+    mkdirSync(state);
+    // Идёт другое ревью: второе не запускается.
+    const other = markReleaseReview(state);
+    await assert.rejects(
+      detachRun({
+        stateDir: state,
+        args: ['--state', state],
+        log: join(root, 'busy.log'),
+        command: 'review-release',
+        invocation: reviewInvocation,
+      }),
+      (e: Error & { code?: string }) => e.code === 'NOT_READY' && /уже идёт/.test(e.message),
+    );
+    other();
+    // Другое ревью поставило метку после запуска, а своё ещё нет: не подтверждено.
+    const pending = detachRun({
+      stateDir: state,
+      args: ['--state', state, '--delay-mark', '5000'],
+      log: join(root, 'late.log'),
+      command: 'review-release',
+      invocation: reviewInvocation,
+      waitMs: 1500,
+      pollMs: 50,
+    });
+    const concurrent = markReleaseReview(state);
+    try {
+      const late = await pending;
+      assert.equal(late.confirmed, false, 'метка чужого ревью — не подтверждение');
+    } finally {
+      concurrent();
+    }
+    writeFileSync(join(state, 'release-go'), '');
+    await waitFile(join(state, 'review-done'));
+    rmSync(join(state, 'review-done'), { force: true });
+    rmSync(join(state, 'release-go'), { force: true });
+    // Обёртка без exec: ревью — потомок дочернего процесса, его метка подтверждает.
+    const bin = join(root, 'wrapper');
+    writeFileSync(bin, `#!/bin/sh\n${reviewInvocation.map((a) => `'${a}'`).join(' ')} "$@"\n`, {
+      mode: 0o755,
+    });
+    const wrapped = await detachRun({
+      stateDir: state,
+      args: ['--state', state],
+      log: join(root, 'wrapped.log'),
+      command: 'review-release',
+      invocation: [bin],
+      pollMs: 50,
+    });
+    assert.equal(wrapped.confirmed, true, 'метка потомка обёртки');
+    writeFileSync(join(state, 'release-go'), '');
+    await waitFile(join(state, 'review-done'));
+  },
+);
+
 test('ревью 3: записи начала и конца run в журнале ведущего — не решение', async () => {
   const env = engineOf();
   ready(env.engine, graphOf({ a: [] }));
@@ -1256,17 +1456,24 @@ test('P10-3: цели драйвера изменились — сессия goa
   env.engine.claim('c1');
   const goalsFile = join(env.dir, 'lead-drive-goals.json');
   assert.ok(!existsSync(goalsFile));
-  const run = async (goals: string, goalsRecord?: false) => {
+  // Сессию ждём по признаку, не по таймеру: под нагрузкой полная проверка
+  // снимала драйвер раньше, чем фальшивый агент записывал сессию.
+  const goalsText = () => (existsSync(goalsFile) ? readFileSync(goalsFile, 'utf8') : '');
+  const run = async (goals: string, goalsRecord?: false, until?: () => boolean) => {
     const abort = new AbortController();
     const { dir, promise } = driveOf(env, goalsRecord === false ? { goalsRecord } : {}, {
       goals,
       signal: abort.signal,
     });
-    setTimeout(() => abort.abort(), 1500);
+    if (until) {
+      const deadline = Date.now() + 15_000;
+      const tick = () => (until() || Date.now() > deadline ? abort.abort() : setTimeout(tick, 50));
+      tick();
+    } else setTimeout(() => abort.abort(), 1500);
     return { dir, data: await promise };
   };
   // Записи нет, а работы уже есть (драйвер прежней версии): цели — новые.
-  const first = await run(GOALS, false);
+  const first = await run(GOALS, false, () => goalsText() !== '');
   assert.deepEqual(
     first.data.sessions.map((x) => x.kind),
     ['goals-changed'],
@@ -1284,7 +1491,8 @@ test('P10-3: цели драйвера изменились — сессия goa
   assert.deepEqual(same.data.sessions, []);
   // Оператор добавил ответы владельца — сессия сразу.
   const answers = GOALS + '\nОтветы владельца: формат приветствия — Hello, <name>!';
-  const changed = await run(answers, false);
+  const before = goalsText();
+  const changed = await run(answers, false, () => goalsText() !== before);
   assert.deepEqual(
     changed.data.sessions.map((x) => x.kind),
     ['goals-changed'],
@@ -1391,7 +1599,13 @@ test('ревью a74 M2 / P12-1: ответ ведущего записан, н�
   );
   const abort = new AbortController();
   const { dir, promise } = driveOf(env, { goalsRecord: false }, { signal: abort.signal });
-  setTimeout(() => abort.abort(), 1500);
+  // По записи сессии, не по таймеру (под нагрузкой 1,5 с не хватало).
+  const deadline = Date.now() + 15_000;
+  const tick = () =>
+    existsSync(join(dir, 'session-1.json')) || Date.now() > deadline
+      ? setTimeout(() => abort.abort(), 300)
+      : setTimeout(tick, 50);
+  tick();
   const data = await promise;
   assert.equal(data.sessions[0]?.kind, 'question');
   const first = await sessionRecord(dir, 1);

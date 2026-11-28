@@ -101,6 +101,8 @@ const laterCommands: readonly string[] = [
   // Ожидание за ведущего без модели (0.1.0-alpha.72).
   'lead-drive',
   'run-detach',
+  // Ревью выпуска отдельным процессом (0.1.0-alpha.77).
+  'review-release-detach',
 ];
 /** Команды CLI кандидата H2 (`5077625`) в порядке объявления. */
 const h2Commands = [
@@ -405,6 +407,7 @@ test('H3-01: каждая общая операция читается из до
     'handoff--intent',
     'plan-request--requirements',
     'review-release--docs-work',
+    'review-release-detach--docs-work',
     'release-done--docs-work',
   ]);
   assert.deepEqual(Object.keys(sharedOperations.capabilities.input.shape), []);

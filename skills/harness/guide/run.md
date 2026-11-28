@@ -67,7 +67,10 @@ without an open session your `run` and `input-resolve` are not written to
 your log and do not count as a decision (the run's own start and end
 records are not your decisions; `run --detach` is). Start `harness run` only detached
 (`$H run --detach --log <file> …`, above) so it outlives your turn and is
-not stopped with your session. Then end your turn with a
+not stopped with your session; start `review-release` only detached too
+(`$H review-release --detach --log <file> …`): the driver stops your
+session's whole process group, `nohup` and `&` included, and it waits for
+the detached review by its marker. Then end your turn with a
 short summary. Do not call `$H wait` and do not loop: the driver wakes you
 on the next failure, hold, question for you, a human's answer, ready
 release or stopped queue (only you start runs; for a stopped queue the

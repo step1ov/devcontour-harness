@@ -232,6 +232,48 @@ const reviewDecisionArgs: CliArgument[] = [
   },
 ];
 
+/** Параметры `review-release` (и `review-release --detach`, alpha.77). */
+const releaseReviewArgs: CliArgument[] = [
+  {
+    ...state,
+    description:
+      'Каталог состояния: постановки и ответы выпуска, запись ревью и его артефакты; политика — из него, если нет --policy',
+  },
+  { ...policy, required: false },
+  {
+    name: '--base',
+    value: 'text',
+    required: false,
+    description:
+      'База выпуска: SHA или ref; нет — база самой ранней попытки репозитория в состоянии',
+  },
+  {
+    name: '--head',
+    value: 'text',
+    required: false,
+    description: 'Проверяемая цель: SHA или ref; нет — target ref репозитория (принятая цель)',
+  },
+  {
+    name: '--role',
+    value: 'id',
+    required: false,
+    description:
+      'Роль политики, чьё правило ревью кода выбирает reviewer; нужна, если ролей несколько',
+  },
+  {
+    ...author,
+    required: false,
+    description: 'Автор кода выпуска для правила вендора; нет — writer роли',
+  },
+  {
+    name: '--repository',
+    value: 'id',
+    required: false,
+    description: 'ID репозитория политики; нужен, если их несколько',
+  },
+  docsWorkArg,
+];
+
 export const cliCommands = {
   validate: {
     description:
@@ -1576,46 +1618,7 @@ export const cliCommands = {
     writes: true,
     idempotency:
       'Предмет — репозиторий, роль и SHA базы выпуска: каждый вызов — следующий раунд, reviewer называет состояние прежних открытых находок. Тот же head, договор выпуска, автор, назначение reviewer и итог gates, уже одобренные последним раундом, — тот же раунд без вызова модели',
-    args: [
-      {
-        ...state,
-        description:
-          'Каталог состояния: постановки и ответы выпуска, запись ревью и его артефакты; политика — из него, если нет --policy',
-      },
-      { ...policy, required: false },
-      {
-        name: '--base',
-        value: 'text',
-        required: false,
-        description:
-          'База выпуска: SHA или ref; нет — база самой ранней попытки репозитория в состоянии',
-      },
-      {
-        name: '--head',
-        value: 'text',
-        required: false,
-        description: 'Проверяемая цель: SHA или ref; нет — target ref репозитория (принятая цель)',
-      },
-      {
-        name: '--role',
-        value: 'id',
-        required: false,
-        description:
-          'Роль политики, чьё правило ревью кода выбирает reviewer; нужна, если ролей несколько',
-      },
-      {
-        ...author,
-        required: false,
-        description: 'Автор кода выпуска для правила вендора; нет — writer роли',
-      },
-      {
-        name: '--repository',
-        value: 'id',
-        required: false,
-        description: 'ID репозитория политики; нужен, если их несколько',
-      },
-      docsWorkArg,
-    ],
+    args: releaseReviewArgs,
     refusals: [
       'INVALID_INPUT',
       'REVIEW_REJECTED',
@@ -1628,6 +1631,23 @@ export const cliCommands = {
       'NOT_FOUND',
       'NOT_READY',
     ],
+  },
+  'review-release-detach': {
+    description:
+      'Ревью выпуска отдельным процессом (alpha.77): `harness review-release --detach --log <файл> …` с теми же параметрами, что review-release; процесс в своей группе и сессии, stdin закрыт, stdout и stderr — в файл журнала, и ревью переживает сессию ведущего, которую lead drive останавливает вместе с её группой процессов (nohup её не спасает). Команда ждёт (до 30 с) метку идущего ревью этого процесса (или его потомка) и возвращает pid; ревью, успевшее закончиться «не одобрено» (код 3, например повтор прежнего раунда), — результат с exitCode 3 и logTail, а не отказ; ревью вышло с другой ошибкой — отказ NOT_READY с кодом выхода и последними 40 строками журнала; ревью выпуска уже идёт (живая метка) — отказ NOT_READY без запуска. Журнал открывается без перехода по ссылке, права 0600; запись запуска — <state>/review-release-detach.json, lead drive показывает путь и хвост журнала в сводке release-ready. lead drive ждёт конца ревью по той же метке; итог — запись ревью в состоянии и JSON в журнале. Синоним: harness review-release --detach',
+    writes: true,
+    idempotency:
+      'Каждый вызов запускает новый процесс review-release; повтор после конца ревью с тем же head — тот же раунд без вызова модели (как у review-release)',
+    args: [
+      ...releaseReviewArgs,
+      {
+        name: '--log',
+        value: 'path',
+        required: true,
+        description: 'Файл журнала review-release (stdout и stderr, дописывается, права 0600)',
+      },
+    ],
+    refusals: ['INVALID_INPUT', 'NOT_READY'],
   },
   smoke: {
     description:
@@ -1957,7 +1977,7 @@ export const cliCommands = {
   },
   'run-detach': {
     description:
-      'harness run отдельным процессом (alpha.72): `harness run --detach --log <файл> …` с теми же параметрами, что run; процесс в своей группе и сессии, stdin закрыт, stdout и stderr — в файл журнала; команда ждёт (до 30 с), пока run не поставит метку запуска или не займёт роль controller, и возвращает pid; run вышел с ошибкой — отказ NOT_READY с кодом выхода и последними 40 строками журнала. Работает из любой оболочки (bash, zsh) без set -m, setsid и nohup. Запись запуска — <state>/run-detach.json: harness lead drive показывает ведущему путь и хвост журнала, когда очередь стоит. Синоним: harness run --detach',
+      'harness run отдельным процессом (alpha.72): `harness run --detach --log <файл> …` с теми же параметрами, что run; процесс в своей группе и сессии, stdin закрыт, stdout и stderr — в файл журнала; команда ждёт (до 30 с), пока run не поставит метку запуска или не займёт роль controller, и возвращает pid; run вышел с ошибкой — отказ NOT_READY с кодом выхода и последними 40 строками журнала. Работает из любой оболочки (bash, zsh) без set -m, setsid и nohup. Журнал открывается без перехода по ссылке, права 0600. Запись запуска — <state>/run-detach.json: harness lead drive показывает ведущему путь и хвост журнала, когда очередь стоит. Синоним: harness run --detach',
     writes: true,
     idempotency:
       'Каждый вызов запускает новый процесс run; два run одного каталога состояния разводит controller (второй — CONTROLLER_BUSY в своём журнале)',
@@ -2742,8 +2762,13 @@ export const runDetachDataSchema = z.strictObject({
   args: z.array(z.string()),
   /** Run подтвердил запуск (метка запуска или роль controller) за время ожидания. */
   confirmed: z.boolean(),
-  /** Run уже закончился успешно за время ожидания. */
-  exitCode: z.literal(0).optional(),
+  /**
+   * Команда уже закончилась за время ожидания: 0 — успешно; 3 — только у
+   * `review-release-detach`: законченное ревью «не одобрено» (alpha.77).
+   */
+  exitCode: z.union([z.literal(0), z.literal(3)]).optional(),
+  /** Последние 40 строк журнала законченного ревью «не одобрено». */
+  logTail: z.string().optional(),
 });
 
 /** Итог `harness lead drive` (alpha.72, P9-9). */
@@ -4019,6 +4044,7 @@ export const cliDataSchemas = {
   wait: waitDataSchema,
   'lead-drive': leadDriveDataSchema,
   'run-detach': runDetachDataSchema,
+  'review-release-detach': runDetachDataSchema,
   guide: guideDataSchema,
   pause: controlDataSchema,
   resume: controlDataSchema,
