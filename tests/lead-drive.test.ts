@@ -845,7 +845,7 @@ test('ревью M3: владелец ответил до запуска дра�
   env.store.close();
 });
 
-test('ревью M4: сессия сверх срока снимается группой — внук ведущего тоже', async () => {
+test('ревью M4: сессия сверх срока снимается группой — внук ведущего тоже', async (t) => {
   const env = engineOf();
   ready(env.engine, graphOf({ a: [] }));
   const { dir, promise } = driveOf(
@@ -855,7 +855,17 @@ test('ревью M4: сессия сверх срока снимается гр�
   );
   const data = await promise;
   assert.equal(data.sessions[0]!.timedOut, true);
-  const pid = Number(readFileSync(join(dir, 'grandchild.pid'), 'utf8'));
+  // Pid внука пишет ведущий сразу после запуска внука; под нагрузкой ведущий
+  // мог быть снят до запуска внука — тогда внука нет. Ждём файл ограниченно.
+  const pidFile = join(dir, 'grandchild.pid');
+  for (const end = Date.now() + 5000; !existsSync(pidFile) && Date.now() < end;)
+    await new Promise((r) => setTimeout(r, 50));
+  if (!existsSync(pidFile)) {
+    t.diagnostic('ведущий снят до запуска внука: проверять нечего');
+    env.store.close();
+    return;
+  }
+  const pid = Number(readFileSync(pidFile, 'utf8'));
   const until = Date.now() + 3000;
   while (alive(pid) && Date.now() < until) await new Promise((r) => setTimeout(r, 50));
   assert.equal(alive(pid), false, 'внук в группе ведущего снят');

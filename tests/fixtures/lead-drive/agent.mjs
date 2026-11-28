@@ -36,14 +36,12 @@ writeFileSync(
 );
 process.stderr.write(`fake lead session ${n}\n`);
 if (mode === 'grandchild-hang') {
-  const child = spawn(
-    process.execPath,
-    [
-      '-e',
-      `require('fs').writeFileSync(${JSON.stringify(join(dir, 'grandchild.pid'))}, String(process.pid)); setInterval(() => {}, 1000);`,
-    ],
-    { stdio: 'ignore' },
-  );
+  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000);'], {
+    stdio: 'ignore',
+  });
+  // Pid внука — сразу и синхронно из ведущего: внук под нагрузкой мог не
+  // успеть записать его сам до остановки группы.
+  writeFileSync(join(dir, 'grandchild.pid'), String(child.pid));
   child.unref();
 }
 if (mode === 'background-writer') {
