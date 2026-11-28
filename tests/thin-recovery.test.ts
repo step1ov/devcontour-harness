@@ -15,7 +15,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { cliAdapter } from '../src/agents/cli-adapter.ts';
-import type { RuntimeName } from '../src/contracts/index.ts';
+import { repairPolicy, type RuntimeName } from '../src/contracts/index.ts';
 import { Runner } from '../src/engine/runner.ts';
 import { thinFlow } from '../src/thin/flow.ts';
 import type { ThinKit } from '../src/thin/kit.ts';
@@ -221,6 +221,39 @@ test('codex: сессия записана и при отказе вызова �
   assert.equal(second!.writerSession?.mode, 'resumed');
   assert.equal(second!.writerSession?.id, first!.writerSession?.id);
 });
+
+// P12-3: провайдер рвёт поток, codex между эпизодами молчания пишет только
+// строку переподключения; при `stallSweep.action: report` попытка прежде
+// только сообщала о зависании, пока вызов не кончится (в пилоте — час).
+test(
+  'P12-3: вызов writer, трижды зависший при action report, остановлен как stalled; повтор продолжает сессию',
+  { timeout: 120_000 },
+  async () => {
+    const ctx = thin([{ reconnectPulses: { everyMs: 3000, forMs: 40_000 } }, rec(implement())], {
+      runtime: 'codex',
+      policy: (p) => {
+        p.stallSweep = { intervalMs: 1000, quietMs: 1000, stalledMs: 1500, action: 'report' };
+      },
+    });
+    const started = Date.now();
+    await runAll(ctx);
+    const [first] = ctx.attempts();
+    assert.equal(first!.failureKind, 'stalled', first!.error);
+    assert.match(first!.error!, /codex implement в одном вызове 3 раза молчал/);
+    assert.equal(first!.liveness?.action, 'stop');
+    assert.ok(Date.now() - started < 35_000, 'остановлен до конца вызова');
+    assert.ok(first!.writerSession?.id, 'сессия зависшего вызова записана');
+    // Однократный повтор восстановления (repairPolicy.stalled), как его назначает `harness run`.
+    assert.equal(repairPolicy.stalled.action, 'retry');
+    ctx.engine.retry(ctx.work, undefined, 'recovery');
+    await ctx.again();
+    const [, second] = ctx.attempts();
+    assert.equal(second!.status, 'succeeded', second!.error);
+    assert.equal(second!.writerSession?.mode, 'resumed');
+    assert.equal(second!.writerSession?.id, first!.writerSession?.id);
+    assert.match(ctx.prompt(1), /Your previous handover did not complete/);
+  },
+);
 
 test('падение между update-ref и приёмкой: recovery принимает и убирает дерево работы', async () => {
   const clock = { now: Date.now() };

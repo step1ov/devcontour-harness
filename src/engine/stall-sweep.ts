@@ -137,6 +137,8 @@ export interface LivenessChange {
   lastMovementAt: number;
   idleMs: number;
   activity?: Activity;
+  /** Последняя начатая из исполняющихся команд: по ней узнаётся один и тот же вызов. */
+  command?: TrackedCommand;
   /**
    * ps не дал данных о процессах исполняющихся команд: оценка только по
    * выводу и стадиям, поэтому выше `quiet` она не поднимается.
@@ -315,7 +317,7 @@ export class StallSweep {
         lastMovementAt: scope.lastMovementAt,
         idleMs,
         episode: state === 'stalled' ? episode : memo.episode,
-        ...(current ? { activity: current.activity } : {}),
+        ...(current ? { activity: current.activity, command: current } : {}),
         ...(tracked.length && !known ? { cpuUnavailable: true } : {}),
       };
       if (state === 'stalled') {
@@ -415,6 +417,39 @@ export function stallMessage(change: LivenessChange, policy: StallSweepPolicy, a
     `Зависание: ${what} не двигалась ${Math.round(change.idleMs / 1000)} с ` +
     `(порог stallSweep.stalledMs ${Math.round(policy.stalledMs / 1000)} с): ` +
     'нет вывода, расхода процессора и смены стадий. Повтор или правка среды, не кода' +
+    (artifact ? `; снимок: ${artifact}` : '')
+  );
+}
+
+/**
+ * Эпизодов зависания одного вызова writer, после которых controller
+ * останавливает его и при `stallSweep.action: report` (облегчённый и тонкий
+ * режимы, P12-3): провайдер, который рвёт поток и переподключается, между
+ * эпизодами пишет строку ошибки, и молчание целиком ни разу не дольше
+ * порога — но три эпизода в одном вызове уже не работа, а простой.
+ */
+export const WRITER_STALL_EPISODES = 3;
+
+/** Вызов writer (`<runtime> implement`) по описанию исполняющейся команды. */
+export const isWriterCall = (activity: Activity | undefined) =>
+  activity?.kind === 'agent' && /^\S+ implement$/.test(activity.label);
+
+/** Текст остановки вызова writer после `WRITER_STALL_EPISODES` эпизодов зависания. */
+export function writerStallMessage(
+  change: LivenessChange,
+  policy: StallSweepPolicy,
+  episodes: number,
+  artifact?: string,
+) {
+  const what = change.activity
+    ? `${change.activity.kind} ${change.activity.label}`
+    : 'вызов writer';
+  return (
+    `Зависание: ${what} в одном вызове ${episodes} раза молчал дольше порога ` +
+    `stallSweep.stalledMs (${Math.round(policy.stalledMs / 1000)} с): нет вывода, расхода ` +
+    'процессора и смены стадий, между эпизодами — лишь короткий вывод (переподключение ' +
+    'провайдера). Controller остановил вызов: это простой провайдера или среды, не замечание ' +
+    'к коду; автоматический повтор (в тонком режиме — та же сессия)' +
     (artifact ? `; снимок: ${artifact}` : '')
   );
 }

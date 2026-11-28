@@ -167,11 +167,14 @@ import {
   writerDependencyGates,
   type WriterDependencies,
 } from '../verification/gates.ts';
-import { ActivityScope, activityScope } from '../environment/activity.ts';
+import { ActivityScope, activityScope, type TrackedCommand } from '../environment/activity.ts';
 import {
   StallSweep,
   StalledError,
   stallMessage,
+  WRITER_STALL_EPISODES,
+  isWriterCall,
+  writerStallMessage,
   livenessPayload,
   type ChangeOutcome,
   type LivenessChange,
@@ -408,6 +411,8 @@ export class Runner {
       scope: ActivityScope;
       token: string;
       repositoryId: string;
+      /** Эпизоды зависания текущего вызова writer (P12-3): вызов и номера эпизодов. */
+      writerStalls?: { call: TrackedCommand; episodes: Set<number> };
     }
   >();
   /** Обход зависших попыток (`stallSweep` политики); идёт, пока процесс ведёт очередь. */
@@ -639,6 +644,23 @@ export class Runner {
     const id = change.subject.id;
     const iso = (ms: number) => new Date(ms).toISOString();
     const stalled = change.state === 'stalled';
+    // Облегчённый и тонкий режимы: вызов writer, зависший
+    // WRITER_STALL_EPISODES раз, останавливается и при `report` (P12-3).
+    let writerEpisodes = 0;
+    if (
+      stalled &&
+      sweep.action === 'report' &&
+      harnessModeOf(this.policy) !== 'strict' &&
+      change.command &&
+      isWriterCall(change.activity)
+    ) {
+      if (job.writerStalls?.call !== change.command)
+        job.writerStalls = { call: change.command, episodes: new Set() };
+      job.writerStalls.episodes.add(change.episode);
+      if (job.writerStalls.episodes.size >= WRITER_STALL_EPISODES)
+        writerEpisodes = job.writerStalls.episodes.size;
+    }
+    const action: 'stop' | 'report' = writerEpisodes ? 'stop' : sweep.action;
     const snapshot = change.snapshot;
     // Снимок пишется до события: событие называет только записанный файл.
     // Один файл на эпизод зависания: повтор незаписанного перехода берёт уже
@@ -664,7 +686,7 @@ export class Runner {
                 lastMovementAt: iso(change.lastMovementAt),
                 idleMs: Math.round(change.idleMs),
                 activity: change.activity,
-                action: sweep.action,
+                action,
                 ...snapshot,
               },
               null,
@@ -677,8 +699,14 @@ export class Runner {
         }
     }
     const stop = () => {
-      if (stalled && sweep.action === 'stop')
-        job.controller.abort(new StalledError(stallMessage(change, sweep, artifact)));
+      if (stalled && action === 'stop')
+        job.controller.abort(
+          new StalledError(
+            writerEpisodes
+              ? writerStallMessage(change, sweep, writerEpisodes, artifact)
+              : stallMessage(change, sweep, artifact),
+          ),
+        );
     };
     try {
       this.engine.liveness(
@@ -689,15 +717,15 @@ export class Runner {
           at: iso(change.at),
           lastMovementAt: iso(change.lastMovementAt),
           ...(change.activity ? { activity: change.activity } : {}),
-          ...(stalled ? { action: sweep.action } : {}),
+          ...(stalled ? { action } : {}),
           ...(artifact ? { artifact } : {}),
         },
-        livenessPayload(change, sweep.action, artifact),
+        livenessPayload(change, action, artifact),
       );
     } catch (error) {
       // Зависшая попытка при `stop` останавливается, что бы ни помешало
       // записи: её job ещё здесь, и причина — в её отказе.
-      if (stalled && sweep.action === 'stop') {
+      if (stalled && action === 'stop') {
         stop();
         return 'dropped';
       }
@@ -709,7 +737,9 @@ export class Runner {
       return 'retry';
     }
     stop();
-    return 'recorded';
+    // Остановленный без `action: stop` вызов больше не оценивается: его
+    // остановка сама выглядела бы движением.
+    return writerEpisodes ? 'dropped' : 'recorded';
   }
 
   /** Освободить роль controller: процесс больше не ведёт очередь. */

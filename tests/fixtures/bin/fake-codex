@@ -148,6 +148,22 @@ if (step.spawnHanging) {
   writeFileSync(`${scenarioPath}.${role}.${index}.child.pid`, String(child.pid));
   if (step.spawnHanging === 'detached') child.unref();
 }
+// Провайдер рвёт поток (P12-3): сессия начата, затем раз в `everyMs` — только
+// строка переподключения, до `forMs` (предел на случай, если вызов не
+// остановят), и отказ.
+if (step.reconnectPulses) {
+  const { everyMs, forMs } = step.reconnectPulses;
+  if (runtime === 'codex')
+    process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: sessionId }) + '\n');
+  for (let n = 1, end = Date.now() + forMs; Date.now() < end; n++) {
+    await new Promise((r) => setTimeout(r, everyMs));
+    process.stdout.write(
+      JSON.stringify({ type: 'error', message: `Reconnecting... ${n}/5 (stream disconnected)` }) +
+        '\n',
+    );
+  }
+  process.exit(1);
+}
 if (step.sleepMs) await new Promise((r) => setTimeout(r, step.sleepMs));
 // Шаг держится, пока тест не создаст файл: событие вместо подобранной паузы.
 // Предел — на случай, если тест умер и файла не будет.
