@@ -4,10 +4,13 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -1230,6 +1233,118 @@ test(
     for (let i = 0; i < 100 && activeReleaseReview(state); i++)
       await new Promise((r) => setTimeout(r, 50));
     assert.equal(activeReleaseReview(state), undefined, 'метка снята');
+  },
+);
+
+const reviewInvocation = [process.execPath, '--import', import.meta.resolve('tsx'), HEALTHY_REVIEW];
+const waitFile = async (path: string) => {
+  for (let i = 0; i < 600 && !existsSync(path); i++) await new Promise((r) => setTimeout(r, 50));
+};
+
+test('ревью alpha.77 M2/L1: быстрое ревью «не одобрено» — законченный результат с хвостом журнала; журнал 0600; сводка release-ready показывает журнал ревью', async () => {
+  const env = engineOf();
+  ready(env.engine, graphOf({ a: [] }));
+  const a = env.engine.claim('c1')!;
+  accept(env.engine, a.id, a.token);
+  const log = join(env.dir, 'review.log');
+  writeFileSync(log, 'прежний журнал\n', { mode: 0o644 });
+  const r = await detachRun({
+    stateDir: env.dir,
+    args: ['--state', env.dir, '--refuse'],
+    log,
+    command: 'review-release',
+    invocation: reviewInvocation,
+  });
+  assert.equal(r.confirmed, false);
+  assert.equal(r.exitCode, 3);
+  assert.match(r.logTail ?? '', /not approved \(reused round\)/);
+  assert.equal(statSync(log).mode & 0o777, 0o600, 'журнал только владельцу');
+  const { dir, promise } = driveOf(env, {}, { idleSessions: 1 });
+  const rec = await sessionRecord(dir, 1);
+  assert.equal(rec.env.HARNESS_LEAD_DRIVE_EVENT, 'release-ready');
+  assert.ok(rec.stdin.includes(`Журнал последнего review-release --detach: ${log}`), rec.stdin);
+  assert.match(rec.stdin, /\| release review: not approved/);
+  await promise;
+  env.store.close();
+});
+
+test('ревью alpha.77 L1: журнал --detach — ссылка не принимается, цель не тронута', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'harness-detach-link-'));
+  const target = join(root, 'target.txt');
+  writeFileSync(target, 'чужой файл\n');
+  const log = join(root, 'review.log');
+  symlinkSync(target, log);
+  await assert.rejects(
+    detachRun({
+      stateDir: join(root, 'state'),
+      args: ['--state', join(root, 'state'), '--refuse'],
+      log,
+      command: 'review-release',
+      invocation: reviewInvocation,
+    }),
+    (e: Error & { code?: string }) => e.code === 'INVALID_INPUT' && /--log/.test(e.message),
+  );
+  assert.equal(readFileSync(target, 'utf8'), 'чужой файл\n');
+});
+
+test(
+  'ревью alpha.77 M2: review-release --detach не запускается рядом с идущим ревью; метка другого ревью не подтверждает запуск, метка потомка обёртки — подтверждает',
+  { timeout: 90_000 },
+  async () => {
+    const { markReleaseReview } = await import('../src/control/detach.ts');
+    const root = mkdtempSync(join(tmpdir(), 'harness-review-busy-'));
+    const state = join(root, 'state');
+    mkdirSync(state);
+    // Идёт другое ревью: второе не запускается.
+    const other = markReleaseReview(state);
+    await assert.rejects(
+      detachRun({
+        stateDir: state,
+        args: ['--state', state],
+        log: join(root, 'busy.log'),
+        command: 'review-release',
+        invocation: reviewInvocation,
+      }),
+      (e: Error & { code?: string }) => e.code === 'NOT_READY' && /уже идёт/.test(e.message),
+    );
+    other();
+    // Другое ревью поставило метку после запуска, а своё ещё нет: не подтверждено.
+    const pending = detachRun({
+      stateDir: state,
+      args: ['--state', state, '--delay-mark', '5000'],
+      log: join(root, 'late.log'),
+      command: 'review-release',
+      invocation: reviewInvocation,
+      waitMs: 1500,
+      pollMs: 50,
+    });
+    const concurrent = markReleaseReview(state);
+    try {
+      const late = await pending;
+      assert.equal(late.confirmed, false, 'метка чужого ревью — не подтверждение');
+    } finally {
+      concurrent();
+    }
+    writeFileSync(join(state, 'release-go'), '');
+    await waitFile(join(state, 'review-done'));
+    rmSync(join(state, 'review-done'), { force: true });
+    rmSync(join(state, 'release-go'), { force: true });
+    // Обёртка без exec: ревью — потомок дочернего процесса, его метка подтверждает.
+    const bin = join(root, 'wrapper');
+    writeFileSync(bin, `#!/bin/sh\n${reviewInvocation.map((a) => `'${a}'`).join(' ')} "$@"\n`, {
+      mode: 0o755,
+    });
+    const wrapped = await detachRun({
+      stateDir: state,
+      args: ['--state', state],
+      log: join(root, 'wrapped.log'),
+      command: 'review-release',
+      invocation: [bin],
+      pollMs: 50,
+    });
+    assert.equal(wrapped.confirmed, true, 'метка потомка обёртки');
+    writeFileSync(join(state, 'release-go'), '');
+    await waitFile(join(state, 'review-done'));
   },
 );
 

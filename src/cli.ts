@@ -1608,8 +1608,17 @@ async function run(
         else if (!a.startsWith('--log=')) args.push(a);
       }
       const r = await detachRun({ stateDir: state, args, log, command: 'review-release' });
+      // Ревью успело закончиться «не одобрено» (код 3) до первой проверки
+      // метки: результат с хвостом журнала, а не отказ запуска (ревью alpha.77 M2).
+      const note = r.confirmed
+        ? ''
+        : r.exitCode === 0
+          ? ' (уже закончился успешно)'
+          : r.exitCode !== undefined
+            ? ` (уже закончился: выпуск не одобрен, код ${r.exitCode}; последние строки журнала:\n${r.logTail ?? ''}\n)`
+            : ' (запуск не подтверждён за 30 с)';
       process.stderr.write(
-        `harness: review-release запущен отдельным процессом: pid ${r.pid}, журнал ${r.log}${r.confirmed ? '' : r.exitCode === 0 ? ' (уже закончился успешно)' : ' (запуск не подтверждён за 30 с)'}\n`,
+        `harness: review-release запущен отдельным процессом: pid ${r.pid}, журнал ${r.log}${note}\n`,
       );
       return {
         command,
@@ -1620,6 +1629,7 @@ async function run(
           args: r.args,
           confirmed: r.confirmed,
           ...(r.exitCode !== undefined ? { exitCode: r.exitCode } : {}),
+          ...(r.logTail !== undefined ? { logTail: r.logTail } : {}),
         },
       };
     }

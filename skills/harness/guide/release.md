@@ -109,7 +109,9 @@ The lead session rules (`lead begin`, roles of your commands, notes) are in
   `$H review-release --state <state>` (under `harness lead drive` only as
   `$H review-release --detach --log <file> --state <state>`: it outlives your
   session, the driver waits for it and wakes you with its result in the
-  state and the log). The release base is recorded at the
+  state and the log; a review that already finished «not approved» returns
+  `exitCode: 3` with the log tail, and a second one beside a running review
+  is refused). The release base is recorded at the
   first graph registration of the release or at `lead outline` (see
   `status` → `releaseReview.base`); pass `--base` only to override it. An independent
   reviewer checks the accepted target against the brief, acceptance criteria,
