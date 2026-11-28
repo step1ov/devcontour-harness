@@ -152,7 +152,13 @@ if (step.spawnHanging) {
 // строка переподключения, до `forMs` (предел на случай, если вызов не
 // остановят), и отказ.
 if (step.reconnectPulses) {
-  const { everyMs, forMs } = step.reconnectPulses;
+  const { everyMs, forMs, toolChild } = step.reconnectPulses;
+  // Команда инструмента ждёт молча (клиент `docker compose` при e2e): живой
+  // потомок без вывода и без расхода процессора (ревью alpha.77 M1).
+  if (toolChild) {
+    const { spawn } = await import('node:child_process');
+    spawn(process.execPath, ['-e', `setTimeout(() => {}, ${forMs + 2000})`], { stdio: 'ignore' });
+  }
   if (runtime === 'codex')
     process.stdout.write(JSON.stringify({ type: 'thread.started', thread_id: sessionId }) + '\n');
   for (let n = 1, end = Date.now() + forMs; Date.now() < end; n++) {

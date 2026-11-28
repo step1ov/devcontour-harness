@@ -20,6 +20,7 @@ import { command } from '../src/environment/process.ts';
 import {
   MAX_CHANGE_RETRIES,
   StallSweep,
+  agentHasToolChild,
   UNMASKED_COMMAND,
   sharedSample,
   parseCpuTime,
@@ -825,4 +826,41 @@ test('runGatesAt: report — зависание видно в результат
   assert.equal(stalled?.action, 'report', JSON.stringify(result.liveness));
   assert.deepEqual(stalled?.activity, { kind: 'gate', label: 'unit' });
   assert.ok(reported.includes('stalled'), 'хост получил переход');
+});
+
+test('ревью alpha.77 M1: агент — корень и цепочка обёрток с именем runtime; потомок агента — команда инструмента', () => {
+  const change = (rows: [number, number, string][]) =>
+    ({
+      command: { pid: 10 },
+      activity: { kind: 'agent', label: 'codex implement' },
+      snapshot: {
+        processes: rows.map(([pid, parentPid, command]) => ({ pid, parentPid, command })),
+        tail: '',
+      },
+    }) as unknown as Parameters<typeof agentHasToolChild>[0];
+  // Обёртка bwrap → npm-shim → бинарь codex, без потомков: простой.
+  assert.equal(
+    agentHasToolChild(
+      change([
+        [10, 1, '/usr/bin/bwrap --ro-bind / / codex exec'],
+        [11, 10, '/usr/local/bin/codex exec'],
+        [12, 11, '/opt/codex-darwin-arm64/codex-darwin-arm64 exec'],
+      ]),
+    ),
+    false,
+  );
+  assert.equal(agentHasToolChild(change([[10, 1, 'codex exec']])), false);
+  // Оболочка инструмента под агентом (docker compose run e2e): ожидание работы.
+  assert.equal(
+    agentHasToolChild(
+      change([
+        [10, 1, 'codex exec'],
+        [13, 10, '/bin/zsh -lc docker compose run e2e'],
+        [14, 13, 'docker compose run e2e'],
+      ]),
+    ),
+    true,
+  );
+  // Без дерева агента — как есть потомок: не останавливать, не зная.
+  assert.equal(agentHasToolChild(change([])), true);
 });

@@ -255,6 +255,40 @@ test(
   },
 );
 
+// Ревью alpha.77 M1: здоровый writer ждёт e2e в Docker — процессор расходуют
+// контейнеры вне его дерева, клиент compose молчит. Эпизоды с живой командой
+// инструмента у агента не считаются; `writerStallEpisodes: 0` — выключено.
+test(
+  'ревью alpha.77 M1: writer с живой командой инструмента не останавливается по эпизодам; writerStallEpisodes 0 — тоже',
+  { timeout: 120_000 },
+  async () => {
+    for (const [toolChild, writerStallEpisodes] of [
+      [true, undefined],
+      [false, 0],
+    ] as const) {
+      const ctx = thin(
+        [{ reconnectPulses: { everyMs: 2000, forMs: 12_000, toolChild } }, rec(implement())],
+        {
+          runtime: 'codex',
+          policy: (p) => {
+            p.stallSweep = {
+              intervalMs: 1000,
+              quietMs: 1000,
+              stalledMs: 1500,
+              action: 'report',
+              ...(writerStallEpisodes === undefined ? {} : { writerStallEpisodes }),
+            };
+          },
+        },
+      );
+      await runAll(ctx);
+      const [first] = ctx.attempts();
+      assert.notEqual(first!.failureKind, 'stalled', `${toolChild}: ${first!.error}`);
+      assert.doesNotMatch(first!.error ?? '', /в одном вызове \d+ раза молчал/);
+    }
+  },
+);
+
 test('падение между update-ref и приёмкой: recovery принимает и убирает дерево работы', async () => {
   const clock = { now: Date.now() };
   const ctx = thin(rec(implement()), { now: () => clock.now });

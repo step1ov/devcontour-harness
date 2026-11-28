@@ -172,7 +172,8 @@ import {
   StallSweep,
   StalledError,
   stallMessage,
-  WRITER_STALL_EPISODES,
+  agentHasToolChild,
+  writerStallEpisodesOf,
   isWriterCall,
   writerStallMessage,
   livenessPayload,
@@ -646,18 +647,23 @@ export class Runner {
     const stalled = change.state === 'stalled';
     // Облегчённый и тонкий режимы: вызов writer, зависший
     // WRITER_STALL_EPISODES раз, останавливается и при `report` (P12-3).
+    // Эпизод с живой командой инструмента у агента (ожидание e2e в Docker)
+    // не считается (ревью alpha.77 M1); `writerStallEpisodes: 0` — выкл.
     let writerEpisodes = 0;
+    const writerLimit = writerStallEpisodesOf(sweep);
     if (
       stalled &&
       sweep.action === 'report' &&
+      writerLimit > 0 &&
       harnessModeOf(this.policy) !== 'strict' &&
       change.command &&
-      isWriterCall(change.activity)
+      isWriterCall(change.activity) &&
+      !agentHasToolChild(change)
     ) {
       if (job.writerStalls?.call !== change.command)
         job.writerStalls = { call: change.command, episodes: new Set() };
       job.writerStalls.episodes.add(change.episode);
-      if (job.writerStalls.episodes.size >= WRITER_STALL_EPISODES)
+      if (job.writerStalls.episodes.size >= writerLimit)
         writerEpisodes = job.writerStalls.episodes.size;
     }
     const action: 'stop' | 'report' = writerEpisodes ? 'stop' : sweep.action;

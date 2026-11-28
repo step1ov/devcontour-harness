@@ -571,6 +571,14 @@ export const executionPolicySchema = z.strictObject({
       quietMs: z.number().int().positive().max(86_400_000).default(180_000),
       stalledMs: z.number().int().positive().max(86_400_000).default(600_000),
       action: z.enum(['stop', 'report']).default('report'),
+      /**
+       * Облегчённый и тонкий режимы: эпизодов зависания одного вызова writer,
+       * после которых controller останавливает его и при `action: report`
+       * (P12-3). Эпизод считается, только когда у агента нет живого
+       * потомка (команды инструмента): ожидание e2e в Docker — не простой.
+       * Нет поля — 3; 0 — не останавливать.
+       */
+      writerStallEpisodes: z.number().int().min(0).max(100).optional(),
     })
     .refine((s) => s.quietMs < s.stalledMs, {
       message: 'stallSweep.quietMs должен быть меньше stalledMs',
@@ -703,6 +711,7 @@ export type StallSweepPolicy = {
   quietMs: number;
   stalledMs: number;
   action: 'stop' | 'report';
+  writerStallEpisodes?: number | undefined;
 };
 /** Действующий обход политики: заданный или умолчание. */
 export const stallSweepOf = (policy: Pick<ExecutionPolicy, 'stallSweep'>): StallSweepPolicy =>
