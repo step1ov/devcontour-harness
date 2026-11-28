@@ -1456,17 +1456,24 @@ test('P10-3: цели драйвера изменились — сессия goa
   env.engine.claim('c1');
   const goalsFile = join(env.dir, 'lead-drive-goals.json');
   assert.ok(!existsSync(goalsFile));
-  const run = async (goals: string, goalsRecord?: false) => {
+  // Сессию ждём по признаку, не по таймеру: под нагрузкой полная проверка
+  // снимала драйвер раньше, чем фальшивый агент записывал сессию.
+  const goalsText = () => (existsSync(goalsFile) ? readFileSync(goalsFile, 'utf8') : '');
+  const run = async (goals: string, goalsRecord?: false, until?: () => boolean) => {
     const abort = new AbortController();
     const { dir, promise } = driveOf(env, goalsRecord === false ? { goalsRecord } : {}, {
       goals,
       signal: abort.signal,
     });
-    setTimeout(() => abort.abort(), 1500);
+    if (until) {
+      const deadline = Date.now() + 15_000;
+      const tick = () => (until() || Date.now() > deadline ? abort.abort() : setTimeout(tick, 50));
+      tick();
+    } else setTimeout(() => abort.abort(), 1500);
     return { dir, data: await promise };
   };
   // Записи нет, а работы уже есть (драйвер прежней версии): цели — новые.
-  const first = await run(GOALS, false);
+  const first = await run(GOALS, false, () => goalsText() !== '');
   assert.deepEqual(
     first.data.sessions.map((x) => x.kind),
     ['goals-changed'],
@@ -1484,7 +1491,8 @@ test('P10-3: цели драйвера изменились — сессия goa
   assert.deepEqual(same.data.sessions, []);
   // Оператор добавил ответы владельца — сессия сразу.
   const answers = GOALS + '\nОтветы владельца: формат приветствия — Hello, <name>!';
-  const changed = await run(answers, false);
+  const before = goalsText();
+  const changed = await run(answers, false, () => goalsText() !== before);
   assert.deepEqual(
     changed.data.sessions.map((x) => x.kind),
     ['goals-changed'],
@@ -1591,7 +1599,13 @@ test('ревью a74 M2 / P12-1: ответ ведущего записан, н�
   );
   const abort = new AbortController();
   const { dir, promise } = driveOf(env, { goalsRecord: false }, { signal: abort.signal });
-  setTimeout(() => abort.abort(), 1500);
+  // По записи сессии, не по таймеру (под нагрузкой 1,5 с не хватало).
+  const deadline = Date.now() + 15_000;
+  const tick = () =>
+    existsSync(join(dir, 'session-1.json')) || Date.now() > deadline
+      ? setTimeout(() => abort.abort(), 300)
+      : setTimeout(tick, 50);
+  tick();
   const data = await promise;
   assert.equal(data.sessions[0]?.kind, 'question');
   const first = await sessionRecord(dir, 1);
